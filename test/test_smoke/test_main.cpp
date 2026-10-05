@@ -1,6 +1,6 @@
 // Proves the harness itself works (shim under make, real Unity under pio test).
 #include <unity.h>
-#include <IceMesh.h>
+#include <IceMesh.h>   // umbrella must compile on its own
 
 void setUp(void) {}
 void tearDown(void) {}
