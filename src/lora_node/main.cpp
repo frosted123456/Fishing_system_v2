@@ -58,6 +58,7 @@
 
 #include "config.h"
 #include "messages.h"
+#include <rx_ring.h>
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI LAYOUT CONSTANTS - 128x64 OLED
@@ -344,6 +345,7 @@ void checkWiFiStatus();
 void verifyWiFiChannel();          // BUG FIX #6: WiFi channel verification
 
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len);
+void loopEspNowRx();
 void onLoRaReceive();
 
 void processEspNowMessage(const uint8_t* data, int len, int rssi);
@@ -594,6 +596,9 @@ void loop() {
   // Handle keyboard input
   loopCardKB();
   loopButton();  // Handle PRG button for silencing
+
+  // ESP-NOW frames queued by the Wi-Fi task callback (C9)
+  if (espNowReady) loopEspNowRx();
 
   // Always process LoRa (even in menus, to not miss alerts)
   loopLoRa();
@@ -2988,11 +2993,21 @@ void setupEspNow() {
   DEBUG_PRINTLN(F("ESP-NOW ready"));
 }
 
+// v2 (C9): the ESP-NOW callback runs in the Wi-Fi task. It only copies the frame into a
+// lock-free ring; processEspNowMessage() runs from loop() (loopEspNowRx). This removes the
+// v1 race where LoRa was driven from the Wi-Fi task while loop() used the radio too.
+static icemesh::RxRing<16, 250> espNowRing;
+
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
-  // Note: ESP-NOW callback runs in WiFi task context (not ISR)
-  // Critical sections cause stack overflow on IDLE task - avoid them here
-  // ESP-NOW callbacks are already serialized by the WiFi driver
-  processEspNowMessage(data, len, 0);
+  espNowRing.push(mac, data, len, 0);   // core 2.x callback gives no RSSI
+}
+
+void loopEspNowRx() {
+  static icemesh::RxRing<16, 250>::Frame f;   // static: 258 B kept off the loop stack
+  uint8_t budget = 8;                          // bounded work per loop() pass
+  while (budget-- && espNowRing.pop(f)) {
+    processEspNowMessage(f.data, f.len, f.rssi);
+  }
 }
 
 void processEspNowMessage(const uint8_t* data, int len, int rssi) {
