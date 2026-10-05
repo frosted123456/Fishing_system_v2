@@ -305,6 +305,14 @@ unsigned long lastLoRaRxTime = 0;   // When last valid packet was received
 DedupeEntry dedupeCache[DEDUP_CACHE_SIZE];
 uint8_t dedupeCacheIdx = 0;
 
+// ISSUE 1 FIX (v2 phase 1, C3): separate relay dedup cache for LoRa aggregates.
+// Key = (origin hub, lora_sequence). Relays no longer overwrite sender_id, so
+// sender_id IS the origin hub. Kept apart from dedupeCache so aggregates neither
+// collide with alert keys nor push alert entries out of the shared ring.
+#define AGG_DEDUP_CACHE_SIZE 32   // 30 s window x 1 aggregate / 6 s = 5 per hub -> room for 6 hubs
+DedupeEntry aggDedupCache[AGG_DEDUP_CACHE_SIZE];
+uint8_t aggDedupCacheIdx = 0;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // FORWARD DECLARATIONS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -345,6 +353,8 @@ void processLoRaMessage(const uint8_t* data, int len, int rssi);
 bool shouldAcceptMessage(uint8_t nodeId, uint16_t seq, uint32_t uptime, uint8_t newFlags);
 bool isDuplicateForRelay(uint8_t nodeId, uint16_t seq);
 void recordForDedup(uint8_t nodeId, uint16_t seq);
+bool isAggregateDuplicate(uint8_t originHub, uint8_t loraSeq);
+void recordAggregateForDedup(uint8_t originHub, uint8_t loraSeq);
 bool canClearFishOn(uint8_t nodeId);
 NodeState* findOrCreateNode(uint8_t nodeId);
 
@@ -2255,6 +2265,12 @@ void processLoRaMessage(const uint8_t* data, int len, int rssi) {
       DEBUG_PRINTF("LoRa AGG from %d: %d nodes, hop=%d, seq=%d\n",
                    msg->sender_id, msg->node_count, msg->hop_count, msg->lora_sequence);
 
+      // ISSUE 1 FIX: sender_id is the ORIGIN hub (relays keep it). Our own aggregate
+      // echoed back by a relay carries our ID - nothing to learn from it, never relay it.
+      if (msg->sender_id == NODE_ID) {
+        break;
+      }
+
       // BUG FIX #13: ALWAYS refresh sender node status on valid aggregate receipt
       // This fixes the "gateway goes offline" bug - the sender's last_seen must be updated
       // regardless of whether individual node entries pass deduplication
@@ -2264,7 +2280,10 @@ void processLoRaMessage(const uint8_t* data, int len, int rssi) {
           senderNode->last_seen = millis();
           senderNode->online = true;
           senderNode->via_lora = true;
-          senderNode->rssi = rssi;
+          // ISSUE 1 FIX: RSSI only describes the origin hub when we heard it directly
+          if (msg->hop_count == 0) {
+            senderNode->rssi = rssi;
+          }
           senderNode->role = msg->sender_role;  // Set sender's role from aggregate
           // BUG FIX #2: AGG_FLAG_NODE_OFFLINE is now in agg_flags, not flags
           // No need to clear it from flags anymore
@@ -2377,13 +2396,13 @@ void processLoRaMessage(const uint8_t* data, int len, int rssi) {
       // All LoRa-capable nodes relay aggregates for true mesh operation
       // This enables redundant paths: GW1 → GW2 → Offshore when GW1 can't reach directly
       if (msg->hop_count < LORA_MAX_HOPS) {
-        // BUG FIX #7: Use network_id + lora_sequence as unique dedup key
-        // (sender_id changes at each hop, so use a combined key)
-        uint16_t dedupKey = (uint16_t)((msg->network_id << 8) | msg->lora_sequence);
-        if (!isDuplicateForRelay(msg->network_id, dedupKey)) {
-          recordForDedup(msg->network_id, dedupKey);
+        // ISSUE 1 FIX: dedup key = (origin hub, lora_sequence). The old key
+        // (network_id, network_id<<8 | lora_sequence) was the same for every hub, so a
+        // hub refused to relay another hub's aggregate whenever their 8-bit counters matched.
+        // sender_id is NOT overwritten any more: it stays the origin hub.
+        if (!isAggregateDuplicate(msg->sender_id, msg->lora_sequence)) {
+          recordAggregateForDedup(msg->sender_id, msg->lora_sequence);
           msg->hop_count++;
-          msg->sender_id = NODE_ID;
           // Recalculate checksum after modification
           msg->checksum = calculateChecksum((uint8_t*)msg, sizeof(LoRaAggregateMessage) - 1);
 
@@ -2821,10 +2840,9 @@ void sendLoRaAggregate() {
 
   msg.checksum = calculateChecksum((uint8_t*)&msg, sizeof(msg) - 1);
 
-  // Record own transmission in relay dedup cache
-  // This prevents us from relaying our own packet if it bounces back via another gateway
-  uint16_t dedupKey = (uint16_t)((msg.network_id << 8) | msg.lora_sequence);
-  recordForDedup(msg.network_id, dedupKey);
+  // Record own transmission (defence in depth: echoes of our own aggregate are
+  // already dropped on receive because sender_id == NODE_ID)
+  recordAggregateForDedup(NODE_ID, msg.lora_sequence);
 
   // Use unified transmit helper with proper TX-complete interrupt handling
   loRaTransmitPacket((uint8_t*)&msg, sizeof(msg), "AGG");
@@ -3411,6 +3429,27 @@ void recordForDedup(uint8_t nodeId, uint16_t seq) {
   dedupeCache[dedupeCacheIdx].sequence = seq;
   dedupeCache[dedupeCacheIdx].received_at = millis();
   dedupeCacheIdx = (dedupeCacheIdx + 1) % DEDUP_CACHE_SIZE;
+}
+
+// ISSUE 1 FIX: aggregate relay dedup, keyed by (origin hub, lora_sequence), 30 s window
+bool isAggregateDuplicate(uint8_t originHub, uint8_t loraSeq) {
+  uint32_t now = millis();
+  for (int i = 0; i < AGG_DEDUP_CACHE_SIZE; i++) {
+    if (aggDedupCache[i].received_at != 0 &&
+        aggDedupCache[i].node_id == originHub &&
+        aggDedupCache[i].sequence == loraSeq &&
+        (now - aggDedupCache[i].received_at) < DEDUP_WINDOW_MS) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void recordAggregateForDedup(uint8_t originHub, uint8_t loraSeq) {
+  aggDedupCache[aggDedupCacheIdx].node_id = originHub;
+  aggDedupCache[aggDedupCacheIdx].sequence = loraSeq;
+  aggDedupCache[aggDedupCacheIdx].received_at = millis() | 1;  // never 0 (0 = empty slot)
+  aggDedupCacheIdx = (aggDedupCacheIdx + 1) % AGG_DEDUP_CACHE_SIZE;
 }
 
 // Update node state (called only after shouldAcceptMessage returns true)
