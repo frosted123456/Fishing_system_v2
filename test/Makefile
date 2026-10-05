@@ -8,13 +8,20 @@ TESTS    := $(patsubst %/,%,$(wildcard test_*/))
 BINS     := $(addprefix bin/,$(TESTS))
 HDRS     := $(wildcard ../lib/IceMesh/src/*.h) shim/unity.h
 
-.PHONY: all clean
+.PHONY: all clean sanitize
 all: $(BINS)
 	@set -e; for t in $(BINS); do echo "=== $$t"; ./$$t; done
 
 bin/%: %/test_main.cpp $(HDRS)
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(INC) $< -o $@
+
+# Same tests at -O0 with AddressSanitizer + UndefinedBehaviorSanitizer
+sanitize:
+	@mkdir -p bin/san; set -e; for t in $(TESTS); do \
+	  $(CXX) -std=c++11 -Wall -Wextra -Werror -pedantic -O0 -g -fsanitize=address,undefined \
+	    -fno-sanitize-recover=all $(INC) $$t/test_main.cpp -o bin/san/$$t; \
+	  echo "=== san/$$t"; ./bin/san/$$t | tail -1; done
 
 clean:
 	rm -rf bin
