@@ -1,0 +1,11 @@
+# build outputs
+build/
+.pio/
+*.bin
+*.elf
+*.map
+test/bin/
+# editors / OS
+.vscode/
+.DS_Store
+Thumbs.db
