@@ -1,6 +1,6 @@
 # Protocol v2 — LoRa mesh core (DRAFT for review)
 
-Status: draft, 2026-10-05. Scope: what phase 1 implements, plus the rules phase 2 will build on
+Status: draft, 2026-10-05 (updated with decisions D1-D7, see decisions.md). Scope: what phase 1 implements, plus the rules phase 2 will build on
 (marked **[P2]**). Nothing here is coded yet. Items marked **DECISION** are Frank's to make.
 
 ## 1. Terms
@@ -62,7 +62,7 @@ Status: draft, 2026-10-05. Scope: what phase 1 implements, plus the rules phase 
     with an `ACK` packet (RELIABLE class, origin = cabin, payload = list of (origin, seq),
     batched ≤ 8 per packet, flooded back like any reliable packet). Originator retries at
     ~2 s / 4 s / 8 s (± 25 % jitter) until ACKed or 3 retries, each retry with the **same seq**.
-  - Aggregates: **no ACK, no retry** (proposal) — the next one 6 s later supersedes it.
+  - Aggregates: **no ACK, no retry** (D5) — the next one 6 s later supersedes it.
   - Relays never retry in phase 1. **[P2]** a relay that does not overhear its parent forwarding
     within one window retries once.
 
@@ -85,7 +85,7 @@ Status: draft, 2026-10-05. Scope: what phase 1 implements, plus the rules phase 
 2. Pass the class filter (3.1 dedup window / 3.2 newest-wins). Duplicates are dropped **before** any
    processing that has side effects (buzzer, alert history).
 3. Process locally (state update, display).
-4. Forward only if `hops < 3` and the role forwards (**DECISION Q8**: should the cabin forward?).
+4. Forward only if `hops < 3` and the role forwards. **The cabin never forwards** (D6).
 5. Forwarded copy: `sender = self`, `hops + 1`, **pushed to the TX queue** with
    `not_before = now + random(0 … 2 × airtime(packet))` — never `delay()`.
 6. **[P2]** only the serving hub forwards a node's traffic; other hubs that heard it hold the copy
@@ -126,25 +126,40 @@ Status: draft, 2026-10-05. Scope: what phase 1 implements, plus the rules phase 
 One focused hole at 50 B/s payload ≈ one 52-byte packet per second ≈ **33 % airtime at SF9,
 10 % at SF7**, doubled per relay hop. This is the data behind DECISION Q2.
 
-## 7. Backward compatibility
+## 7. Backward compatibility (D1 = flag day)
 - ESP-NOW frames (`SensorMessage`, `AlertMessage`, `AckMessage`, …) are **unchanged in phase 1**:
   already-built tip-up nodes keep working without reflashing.
-- LoRa: v1 and v2 boards cannot exchange aggregates/alerts unless a v2 board also speaks v1
-  (**DECISION Q1**).
+- LoRa: all Heltec boards are reflashed together. v2 firmware drops the v1 LoRa packet formats;
+  a stray v1 board should ignore v2 packets (byte 2 = `0xF2`), to be confirmed once on the bench.
+
+## 7b. Stream budget at SF9 (D4)
+- Aggregates become variable length in v2 (8 B header + 1 + 10 B per node): 3 nodes = 39 B =
+  **267 ms** instead of the fixed 108 B / 595 ms of v1.
+- Focus stream sized for SF9 with a **20 % airtime cap per focused hole per hop**:
+
+  | Packet every | Payload | Airtime (SF9) | Duty | Payload rate |
+  |---|---|---|---|---|
+  | 1 s | 40 B | 308 ms | 31 % | 40 B/s — over the cap |
+  | 2 s | 60 B | 411 ms | 21 % | 30 B/s |
+  | 4 s | 120 B | 677 ms | 17 % | 30 B/s |
+
+  → at SF9 a focused hole gets **≈ 25-30 B/s**, i.e. the low half of the 10-50 B/s target, with
+  ~8 pings batched per packet (the display at the cabin lags ~2 s). Fallback (D4): SF7 if bench
+  tests show this is not usable.
 
 ## 8. Open questions
 | # | Question | Owner | My recommendation / note |
 |---|---|---|---|
-| Q1 | Backward compatibility with LoRa boards already built: flag day (reflash all Heltecs) or a v2 build that also parses/sends v1 for a transition? | **Frank** | Flag day is far simpler; tip-up nodes need no reflash in phase 1 either way |
-| Q2 | Switch the network to SF7 during focus (or permanently)? | **Frank** | Numbers in §6. SF7 has ~5 dB less link budget than SF9 (demod SNR limit −7.5 dB vs −12.5 dB) |
+| Q1 | Backward compatibility with LoRa boards already built | **Decided D1** | Flag day |
+| Q2 | Switch the network to SF7 during focus (or permanently)? | **Decided D4**: stay SF9, SF7 as fallback | Numbers in §6. SF7 has ~5 dB less link budget than SF9 (demod SNR limit −7.5 dB vs −12.5 dB) |
 | Q3 | Hub board for sonar hubs: Heltec V3 vs WROOM + LoRa module | **Frank** | Not needed for phase 1 |
 | Q4 | Can every hub reach the cabin directly? | **Frank** | Decides how much phase 2 relaying matters |
-| Q5 | Exact versions: Arduino-ESP32 core (or Heltec package) and RadioLib / U8g2 / ArduinoJson | Frank (to tell me) | Code uses core-2.x APIs. Non-blocking TX needs RadioLib `startTransmit()` + `finishTransmit()` (RadioLib 6.x); I need the version before coding |
+| Q5 | Exact versions | **Decided D3, D7** | core 2.0.17, RadioLib 7.7.1, U8g2 2.36.18, ArduinoJson 6.21.6 |
 | Q6 | Track born/lost as RELIABLE could exceed 32 packets / 30 s per origin. Widen the window to 64 bits, or rate-limit track events? | Frank | 64-bit bitmap costs 4 B per origin; I'd do it |
-| Q7 | Aggregates without ACK/retry (superseded every 6 s) — OK? Your brief lists them under "ACK and retry" | Frank | Retrying a periodic snapshot only adds airtime |
-| Q8 | Should the cabin relay? (v1: yes, everything) | Frank | No — a sink that relays doubles airtime near the cabin |
+| Q7 | Aggregates without ACK/retry | **Decided D5** | |
+| Q8 | Should the cabin relay? | **Decided D6**: no | |
 | Q9 | Integrity: PHY CRC only, or add an app CRC-16 (+2 B/packet)? | Frank | PHY CRC + `ver` + `network_id` is enough; the private sync word 0x34 already filters most other LoRa traffic (not all) |
-| Q10 | Build system for shared code (`common/` used by both sketches + host tests): stay in Arduino IDE (copy step / library) or move to PlatformIO? | Frank | PlatformIO makes shared code + native tests trivial; Arduino IDE works with a small sync script |
+| Q10 | Build system | **Decided D2**: PlatformIO | |
 | Q11 | Phase 5 wants a full sonar page on the onshore hub, but in LR mode it has no AP (L3805-3813) | Frank | Revisit in phase 5 (AP on a second radio, or page on the cabin only) |
 | Q12 | ESP-NOW link quality for serving-hub choice: core 2.x gives no RSSI in the receive callback | phase 2 | promiscuous RX callback or core 3.x |
 | Q13 | Node ID plan: are IDs 1-254 unique across all hubs, nodes, sonar nodes and the cabin? Max nodes per network (v1 `MAX_NODES` 16)? | Frank | |
