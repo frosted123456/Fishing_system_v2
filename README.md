@@ -8,20 +8,25 @@ next to it in `../Fishing_system-main/` for reference; `../open_echo-main/` is t
 - `main` = baseline import of Fishing_system-main, unchanged (commit "Baseline import").
 - `v2/phase1-mesh-core` = phase 1 work (mesh core). Nothing is merged to `main` without review.
 
-## Layout
+## Layout (PlatformIO project, decision D2)
 ```
 Fishing_system_v2/
-├── sensor_node/        tip-up node (ESP32-C3 / WROOM), ESP-NOW + deep sleep   [v1 code]
-├── lora_node/          Heltec WiFi LoRa 32 V3 (SX1262): hub / cabin / relay roles [v1 code]
-├── docs/
-│   ├── architecture_v1.md   map of the existing code (files, loops, TX/RX/relay/dedup)
-│   ├── review_v1_issues.md  the 6 suspected issues + other findings, with line refs
-│   ├── protocol_v2.md       v2 header, traffic classes, dedup rules, queue, open questions
-│   └── phase1_plan.md       proposed phase 1 commits (waiting for approval)
-├── test/               host-side unit tests (plain C++ / g++) — phase 1
-├── tools/              build + consistency scripts — phase 1
-└── reference/          sonar-display-prototype.html (JS reference for the sonar pipeline)
+├── platformio.ini       envs: hub, cabin, relay, sensor_lora (Heltec V3), sensor_c3, sensor_wroom, native
+├── src/
+│   ├── lora_node/       main.cpp + config.h — all LoRa roles (was lora_node.ino)
+│   └── sensor_node/     main.cpp + config.h — tip-up node (was sensor_node.ino)
+├── include/messages.h   single shared copy of the message structs (was duplicated)
+├── lib/IceMesh/         shared mesh core, pure C++ (header, dedup window, stream filter, TX queue)
+├── test/                host unit tests: `pio test -e native` or `make -C test` (plain g++)
+├── docs/                architecture, issue review, protocol v2, phase 1 plan, decisions
+├── tools/               helper scripts
+└── reference/           sonar-display-prototype.html (missing for now)
 ```
+
+## First-time setup (Windows)
+1. Install VS Code, then the "PlatformIO IDE" extension.
+2. File → Open Folder → `Fishing_system_v2`. PlatformIO downloads the pinned toolchain and libraries.
+3. Bottom bar: pick an env (e.g. `env:hub`), then Build (✓) / Upload (→) / Monitor (plug).
 
 ## Roadmap
 1. Mesh core (this branch) · 2. Self-healing · 3. Sonar driver · 4. Sonar processing + modes ·

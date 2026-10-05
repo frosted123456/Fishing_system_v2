@@ -4,30 +4,32 @@
  * For: Heltec WiFi LoRa 32 V3 (ESP32-S3 + SX1262)
  * Roles: SENSOR_LORA, RELAY_LORA, GATEWAY_ONSHORE, GATEWAY_OFFSHORE
  * 
- * ARDUINO IDE SETUP:
- *   Board Manager URL: https://github.com/Heltec-Aaron-Lee/WiFi_Kit_series/releases/download/0.0.9/package_heltec_esp32_index.json
- *   Board: Heltec ESP32 Series → WiFi LoRa 32(V3)
- *   Upload Speed: 921600
- * 
- * LIBRARIES REQUIRED (Tools → Manage Libraries):
- *   - RadioLib by Jan Gromes
- *   - U8g2 by oliver
- *   - ArduinoJson by Benoit Blanchon
- * 
- * CONFIGURATION:
- *   1. Set NODE_ID to unique value (1-254)
- *   2. Set NODE_ROLE to desired role
- *   3. Set HAS_LOCAL_SENSOR true if reed switch attached
+ * BUILD (PlatformIO, see platformio.ini at the project root):
+ *   Board, core and library versions are pinned in platformio.ini.
+ *   Pick the env for the role (hub / cabin / relay / sensor_lora) and set
+ *   NODE_ID, NODE_NAME, NODE_ROLE, HAS_LOCAL_SENSOR there with build_flags.
+ *   The defaults below are only used when build_flags do not set them.
+ *
+ *   (Was lora_node.ino for the Arduino IDE; converted to .cpp on 2026-10-05:
+ *    only #include <Arduino.h> and missing prototypes were added.)
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE CONFIGURATION - CHANGE THESE PER DEVICE
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define NODE_ID             1                     // <<< CHANGE THIS!
+#ifndef NODE_ID
+#define NODE_ID             1                     // <<< CHANGE THIS! (or -D NODE_ID=… in platformio.ini)
+#endif
+#ifndef NODE_NAME
 #define NODE_NAME           "Gateway Ice"         // Name for web UI
+#endif
+#ifndef NODE_ROLE
 #define NODE_ROLE           ROLE_SENSOR_LORA  // See roles below
+#endif
+#ifndef HAS_LOCAL_SENSOR
 #define HAS_LOCAL_SENSOR    true                  // Reed switch attached?
+#endif
 
 /*
  * ROLES:
@@ -41,6 +43,7 @@
 // INCLUDES
 // ═══════════════════════════════════════════════════════════════════════════
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -409,6 +412,14 @@ void recordConfigForDedup(uint8_t originId, uint8_t seq);
 void handleWebRemoteConfig();
 void handleWebApiRemoteConfig();
 void handleWebApiRemoteConfigStatus();
+
+// Prototypes the Arduino IDE generated automatically for the .ino (needed since the move to .cpp)
+bool loRaChannelBusy();
+void updateAlertState();
+void handleWebApiNodeName();
+void handleWebApiSilence();
+void handleResetAllConfirmInput(char key);
+void sendResetAllCommand();
 
 // BUG FIX #17: Battery mV <-> percentage conversion helpers
 // For 3xAA lithium: 4500mV = 100%, 3200mV = 0%

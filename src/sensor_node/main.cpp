@@ -10,36 +10,41 @@
  *   Reed Switch: GPIO (REED_PIN) ←→ GND
  *   Battery: 3x AA Lithium → Buck converter → 3.3V/GND
  * 
- * ARDUINO IDE SETUP:
- *   Board: ESP32C3 Dev Module (or ESP32 Dev Module for WROOM/CAM)
- *   USB CDC On Boot: Enabled
- *   Upload Speed: 921600
- * 
- * CONFIGURATION:
- *   1. Uncomment correct BOARD_* define below
- *   2. Set NODE_ID to unique value (1-254)
- *   3. Set NODE_NAME for web UI display
+ * BUILD (PlatformIO, see platformio.ini at the project root):
+ *   env sensor_c3 (ESP32-C3 Super Mini, USB CDC on boot) or sensor_wroom.
+ *   BOARD_*, NODE_ID and NODE_NAME come from build_flags; the defaults below
+ *   are only used when build_flags do not set them.
+ *
+ *   (Was sensor_node.ino for the Arduino IDE; converted to .cpp on 2026-10-05:
+ *    only #include <Arduino.h> and overridable defines were added.)
  */
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BOARD SELECTION - UNCOMMENT ONE
 // ═══════════════════════════════════════════════════════════════════════════
 
+#if !defined(BOARD_ESP32C3) && !defined(BOARD_ESP32CAM) && !defined(BOARD_ESP32WROOM)
 #define BOARD_ESP32C3
 // #define BOARD_ESP32CAM
 // #define BOARD_ESP32WROOM
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE CONFIGURATION - CHANGE THESE PER DEVICE
 // ═══════════════════════════════════════════════════════════════════════════
 
+#ifndef NODE_ID
 #define NODE_ID     2               // <<< CHANGE THIS! Unique ID (1-254)
+#endif
+#ifndef NODE_NAME
 #define NODE_NAME   "Hole 2"        // Name shown in web UI
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INCLUDES
 // ═══════════════════════════════════════════════════════════════════════════
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
