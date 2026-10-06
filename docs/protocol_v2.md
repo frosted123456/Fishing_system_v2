@@ -86,3 +86,4 @@ loss /64, timing error), hub OLED test screen, serial every 5 s.
 | O5 | 125 kHz modes not offered (would need hopping). |
 | O6 | ESP-NOW RSSI is not available with core 2.x callbacks — node-to-hub link quality is not used yet. |
 | O7 | Capacity (calc., est.): a 96 B slot at SF9/500 reserves ≈ 139 ms → about 6 direct hubs per 1 s frame (beacon ≈ 72 ms, join ≈ 30 ms, margin 40 ms). Allowances are fixed per hub today; for sonar they must follow each hub's need (FOCUS hub large, others small). |
+| O8 | To verify on hardware: TX start latency (log nowUs() around startTransmit), RadioLib 7.7.1 RX IRQ defaults (HeaderValid enabled, DIO1 = RxDone), TCXO delay. A settings save (NVS write) can shift one frame's timing — harmless, only when settings change. |
