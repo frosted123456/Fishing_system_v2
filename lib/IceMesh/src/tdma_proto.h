@@ -4,7 +4,8 @@
 //
 // BEACON / ECHO (chalet, or a relay hub repeating it for hubs that cannot hear the chalet):
 //   [6] flags  [7] cmd  [8] cmd_seq  [9] silence (x10 s)  [10] focus node  [11] frame length (x10 ms)
-//   [12] test mode  [13] n_slots, n x 5 B {kind, owner, mode, allowance, via}
+//   [12] test mode  [13] cmd target  [14] cmd value  [15] network config (transport, ESP-NOW LR, LoRa channel)
+//   [16] n_slots, n x 5 B {kind, owner, mode, allowance, via}
 //   then n_acks, n x 3 B {hub, node, seq}
 // HUB packet: [6] flags, then sections {type u8, len u8, value[len]} until the end.
 // JOIN packet: [6] firmware version.
@@ -23,7 +24,7 @@ static const uint8_t VER = 0xF2;
 static const uint8_t HDR_LEN = 6;
 static const uint8_t MAX_PACKET = 255;
 #ifndef ICEMESH_MAX_SLOTS
-#define ICEMESH_MAX_SLOTS 12    // slots per beacon (tools/sim builds variants with -DICEMESH_MAX_SLOTS=16)
+#define ICEMESH_MAX_SLOTS 16    // slots per beacon: 10 hubs + JOIN + up to 3 echo slots + margin (sim finding S1)
 #endif
 static const uint8_t MAX_SLOTS = ICEMESH_MAX_SLOTS;
 static const uint8_t MAX_ACKS = 16;
@@ -33,7 +34,21 @@ enum PacketType : uint8_t { PT_BEACON = 1, PT_ECHO = 2, PT_HUB = 3, PT_JOIN = 4 
 enum SlotKind : uint8_t { SLOT_ECHO = 1, SLOT_JOIN = 2, SLOT_HUB = 3 };
 
 enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0x04, BF_SONAR_SIM = 0x08 };
-enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1 };
+// Commands (repeated in beacons for a few seconds, executed once per cmd_seq):
+//   CMD_RESET_ALL     reboot every node
+//   CMD_SET_CHANNEL   target = beacons left before the switch, value = LoRa channel index
+//   CMD_SET_RELAY     target = device ID, value = 1 relay on / 0 off (ESP-NOW backbone)
+enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1, CMD_SET_CHANNEL = 2, CMD_SET_RELAY = 3 };
+
+// Network configuration byte, in every beacon (LoRa and ESP-NOW backbone):
+//   bits 0-1 transport (TR_*), bit 2 ESP-NOW long-range rate, bits 4-7 current LoRa channel index
+enum Transport : uint8_t { TR_AUTO = 0, TR_LORA = 1, TR_ESPNOW = 2 };
+inline uint8_t makeNetCfg(uint8_t transport, bool lr, uint8_t channel) {
+  return static_cast<uint8_t>((transport & 3u) | (lr ? 4u : 0u) | ((channel & 15u) << 4));
+}
+inline uint8_t netTransport(uint8_t c) { const uint8_t t = static_cast<uint8_t>(c & 3u); return t > static_cast<uint8_t>(TR_ESPNOW) ? static_cast<uint8_t>(TR_AUTO) : t; }
+inline bool netLr(uint8_t c) { return (c & 4u) != 0; }
+inline uint8_t netChannel(uint8_t c) { return static_cast<uint8_t>(c >> 4); }
 enum TestMode : uint8_t { TEST_OFF = 0, TEST_ROTATE = 1, TEST_FIX_SF9 = 2, TEST_FIX_SF8 = 3, TEST_FIX_SF7 = 4, TEST_MODE_COUNT = 5 };
 
 enum HubFlags : uint8_t { HF_SILENCE_ON = 0x01, HF_SILENCE_OFF = 0x02, HF_PENDING = 0x04 };
@@ -65,6 +80,9 @@ struct Beacon {
   uint8_t focus_node;
   uint8_t frame_10ms;
   uint8_t test_mode;
+  uint8_t cmd_target;
+  uint8_t cmd_value;
+  uint8_t net_cfg;
   uint8_t n_slots;
   Slot slots[MAX_SLOTS];
   uint8_t n_acks;
@@ -86,7 +104,8 @@ inline bool readHeader(const uint8_t* b, size_t len, uint8_t net, Header& h) {
   return h.src != ID_NONE;
 }
 
-inline size_t beaconSize(uint8_t n_slots, uint8_t n_acks) { return 14u + 5u * n_slots + 1u + 3u * n_acks; }
+static const uint8_t BEACON_FIXED = 17;
+inline size_t beaconSize(uint8_t n_slots, uint8_t n_acks) { return BEACON_FIXED + 5u * n_slots + 1u + 3u * n_acks; }
 
 inline size_t encodeBeacon(const Beacon& bc, PacketType type, uint8_t* b, size_t cap) {
   if (bc.n_slots > MAX_SLOTS || bc.n_acks > MAX_ACKS || (type != PT_BEACON && type != PT_ECHO)) return 0;
@@ -94,8 +113,9 @@ inline size_t encodeBeacon(const Beacon& bc, PacketType type, uint8_t* b, size_t
   if (b == nullptr || cap < need) return 0;
   putHeader(b, bc.network_id, type, bc.src, bc.frame);
   b[6] = bc.flags; b[7] = bc.cmd; b[8] = bc.cmd_seq; b[9] = bc.silence_10s;
-  b[10] = bc.focus_node; b[11] = bc.frame_10ms; b[12] = bc.test_mode; b[13] = bc.n_slots;
-  size_t o = 14;
+  b[10] = bc.focus_node; b[11] = bc.frame_10ms; b[12] = bc.test_mode;
+  b[13] = bc.cmd_target; b[14] = bc.cmd_value; b[15] = bc.net_cfg; b[16] = bc.n_slots;
+  size_t o = BEACON_FIXED;
   for (uint8_t i = 0; i < bc.n_slots; i++) {
     const Slot& s = bc.slots[i];
     b[o++] = s.kind; b[o++] = s.owner; b[o++] = s.mode; b[o++] = s.allowance; b[o++] = s.via;
@@ -108,13 +128,14 @@ inline size_t encodeBeacon(const Beacon& bc, PacketType type, uint8_t* b, size_t
 // Accepts BEACON and ECHO. `type` tells which one it was.
 inline bool decodeBeacon(const uint8_t* b, size_t len, uint8_t net, Beacon& bc, PacketType& type) {
   Header h;
-  if (!readHeader(b, len, net, h) || (h.type != PT_BEACON && h.type != PT_ECHO) || len < 15) return false;
+  if (!readHeader(b, len, net, h) || (h.type != PT_BEACON && h.type != PT_ECHO) || len < BEACON_FIXED + 1u) return false;
   type = static_cast<PacketType>(h.type);
   bc.network_id = h.network_id; bc.src = h.src; bc.frame = h.frame;
   bc.flags = b[6]; bc.cmd = b[7]; bc.cmd_seq = b[8]; bc.silence_10s = b[9];
-  bc.focus_node = b[10]; bc.frame_10ms = b[11]; bc.test_mode = b[12]; bc.n_slots = b[13];
+  bc.focus_node = b[10]; bc.frame_10ms = b[11]; bc.test_mode = b[12];
+  bc.cmd_target = b[13]; bc.cmd_value = b[14]; bc.net_cfg = b[15]; bc.n_slots = b[16];
   if (bc.n_slots > MAX_SLOTS || bc.frame_10ms == 0) return false;
-  size_t o = 14;
+  size_t o = BEACON_FIXED;
   if (len < o + 5u * bc.n_slots + 1u) return false;
   for (uint8_t i = 0; i < bc.n_slots; i++) {
     Slot& s = bc.slots[i];

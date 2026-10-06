@@ -53,7 +53,8 @@ struct PlannerConfig {
   bool adaptive;
   uint8_t allowance;        // bytes per hub slot, normal operation
   uint8_t test_allowance;   // bytes per hub slot in test modes
-  uint16_t frame_ms;
+  uint16_t frame_ms;         // shortest frame (normally 1000)
+  uint16_t frame_ms_max;     // longest frame the planner may step up to when the hubs do not fit (2000)
   uint8_t focus_hub;        // hub reporting the FOCUS sonar node (ID_NONE = none)
   uint8_t focus_allowance;  // its slot allowance (est. 180 B = FOCUS stream + line state)
 };
@@ -71,6 +72,9 @@ class ChaletPlanner {
     RELAY_SWITCH_DB = 6,      // est. hysteresis between relay candidates
     DIRECT_HITS_TO_RETURN = 3,// a remote hub needs this many direct receptions in DIRECT_WINDOW to go direct
     JOIN_LEN = 7,
+    KEEP_ALLOWANCE = 64,      // a frame "fits" when every hub keeps at least this many bytes (est.)
+    FRAME_STEP_MS = 500,
+    DOWN_FRAMES = 20,         // beacons in a row where the shorter frame fits before stepping down
     UP_MARGIN_DB = 12,        // est.: step to a faster mode when the weakest of 8 packets keeps this margin
     UP_HOLD_FRAMES = 20,
     DOWN_HOLD_FRAMES = 30,
@@ -81,7 +85,7 @@ class ChaletPlanner {
   ChaletPlanner() {
     memset(&cfg, 0, sizeof(cfg));
     cfg.allowance = 96; cfg.test_allowance = 160; cfg.frame_ms = 1000;
-    cfg.focus_hub = ID_NONE; cfg.focus_allowance = 180;
+    cfg.focus_hub = ID_NONE; cfg.focus_allowance = 180; cfg.frame_ms_max = 2000;
     for (uint8_t i = 0; i < MAX_HUBS; i++) hubs_[i].used = false;
     n_acks_ = 0;
   }
@@ -174,11 +178,13 @@ class ChaletPlanner {
 
   // ---- plan -------------------------------------------------------------------------------
   // Fills slots, acks, test mode and frame length of `bc` for `frame`. Flags/cmd/silence are the caller's.
+  // Frame length: cfg.frame_ms while every hub keeps a slot of >= KEEP_ALLOWANCE bytes; otherwise it steps
+  // up by 500 ms to cfg.frame_ms_max (sim finding S1: 10 hubs at SF9/500 do not fit 1 s). It steps back down
+  // after DOWN_FRAMES beacons in a row where the shorter frame would fit. Hubs follow the beacon's length.
   void buildBeacon(uint16_t frame, Beacon& bc) {
     expire(frame);
     classify(frame);
     bc.network_id = cfg.network_id; bc.src = cfg.self_id; bc.frame = frame;
-    bc.frame_10ms = static_cast<uint8_t>(cfg.frame_ms / 10);
     bc.test_mode = cfg.test_mode;
     // acks
     bc.n_acks = 0;
@@ -186,23 +192,27 @@ class ChaletPlanner {
     for (uint8_t i = 0; i < n_acks_;) {
       if (--acks_[i].ttl == 0) acks_[i] = acks_[--n_acks_]; else i++;
     }
-    uint8_t allow = (cfg.test_mode != TEST_OFF) ? cfg.test_allowance : cfg.allowance;
-    uint8_t focus = (cfg.focus_hub != ID_NONE && cfg.focus_allowance > allow) ? cfg.focus_allowance : allow;
-    for (;;) {
-      fill(frame, bc, allow, focus);
-      const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
-      if (planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL, blen)) break;
-      if (focus > allow + 16) { focus = static_cast<uint8_t>(focus - 16); continue; }   // shrink FOCUS first
-      if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); focus = allow; continue; }
-      while (bc.n_slots > 0 && !planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL,
-                                         static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks)))) {
-        bc.n_slots--;              // last resort: drop the last direct slots
-        dropped_slots_++;
+    const uint16_t fmin = cfg.frame_ms, fmax = cfg.frame_ms_max < cfg.frame_ms ? cfg.frame_ms : cfg.frame_ms_max;
+    if (frame_ms_ < fmin || frame_ms_ > fmax) frame_ms_ = fmin;
+    if (frame_ms_ > fmin) {
+      Beacon probe = bc;
+      const uint16_t shorter = static_cast<uint16_t>(frame_ms_ - FRAME_STEP_MS < fmin ? fmin : frame_ms_ - FRAME_STEP_MS);
+      if (plan(frame, probe, shorter, nullptr)) {
+        if (++down_streak_ >= DOWN_FRAMES) { frame_ms_ = shorter; down_streak_ = 0; }
+      } else {
+        down_streak_ = 0;
       }
-      break;
     }
+    uint8_t allow = 0;
+    while (!plan(frame, bc, frame_ms_, nullptr) && frame_ms_ < fmax) {
+      frame_ms_ = static_cast<uint16_t>(frame_ms_ + FRAME_STEP_MS > fmax ? fmax : frame_ms_ + FRAME_STEP_MS);
+      down_streak_ = 0;
+    }
+    plan(frame, bc, frame_ms_, &allow);
+    bc.frame_10ms = static_cast<uint8_t>(frame_ms_ / 10);
     last_allowance_ = allow;
   }
+  uint16_t frameMs() const { return frame_ms_; }
 
   // ---- read access ------------------------------------------------------------------------
   const HubInfo* hubAt(uint8_t i) const { return (i < MAX_HUBS && hubs_[i].used) ? &hubs_[i] : nullptr; }
@@ -298,6 +308,33 @@ class ChaletPlanner {
     }
   }
 
+  // One plan for a frame of `fm` ms: shrink FOCUS, then all allowances, then drop the last slots.
+  // Returns true when nothing was dropped and the allowance stayed >= KEEP_ALLOWANCE.
+  // allow_out != nullptr: final plan (counts dropped slots).
+  bool plan(uint16_t frame, Beacon& bc, uint16_t fm, uint8_t* allow_out) {
+    const uint32_t fus = static_cast<uint32_t>(fm) * 1000UL;
+    uint8_t allow = (cfg.test_mode != TEST_OFF) ? cfg.test_allowance : cfg.allowance;
+    uint8_t focus = (cfg.focus_hub != ID_NONE && cfg.focus_allowance > allow) ? cfg.focus_allowance : allow;
+    bool dropped = false;
+    for (;;) {
+      fill(frame, bc, allow, focus);
+      const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
+      const bool fits = planFits(bc.slots, bc.n_slots, fus, blen);
+      if (fits && !full_) break;
+      if (fits && full_) { dropped = true; break; }  // fits, but a hub found no slot (beacon full: MAX_SLOTS)
+      if (focus > allow + 16) { focus = static_cast<uint8_t>(focus - 16); continue; }   // shrink FOCUS first
+      if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); focus = allow; continue; }
+      while (bc.n_slots > 0 && !planFits(bc.slots, bc.n_slots, fus, static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks)))) {
+        bc.n_slots--;              // last resort: drop the last direct slots
+        dropped = true;
+        if (allow_out) dropped_slots_++;
+      }
+      break;
+    }
+    if (allow_out) *allow_out = allow;
+    return !dropped && allow >= KEEP_ALLOWANCE;
+  }
+
   void fill(uint16_t frame, Beacon& bc, uint8_t allow, uint8_t focus) {
     bc.n_slots = 0;
     uint8_t relays[MAX_RELAYS]; uint8_t n_relays = 0;
@@ -338,6 +375,15 @@ class ChaletPlanner {
       if (a > MAX_PACKET) a = MAX_PACKET;
       push(bc, SLOT_HUB, h.id, directModeFor(h, idx++, frame), static_cast<uint8_t>(a), 0);
     }
+    // any known hub left without a slot because the beacon is full?
+    full_ = false;
+    for (uint8_t i = 0; i < MAX_HUBS && !full_; i++) {
+      const HubInfo& h = hubs_[i];
+      if (!h.used) continue;
+      bool in = false;
+      for (uint8_t s = 0; s < bc.n_slots && !in; s++) in = bc.slots[s].kind == SLOT_HUB && bc.slots[s].owner == h.id;
+      if (!in) full_ = bc.n_slots >= MAX_SLOTS;
+    }
     // echo allowance = beacon length (known now that slots and acks are set)
     const uint8_t blen = static_cast<uint8_t>(beaconSize(bc.n_slots, bc.n_acks));
     for (uint8_t s = 0; s < bc.n_slots; s++) if (bc.slots[s].kind == SLOT_ECHO) bc.slots[s].allowance = blen;
@@ -367,6 +413,9 @@ class ChaletPlanner {
   PendingAck acks_[MAX_ACKS];
   uint8_t n_acks_;
   uint8_t last_allowance_ = 0;
+  uint16_t frame_ms_ = 0;
+  uint16_t down_streak_ = 0;
+  bool full_ = false;
   uint32_t dropped_slots_ = 0;
 };
 

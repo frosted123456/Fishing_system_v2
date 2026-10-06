@@ -42,11 +42,24 @@ class HubRole {
   int8_t beacon_snr_q4 = 0;
   uint32_t beacons_rx = 0, echoes_rx = 0;
   uint8_t last_cmd_seq = 0;
+  uint8_t last_cmd_target = 0, last_cmd_value = 0;   // arguments of the last command returned by onBeacon/onEbBeacon
   sonar::SonarOutbox sonar;   // blocks waiting for this hub's slot
 
-  // Chalet requests carried by the plan
-  uint8_t focusNode() const { return have_plan ? plan.focus_node : 0; }
-  bool sonarSim() const { return have_plan && (plan.flags & BF_SONAR_SIM) != 0; }
+  // Chalet state from the latest beacon, LoRa or ESP-NOW backbone (whichever came last)
+  bool have_info = false;
+  uint8_t info_flags = 0, info_focus = 0, info_net_cfg = 0, info_test = 0;
+  uint16_t info_frame = 0;
+  uint32_t eb_beacons_rx = 0;
+  // LoRa channel switch announced by the chalet (CMD_SET_CHANNEL)
+  bool channel_switch_pending = false;
+  uint8_t channel_next = 0;
+  uint16_t channel_switch_frame = 0;   // first frame on the new channel
+
+  uint8_t focusNode() const { return have_info ? info_focus : 0; }
+  bool sonarSim() const { return have_info && (info_flags & BF_SONAR_SIM) != 0; }
+  bool silenced() const { return have_info && (info_flags & BF_SILENCED) != 0; }
+  uint8_t transport() const { return have_info ? netTransport(info_net_cfg) : static_cast<uint8_t>(TR_AUTO); }
+  bool espNowLr() const { return have_info && netLr(info_net_cfg); }
 
   HubRole() { memset(&plan, 0, sizeof(plan)); resetFrameScratch(); n_joins_ = 0; n_nb_last_ = 0; nodeinfo_idx_ = 0; }
 
@@ -81,9 +94,18 @@ class HubRole {
     fresh_beacon_ = true;
     echo_src = (t == PT_ECHO) ? b.src : 0;
     beacon_rssi = rssi; beacon_snr_q4 = snr_q4;
-    applyAcks(plan, self, table);
-    if (plan.cmd != CMD_NONE && plan.cmd_seq != last_cmd_seq) { last_cmd_seq = plan.cmd_seq; cmd_out = plan.cmd; }
+    applyInfo(plan, cmd_out);
     resetFrameScratch();
+    return true;
+  }
+
+  // Chalet beacon received over the ESP-NOW backbone (no slots, no timing): acks, commands, flags.
+  bool onEbBeacon(const uint8_t* p, size_t len, uint8_t& cmd_out) {
+    cmd_out = CMD_NONE;
+    Beacon b; PacketType t;
+    if (!decodeBeacon(p, len, network_id, b, t) || t != PT_BEACON) return false;
+    eb_beacons_rx++;
+    applyInfo(b, cmd_out);
     return true;
   }
 
@@ -168,6 +190,32 @@ class HubRole {
     return r.len;
   }
 
+  // Hub packet for the ESP-NOW backbone: same content as the slot packet (line state first, sonar,
+  // node info, health every HEALTH_EVERY packets) without a slot plan; `cap` <= EB payload.
+  size_t buildHubFree(uint8_t* buf, size_t cap, uint8_t flags, uint16_t battery_mv, uint16_t uptime_min, uint16_t frame) {
+    Health h;
+    memset(&h, 0, sizeof(h));
+    const bool with_health = (eb_count_++ % HEALTH_EVERY) == 0;
+    if (with_health) {
+      h.battery_mv = battery_mv; h.uptime_min = uptime_min; h.fw = fw;
+      h.beacon_rssi = beacon_rssi; h.beacon_snr_q4 = beacon_snr_q4; h.beacon_lost = sync.lostLast64();
+      h.n_nb = n_nb_last_;
+      memcpy(h.nb, nb_last_, sizeof(Neighbor) * n_nb_last_);
+    }
+    HubBuild in;
+    memset(&in, 0, sizeof(in));
+    in.network_id = network_id; in.self = self; in.frame = frame; in.flags = flags;
+    in.allowance = static_cast<uint8_t>(cap > MAX_PACKET ? MAX_PACKET : cap);
+    in.health = with_health ? &h : nullptr;
+    in.nodeinfo_start = nodeinfo_idx_;
+    in.line_rot = line_rot_;
+    in.sonar = &sonar;
+    const HubBuildResult r = buildHubPacket(in, table, buf, cap);
+    nodeinfo_idx_ = r.nodeinfo_next;
+    line_rot_ = r.line_rot_next;
+    return r.len;
+  }
+
   // ---- packets heard in slot i ------------------------------------------------------------
   void onSlotPacket(uint8_t i, const uint8_t* p, size_t len, int8_t rssi, int8_t snr_q4) {
     Header h;
@@ -204,6 +252,20 @@ class HubRole {
  private:
   void resetFrameScratch() { n_relayed_ = 0; n_nb_cur_ = 0; }
 
+  // Shared by the LoRa beacon/echo and the ESP-NOW backbone beacon.
+  void applyInfo(const Beacon& b, uint8_t& cmd_out) {
+    applyAcks(b, self, table);
+    have_info = true;
+    info_flags = b.flags; info_focus = b.focus_node; info_net_cfg = b.net_cfg; info_test = b.test_mode; info_frame = b.frame;
+    if (b.cmd != CMD_NONE && b.cmd_seq != last_cmd_seq) {
+      last_cmd_seq = b.cmd_seq; cmd_out = b.cmd; last_cmd_target = b.cmd_target; last_cmd_value = b.cmd_value;
+      if (b.cmd == CMD_SET_CHANNEL) {
+        channel_switch_pending = true; channel_next = b.cmd_value;
+        channel_switch_frame = static_cast<uint16_t>(b.frame + b.cmd_target + 1);
+      }
+    }
+  }
+
   void addJoin(uint8_t src) {
     for (uint8_t k = 0; k < n_joins_; k++) if (joins_[k] == src) return;
     if (n_joins_ < MAX_JOINS) joins_[n_joins_++] = src;
@@ -223,6 +285,7 @@ class HubRole {
   uint8_t nodeinfo_idx_;
   uint8_t line_rot_ = 0;
   bool fresh_beacon_ = false;
+  uint32_t eb_count_ = 0;
 };
 
 }  // namespace tdma

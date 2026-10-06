@@ -51,5 +51,13 @@ inline LoRaPhy modePhy(RadioMode m) {
 
 inline uint32_t modeAirtimeUs(RadioMode m, uint16_t len) { return airtimeUs(len, modePhy(m)); }
 
+// LoRa channels (500 kHz, inside 902-928 MHz with margin). Index 0 = the v2 default 915.0 MHz.
+// The chalet picks one (quietest at start-up, or set from the phone); hubs search them in this order.
+static const uint8_t LORA_CHANNELS = 8;
+inline float loraChannelMHz(uint8_t ch) {
+  static const float f[LORA_CHANNELS] = {915.0f, 904.0f, 907.0f, 910.0f, 913.0f, 918.0f, 921.0f, 924.0f};
+  return f[ch < LORA_CHANNELS ? ch : 0];
+}
+
 }  // namespace icemesh
 #endif

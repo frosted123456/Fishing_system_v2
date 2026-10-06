@@ -14,6 +14,7 @@ static Beacon sampleBeacon() {
   memset(&b, 0, sizeof(b));
   b.network_id = 0x42; b.src = 100; b.frame = 0xBEEF; b.flags = BF_TEST | BF_SILENCED; b.cmd = CMD_RESET_ALL;
   b.cmd_seq = 7; b.silence_10s = 30; b.focus_node = 12; b.frame_10ms = 100; b.test_mode = TEST_ROTATE;
+  b.cmd_target = 4; b.cmd_value = 6; b.net_cfg = makeNetCfg(TR_ESPNOW, true, 5);
   b.n_slots = 3;
   b.slots[0] = {SLOT_ECHO, 2, MODE_SF9_BW500, 40, 0};
   b.slots[1] = {SLOT_JOIN, 0, MODE_SF9_BW500, 7, 0};
@@ -29,7 +30,7 @@ static void test_beacon_round_trip(void) {
   const Beacon b = sampleBeacon();
   const size_t n = encodeBeacon(b, PT_BEACON, buf, sizeof buf);
   TEST_ASSERT_EQUAL(beaconSize(3, 2), n);
-  TEST_ASSERT_EQUAL(14 + 15 + 1 + 6, n);
+  TEST_ASSERT_EQUAL(17 + 15 + 1 + 6, n);
   Beacon d; PacketType t;
   TEST_ASSERT_TRUE(decodeBeacon(buf, n, 0x42, d, t));
   TEST_ASSERT_EQUAL(PT_BEACON, t);
@@ -38,6 +39,8 @@ static void test_beacon_round_trip(void) {
   TEST_ASSERT_EQUAL(BF_TEST | BF_SILENCED, d.flags);
   TEST_ASSERT_EQUAL(CMD_RESET_ALL, d.cmd);
   TEST_ASSERT_EQUAL(12, d.focus_node);
+  TEST_ASSERT_EQUAL(4, d.cmd_target); TEST_ASSERT_EQUAL(6, d.cmd_value);
+  TEST_ASSERT_EQUAL(TR_ESPNOW, netTransport(d.net_cfg)); TEST_ASSERT_TRUE(netLr(d.net_cfg)); TEST_ASSERT_EQUAL(5, netChannel(d.net_cfg));
   TEST_ASSERT_EQUAL(3, d.n_slots);
   TEST_ASSERT_EQUAL(SLOT_HUB, d.slots[2].kind);
   TEST_ASSERT_EQUAL(2, d.slots[2].via);
