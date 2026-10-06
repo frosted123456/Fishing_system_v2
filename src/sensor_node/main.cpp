@@ -1158,7 +1158,18 @@ void sonarLoop() {
   while (millis() - lastTick >= 250UL) {                                     // 4 pings/s
     lastTick += 250UL;
     icemesh::sonar::Block out[2];
-    const uint8_t n = src.tick(focus == NODE_ID, out, 2);
+    static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0;
+    const uint32_t t0 = micros();
+    const uint8_t n = src.tick(focus == NODE_ID, out, 2);   // fake raw ping -> processing -> blocks
+    const uint32_t dt = micros() - t0;
+    if (dt > usMax) usMax = dt;
+    usSum += dt; cnt++;
+    if (millis() - lastReport >= 60000UL) {
+      lastReport = millis();
+      DEBUG_PRINTF("Sonar sim: %s, ping cost avg %lu us max %lu us\n", focus == NODE_ID ? "FOCUS" : "base",
+                   (unsigned long)(usSum / cnt), (unsigned long)usMax);
+      usMax = 0; usSum = 0; cnt = 0;
+    }
     for (uint8_t i = 0; i < n; i++) {
       uint8_t frame[3 + icemesh::sonar::MAX_BLOCK];
       frame[0] = NETWORK_ID; frame[1] = NODE_ID; frame[2] = MSG_SONAR;

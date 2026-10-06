@@ -744,9 +744,9 @@ String meshSonarListJson() {
       const sonar::NodeSonar& ns = copy[i];
       char b[200];
       snprintf(b, sizeof(b),
-               "%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s}",
+               "%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"hard\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s}",
                i ? "," : "", ns.node, ns.hub, static_cast<int>(static_cast<int16_t>(g_frame - ns.frame)), ns.sum.ping,
-               ns.sum.bottom_cm, ns.sum.n_targets, ns.sum.nearest_cm, ns.sum.nearest_level, ns.sum.activity,
+               ns.sum.bottom_cm, ns.sum.hard, ns.sum.n_targets, ns.sum.nearest_cm, ns.sum.nearest_level, ns.sum.activity,
                ns.bg_ver, ns.bg_mask, ns.has_sum ? "true" : "false");
       s += b;
     }
@@ -758,7 +758,8 @@ String meshSonarListJson() {
   return s;
 }
 
-// {"node":N,"last":seq,"pings":[[seq,index,bottom,[[track,depth,level,width],..],[[bin,level],..]],..]}
+// {"node":N,"last":seq,"pings":[[seq,index,bottom,[[track,depth,strength,width],..],[[bin,level],..],hard,nf_neg,
+//                                 [[track,flick_q,spread_q,elen,mature],..]],..]}   (see sonar_codec.h for units)
 String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings) {
   String s;
   if (g_sonar == nullptr) return F("{\"pings\":[]}");
@@ -775,7 +776,7 @@ String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings) {
     n = static_cast<uint16_t>(n - skip);
     last = g_sonar->lastSeq();
   }
-  s.reserve(80 + n * 70);
+  s.reserve(80 + n * 110);
   s = "{\"node\":"; s += node; s += ",\"last\":"; s += last; s += ",\"pings\":[";
   for (uint16_t i = 0; i < n; i++) {
     const sonar::Ping& p = copy[i].p;
@@ -783,12 +784,19 @@ String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings) {
     snprintf(b, sizeof(b), "%s[%lu,%u,%u,[", i ? "," : "", static_cast<unsigned long>(copy[i].seq), p.index, p.bottom_cm);
     s += b;
     for (uint8_t k = 0; k < p.n_targets; k++) {
-      snprintf(b, sizeof(b), "%s[%u,%u,%u,%u]", k ? "," : "", p.t[k].track, p.t[k].depth_cm, p.t[k].level, p.t[k].width);
+      snprintf(b, sizeof(b), "%s[%u,%u,%u,%u]", k ? "," : "", p.t[k].track, p.t[k].depth_cm, p.t[k].strength, p.t[k].width);
       s += b;
     }
     s += "],[";
     for (uint8_t k = 0; k < p.n_resid; k++) {
       snprintf(b, sizeof(b), "%s[%u,%u]", k ? "," : "", p.r[k].bin, p.r[k].level);
+      s += b;
+    }
+    snprintf(b, sizeof(b), "],%u,%u,[", copy[i].hard, copy[i].nf_neg);
+    s += b;
+    for (uint8_t k = 0; k < copy[i].n_info; k++) {
+      const sonar::TrackInfo& x = copy[i].info[k];
+      snprintf(b, sizeof(b), "%s[%u,%u,%u,%u,%u]", k ? "," : "", x.track, x.flick_q, x.spread_q, x.elen, x.mature ? 1 : 0);
       s += b;
     }
     s += "]]";

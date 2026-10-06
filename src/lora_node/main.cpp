@@ -342,6 +342,7 @@ void verifyWiFiChannel();          // BUG FIX #6: WiFi channel verification
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len);
 void loopEspNowRx();
 volatile bool sonarCtrlKick = false;
+uint32_t sonarTickUsMax = 0, sonarTickUsSum = 0, sonarTickCount = 0;   // hub: CPU cost of one fake ping (scene + processing + codec)
 void meshLoop();
 void meshSyncNodesNow();
 int findNodeIndexForMesh(uint8_t nodeId);
@@ -2584,11 +2585,15 @@ void checkSerialWifiConfig() {
   } else if (line.startsWith("SIMNODES")) {
     String a = line.substring(8); a.trim();
     const int n = a.toInt();
-    if (currentRole != ROLE_GATEWAY_OFFSHORE && a.length() > 0 && n >= 0 && n <= 4) {
+    if (currentRole != ROLE_GATEWAY_OFFSHORE && a.length() == 0) {
+      Serial.printf("Virtual sonar nodes: %u (test mode %s), fake ping cost avg %lu us, max %lu us over %lu pings\n",
+                    settings.sonarVirtualNodes, meshSonarSim() ? "on" : "off",
+                    (unsigned long)(sonarTickCount ? sonarTickUsSum / sonarTickCount : 0), (unsigned long)sonarTickUsMax, (unsigned long)sonarTickCount);
+    } else if (currentRole != ROLE_GATEWAY_OFFSHORE && n >= 0 && n <= 4) {
       settings.sonarVirtualNodes = (uint8_t)n; saveSettings();
       Serial.printf("Virtual sonar nodes on this hub: %d (IDs from %u)\n", n, meshSonarVirtualId(NODE_ID, 0));
     } else {
-      Serial.println(F("Usage (hub only): SIMNODES 0-4"));
+      Serial.println(F("Usage (hub only): SIMNODES 0-4 (no number = stats)"));
     }
   } else if (line == "RADIO") {
     meshPrintStatus(Serial);
@@ -4720,7 +4725,7 @@ load();setInterval(load,2000);
 //           sonar control broadcast to the tip-up nodes (sim switch + FOCUS node).
 //   Chalet: /sonar page (hole grid, waterfall + flasher of the FOCUS hole) and its API.
 // =============================================================================================
-static icemesh::sonar::SonarSource* sonarVirt = nullptr;   // up to 4, allocated on first use
+static icemesh::sonar::SonarSource* sonarVirt = nullptr;   // up to 4, allocated on first use (~15 KB each)
 
 static void sendSonarCtrl(bool sim, uint8_t focus) {
   SonarCtrlMessage m;
@@ -4776,7 +4781,11 @@ void sonarHubLoop() {
     lastTick += 250UL;
     for (uint8_t k = 0; k < activeVirt; k++) {
       icemesh::sonar::Block out[2];
+      const uint32_t t0 = micros();
       const uint8_t n = sonarVirt[k].tick(focus == sonarVirt[k].node(), out, 2);
+      const uint32_t dt = micros() - t0;
+      if (dt > sonarTickUsMax) sonarTickUsMax = dt;
+      sonarTickUsSum += dt; sonarTickCount++;
       for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     }
   }
@@ -4818,121 +4827,550 @@ void handleWebApiSonarBg() {
   server.send(200, "application/json", meshSonarBgJson((uint8_t)node));
 }
 
-void handleWebSonar() {
-  String html = F(R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Sonar</title>
+// /sonar page: layout, colours and drawing from Frank's prototype (docs/prototype/sonar_display_prototype.html),
+// fed by /api/sonar*. Kept in flash and sent without a RAM copy (~35 KB). No web fonts: the chalet AP has no internet.
+static const char SONAR_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sonar</title>
 <style>
-:root{--bg:#0b0f17;--card:#151c28;--line:#263043;--txt:#e8edf4;--mut:#8a97ab;--l1:#2ecc40;--l2:#ff9800;--l3:#ff1744;--acc:#4fc3f7}
-*{box-sizing:border-box}body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--txt);margin:0;padding:12px}
-header{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:10px}h3{margin:0;font-size:18px}
-a{color:var(--acc)}.mut{color:var(--mut);font-size:12px}label{font-size:14px}
-.sim{background:#3a2a00;color:#ffcc66;border:1px solid #6b4e00;border-radius:4px;padding:1px 6px;font-size:12px;font-weight:600}
-#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px;cursor:pointer;min-height:96px}
-.card.foc{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset}.card.fish{border-color:var(--l3);background:#2a0f16}
-.card .t{display:flex;justify-content:space-between;font-weight:600;font-size:14px}.card .s{font-size:12px;color:var(--mut);margin-top:4px}
-.big{font-size:20px;font-weight:700;margin-top:4px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px}
-.bar{height:5px;background:#222b3a;border-radius:3px;margin-top:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--l1)}
-.badge{font-size:11px;padding:1px 5px;border-radius:4px;background:#263043}.badge.f{background:var(--l3);color:#fff}.badge.o{background:#444;color:#aaa}
-#fp{margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
-.fh{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin-bottom:6px}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}
-#wfw{flex:1 1 300px;min-width:0;position:relative}#wf{width:100%;height:320px;display:block;background:#001020;border-radius:4px}
-#sc{position:absolute;right:2px;top:0;bottom:0;font-size:10px;color:#9fb3c8;pointer-events:none;white-space:nowrap}
-#fl{width:240px;height:240px;flex:0 0 auto;margin:auto}button{font-size:14px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:#1d2636;color:var(--txt)}
-.lg span{margin-right:10px;font-size:12px}
-</style></head><body>
-<header><h3>Sonar</h3><span id="simb" class="sim" hidden>TEST MODE: FAKE DATA</span>
-<label><input type="checkbox" id="sim"> sonar test mode</label><span id="st" class="mut"></span><a href="/">back</a></header>
-<div class="mut" id="hint">Tap a hole to stream it (FOCUS). Other holes send a summary every ~4 s.</div>
-<div id="grid"></div>
-<section id="fp" hidden>
- <div class="fh"><b id="ft"></b><span id="fi" class="mut"></span><button id="fx">Stop focus</button></div>
- <div class="row"><div id="wfw"><canvas id="wf"></canvas><div id="sc"></div></div><canvas id="fl" width="480" height="480"></canvas></div>
- <div class="lg mut"><span><i class="dot" style="background:var(--l1)"></i>weak</span><span><i class="dot" style="background:var(--l2)"></i>medium</span>
- <span><i class="dot" style="background:var(--l3)"></i>strong</span><span>dim = background (bottom, weeds)</span><span>white = bait/lure (track 0)</span></div>
-</section>
+:root{
+  --bg:#EEF3F4; --surface:#FFFFFF; --ink:#13262D; --muted:#55707A; --line:#D2DEE2; --chip:#E1EAEC;
+  --accent:#1C6C77; --accent-ink:#FFFFFF; --alert:#C2412D; --alert-ink:#FFFFFF;
+  --water:#0A1E26; --water-2:#0F2A33; --water-ink:#D7E6EA; --water-muted:#86A2AB; --water-line:#1C3B46;
+  color-scheme:light; box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
+    --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
+  --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Barlow Semi Condensed","Arial Narrow","Roboto Condensed",system-ui,sans-serif;
+  font-size:16px;line-height:1.4;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+a{color:var(--accent)}
+.top{max-width:1240px;margin:0 auto;padding:14px 14px 6px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;align-items:end}
+.top h1{margin:0;font-size:2rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
+.top .sub{margin:4px 0 0;color:var(--muted);font-size:.98rem}
+.playback{display:flex;gap:6px;align-items:center}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;min-height:40px;min-width:44px;font-weight:600;cursor:pointer}
+.seg{display:inline-flex;background:var(--chip);border-radius:12px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;color:var(--muted);padding:7px 14px;border-radius:9px;min-height:38px;font-weight:600;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.modebar{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+.hint{color:var(--muted);font-size:.92rem}
+.simb{background:#F2C94C;color:#3A2A00;border-radius:6px;padding:2px 8px;font-weight:700;font-size:.85rem;letter-spacing:.02em}
+.tog{display:inline-flex;align-items:center;gap:8px;font-weight:600}
+.grid{max-width:1240px;margin:0 auto;padding:8px 12px 24px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr);
+  grid-template-areas:"holes" "inst" "fall" "tgt" "echo" "ctrl" "note"}
+@media (min-width:920px){
+  .grid{grid-template-columns:350px minmax(0,1fr);grid-template-areas:"holes holes" "inst fall" "tgt fall" "echo ctrl" "note note";align-items:start}
+}
+.grid.nofocus .inst,.grid.nofocus .fall,.grid.nofocus .tgt,.grid.nofocus .echo,.grid.nofocus .ctrl{display:none}
+.water{background:var(--water);color:var(--water-ink);border-radius:18px;padding:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px}
+.card h2,.water h2{margin:0 0 8px;font-size:1.15rem;font-weight:600;letter-spacing:.005em}
+.water h2{color:var(--water-ink)}
+.muted{color:var(--muted)}
+/* Holes */
+.holes{grid-area:holes}
+.hgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+.hole{display:grid;gap:2px;text-align:left;border:1px solid var(--line);background:transparent;border-radius:12px;padding:10px;cursor:pointer;min-height:104px}
+.hole[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.hole.fish{border-color:var(--alert);box-shadow:inset 0 0 0 1px var(--alert)}
+.hole .hd{display:flex;justify-content:space-between;gap:6px;align-items:baseline;font-weight:600}
+.hole .big{font-size:1.3rem;font-weight:700;line-height:1.15}
+.hole .sm{color:var(--muted);font-size:.88rem;line-height:1.25}
+.badge{font-size:.78rem;font-weight:700;padding:1px 7px;border-radius:6px;background:var(--chip);color:var(--muted);white-space:nowrap}
+.badge.on{background:var(--accent);color:var(--accent-ink)}.badge.al{background:var(--alert);color:var(--alert-ink)}
+.act{height:5px;background:var(--chip);border-radius:3px;overflow:hidden;margin-top:4px}.act i{display:block;height:100%;background:var(--accent)}
+.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:baseline}
+/* Instrument */
+.inst{grid-area:inst}
+.flash-wrap{position:relative;width:100%;max-width:330px;margin:0 auto;aspect-ratio:1/1}
+.flash-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
+.readouts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px;border-top:1px solid var(--water-line);padding-top:10px}
+.readouts div{min-width:0}
+.readouts span{display:block;color:var(--water-muted);font-size:.85rem}
+.readouts strong{display:block;font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Waterfall */
+.fall{grid-area:fall}
+.fall-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fall-head p{margin:0;color:var(--water-muted);font-size:.9rem}
+.stack{position:relative;height:clamp(300px,56vh,560px);border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
+.stack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.zoom-head{display:flex;justify-content:space-between;align-items:baseline;margin:12px 0 6px;color:var(--water-muted);font-size:.9rem}
+.zoom-head strong{color:var(--water-ink);font-weight:600}
+.zstack{position:relative;height:108px;border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
+.zstack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:.88rem;color:var(--water-muted)}
+.legend i{display:inline-block;width:18px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}
+/* Targets */
+.tgt{grid-area:tgt}
+.tlist{display:grid;gap:6px}
+.trow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 10px;align-items:center;text-align:left;width:100%;border:1px solid var(--line);background:transparent;border-radius:10px;padding:8px 10px;cursor:pointer}
+.trow[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.trow .dot{width:12px;height:12px;border-radius:50%}
+.trow .nm{font-weight:600}.trow .dp{font-weight:600;justify-self:end}
+.trow .meta{grid-column:2/4;color:var(--muted);font-size:.9rem}
+.empty{margin:0;color:var(--muted)}
+/* Echo */
+.echo{grid-area:echo}
+.echo .who{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.echo .who strong{font-size:1.1rem}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;margin:10px 0 0}
+.metrics div{min-width:0}
+.metrics dt{color:var(--muted);font-weight:500;font-size:.9rem}
+.metrics dd{margin:0;color:var(--muted);font-size:.9rem;line-height:1.25}
+.metrics dd b{display:block;color:var(--ink);font-weight:700;font-size:1.25rem;line-height:1.15}
+.read{margin:12px 0 0;padding:10px 12px;border-radius:10px;background:var(--chip);line-height:1.35}
+.small{font-size:.85rem;color:var(--muted);margin:8px 0 0}
+/* Controls */
+.ctrl{grid-area:ctrl}
+.toggles{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.toggles li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.toggles li:last-child{border-bottom:0}
+.toggles .name{font-weight:600}
+.toggles .desc{grid-column:1;color:var(--muted);font-size:.9rem;line-height:1.3}
+.switch{grid-row:1/3;grid-column:2;width:48px;height:28px;border-radius:14px;border:0;background:var(--line);position:relative;cursor:pointer;flex:none}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s ease}
+.switch[aria-checked="true"]{background:var(--accent)}
+.switch[aria-checked="true"]::after{transform:translateX(20px)}
+.tog .switch{grid-row:auto;grid-column:auto}
+.scene{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.note{grid-area:note;margin:0;color:var(--muted);font-size:.9rem;max-width:78ch}
+@media (prefers-reduced-motion: reduce){ .switch::after{transition:none} }
+</style>
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1 id="ttl">Sonar</h1>
+    <p class="sub" id="sub">Pick a hole to stream it</p>
+  </div>
+  <div class="playback">
+    <button class="btn" id="play" type="button" aria-pressed="true">Pause</button>
+    <span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span>
+  </div>
+  <div class="modebar">
+    <span class="simb" id="simb" hidden>TEST MODE: FAKE DATA</span>
+    <span class="tog"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
+    <span class="hint" id="st"></span>
+    <a class="hint" href="/">Back to status</a>
+  </div>
+</header>
+
+<main class="grid nofocus" id="main">
+  <section class="card holes" aria-label="Holes">
+    <h2>Holes</h2>
+    <div class="hgrid" id="holes"></div>
+    <p class="hint" style="margin:8px 0 0">Tap a hole to stream it (about 1 s behind). The others send a summary every few seconds.</p>
+  </section>
+
+  <section class="water inst" aria-label="Flasher">
+    <div class="flash-wrap"><canvas id="flash" aria-label="Flasher dial showing the latest ping"></canvas></div>
+    <div class="readouts">
+      <div><span>Bait line</span><strong id="roBait">–</strong></div>
+      <div><span>Bottom type</span><strong id="roBottom">–</strong></div>
+      <div><span>Noise floor</span><strong id="roNoise">–</strong></div>
+    </div>
+  </section>
+
+  <section class="water fall" aria-label="Waterfall">
+    <div class="fall-head"><h2>Last 60 seconds</h2><p>4 pings per second, newest on the right</p></div>
+    <div class="stack"><canvas id="fall" aria-label="Waterfall of the last 240 pings"></canvas><canvas id="fallOv" aria-hidden="true"></canvas></div>
+    <div class="zoom-head"><strong>Bottom lock</strong><span id="zoomSpan">last 5 ft above bottom, stretched</span></div>
+    <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
+    <div class="legend">
+      <span><i style="background:#8FA9B2"></i>Unchanged scene: bottom, weeds</span>
+      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong</span>
+      <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
+    </div>
+  </section>
+
+  <section class="card tgt" aria-label="Targets under the hole">
+    <h2>Under the hole now</h2>
+    <div class="tlist" id="tlist"></div>
+  </section>
+
+  <section class="card echo" aria-label="Echo character">
+    <h2>Echo character</h2>
+    <div class="who"><strong id="echoWho">–</strong><span class="muted" id="echoDepth"></span></div>
+    <dl class="metrics">
+      <div><dt>Flicker</dt><dd><b id="mFlick">–</b>change in strength ping to ping</dd></div>
+      <div><dt>Frequency change</dt><dd><b id="mSpread">–</b>how differently 190 and 210 kHz see it</dd></div>
+      <div><dt>Echo length</dt><dd><b id="mWidth">–</b><span id="mWidthNote">the pulse alone is about 4 in</span></dd></div>
+      <div><dt>Versus bait</dt><dd><b id="mRel">–</b>strength relative to your lure</dd></div>
+    </dl>
+    <p class="read" id="echoRead">Pick a target to see its echo.</p>
+    <p class="small">The echo shape at 190/200/210 kHz stays on the hole: too big for the radio. These numbers are computed there, every 2 s.</p>
+  </section>
+
+  <section class="card ctrl" aria-label="Display">
+    <h2>Display</h2>
+    <ul class="toggles" id="toggles"></ul>
+    <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
+  </section>
+
+  <p class="note" id="note">Processing runs on each hole (bottom lock, noise floor, targets, static scene); the radio carries targets, changed cells and a 4-level static scene, so the picture is coarser than raw sonar.</p>
+</main>
+
 <script>
-const $=id=>document.getElementById(id);
-const C=['#000','#2ecc40','#ff9800','#ff1744'],CB=['#001020','#0d3b17','#4a3000','#6a0f1f'];
-let L={nodes:[]},names={},lines={},focus=0,since=0,queue=[],bg=null,bgKey='',range=600,last=null,shown=0,lastSeq=0;
-function post(o){return fetch('/api/sonar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(r=>r.json()).then(d=>{L=d;render();});}
-$('sim').onchange=e=>post({sim:e.target.checked});
-$('fx').onclick=()=>post({focus:0});
-function m(cm){return cm>=2047?'-':(cm/100).toFixed(2)+' m';}
-function render(){
- $('sim').checked=!!L.sim;$('simb').hidden=!L.sim;
- $('st').textContent='frame '+L.frame+' | blocks '+(L.blocks_ok||0)+' ok / '+(L.blocks_bad||0)+' bad';
- const nodes=(L.nodes||[]).slice().sort((a,b)=>a.node-b.node);
- let h='';
- nodes.forEach(n=>{const ln=lines[n.node]||{};const fish=ln.fish;const off=ln.online===false||n.age>30;
-  const nm=names[n.node]||('Hole '+n.node);
-  h+='<div class="card'+(n.node==L.focus?' foc':'')+(fish?' fish':'')+'" data-n="'+n.node+'"><div class="t"><span>'+nm+'</span>'+
-  (fish?'<span class="badge f">FISH ON</span>':off?'<span class="badge o">no data</span>':'<span class="badge">'+(n.node==L.focus?'FOCUS':'base')+'</span>')+'</div>'+
-  '<div class="big">'+(n.fish?'<i class="dot" style="background:'+C[n.lvl]+'"></i>'+n.fish+' fish':'no fish')+'</div>'+
-  '<div class="s">'+(n.fish?'nearest '+m(n.near)+' | ':'')+'bottom '+m(n.bottom)+'</div>'+
-  '<div class="bar"><i style="width:'+Math.round(100*n.act/15)+'%"></i></div><div class="s">activity | '+(n.age<=1?'now':n.age+' s ago')+' | hub '+n.hub+'</div></div>';});
- if(!nodes.length)h='<div class="mut">No sonar node heard yet'+(L.sim?' (test mode on: hubs start sending within a few seconds).':'. Turn on the test mode to get fake data.')+'</div>';
- $('grid').innerHTML=h;
- document.querySelectorAll('.card').forEach(c=>c.onclick=()=>post({focus:+c.dataset.n}));
- if(L.focus!==focus)setFocus(L.focus);
- const f=nodes.find(n=>n.node==focus);
- if(f){$('ft').textContent=(names[focus]||('Hole '+focus))+' (FOCUS)';
-  const k=f.bgver+'/'+f.bgmask;if(k!==bgKey){bgKey=k;loadBg();}
-  $('fi').textContent='bottom '+m(f.bottom)+' | background '+(f.bgmask==255?'complete':'loading '+popc(f.bgmask)+'/8')+' | '+shown+' pings shown';}
+(() => {
+'use strict';
+const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+
+/* ---------- Palettes (prototype) ---------- */
+function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+function lut(stops) {
+  const L = new Uint8ClampedArray(256 * 3);
+  for (let k = 0; k < 256; k++) {
+    const x = k / 255; let j = 0;
+    while (j < stops.length - 2 && x > stops[j + 1][0]) j++;
+    const [x0, c0] = stops[j], [x1, c1] = stops[j + 1], u = clamp((x - x0) / (x1 - x0), 0, 1), a = hex(c0), b = hex(c1);
+    for (let ch = 0; ch < 3; ch++) L[k * 3 + ch] = a[ch] + (b[ch] - a[ch]) * u;
+  }
+  return L;
 }
-function popc(x){let c=0;while(x){c+=x&1;x>>=1;}return c;}
-function setFocus(n){focus=n;since=0;queue=[];bg=null;bgKey='';last=null;shown=0;$('fp').hidden=!n;
- if(n){const f=(L.nodes||[]).find(x=>x.node==n);range=niceRange(f&&f.bottom<2047?f.bottom:600);clearWf();}}
-function niceRange(b){return Math.max(200,Math.ceil(b*1.15/100)*100);}
-function loadList(){fetch('/api/sonar').then(r=>r.json()).then(d=>{L=d;render();}).catch(()=>{});}
-function loadNames(){fetch('/api/status').then(r=>r.json()).then(d=>{(d.nodes||[]).forEach(n=>{if(n.name)names[n.id]=n.name;lines[n.id]=n;});render();}).catch(()=>{});}
-function loadBg(){if(!focus)return;fetch('/api/sonar/bg?node='+focus).then(r=>r.json()).then(d=>{if(d.node==focus&&d.levels&&d.levels.length)bg=d;}).catch(()=>{});}
-function loadPings(){if(!focus)return;const n=focus;fetch('/api/sonar/pings?node='+n+'&since='+since+'&max=40').then(r=>r.json()).then(d=>{
- if(n!==focus)return;(d.pings||[]).forEach(p=>{since=Math.max(since,p[0]);queue.push({i:p[1],b:p[2],t:p[3],r:p[4]});});}).catch(()=>{});}
-// ---- waterfall ----
-const wf=$('wf'),wx=wf.getContext('2d');
-function clearWf(){const r=wf.getBoundingClientRect();wf.width=Math.max(200,Math.round(r.width));wf.height=320;wx.fillStyle=CB[0];wx.fillRect(0,0,wf.width,wf.height);scale();}
-function scale(){let h='';const step=range>800?200:100;for(let d=step;d<range;d+=step)h+='<div style="position:absolute;right:0;top:'+(d/range*100)+'%">'+(d/100)+' m</div>';$('sc').innerHTML=h;}
-function bgBottom(){if(!bg)return -1;const s=bg.levels;for(let i=20;i<s.length;i++)if(s[i]=='3')return i;return -1;}
-function drawPing(p){
- if(p.b<2047&&p.b>range*0.95){range=niceRange(p.b);clearWf();}
- const W=wf.width,H=wf.height,cw=2,x=W-cw,cmPx=range/H;
- wx.drawImage(wf,-cw,0);
- wx.fillStyle=CB[0];wx.fillRect(x,0,cw,H);
- if(bg){const s=bg.levels,bb=bgBottom(),pb=p.b<2047?Math.round(p.b/2.5):bb,off=(bb>=0&&pb>=0)?pb-bb:0;
-  for(let y=0;y<H;y++){const bin=Math.floor(y*cmPx/2.5)-off;if(bin<0||bin>=s.length)continue;const lv=+s[bin];if(lv){wx.fillStyle=CB[lv];wx.fillRect(x,y,cw,1);}}}
- p.r.forEach(r=>{wx.fillStyle=C[r[1]];wx.fillRect(x,Math.floor(r[0]*2.5/cmPx),cw,Math.max(1,2.5/cmPx));});
- p.t.forEach(t=>{const y=t[1]/cmPx,hh=Math.max(2,t[3]*2.5/cmPx);wx.fillStyle=t[0]==0?'#ffffff':C[t[2]];wx.fillRect(x,y-hh/2,cw,hh);});
- if(p.b<2047){wx.fillStyle='#ff5a6e';wx.fillRect(x,p.b/cmPx,cw,2);}
- last=p;shown++;drawFlasher();
+const PAL = lut([[0, '#0A1E26'], [0.16, '#11414C'], [0.32, '#1B7778'], [0.48, '#58AE7C'], [0.62, '#D3C04A'], [0.76, '#EE8B2F'], [0.9, '#D8432F'], [1, '#FFE6D2']]);
+const GREY = lut([[0, '#0A1E26'], [1, '#8FA9B2']]);
+const palCss = v => { const k = Math.round(clamp(v, 0, 1) * 255) * 3; return `rgb(${PAL[k]},${PAL[k + 1]},${PAL[k + 2]})`; };
+const BGV = [0, 0.13, 0.30, 0.55];      // static scene level -> grey value (dimmed like the prototype)
+const RV = [0, 0.35, 0.55, 0.75];       // changed-cell level -> colour value
+const HARD = [{ c: '#C9A25C', t: 'Hard' }, { c: '#A89A6A', t: 'Medium' }, { c: '#7E8A5A', t: 'Soft' }, { c: '#86A2AB', t: '–' }];
+const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
+
+/* ---------- State ---------- */
+let units = 'ft';
+try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
+const opts = { overlays: true, bgsep: true };
+let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
+let selSlot = null, userPicked = false, playing = true;
+
+const fmtD = m => units === 'ft' ? (m * 3.28084).toFixed(1) + ' ft' : m.toFixed(2) + ' m';
+const fmtNum = m => units === 'ft' ? (m * 3.28084).toFixed(1) : m.toFixed(2);
+const nameOf = n => names[n] || ('Hole ' + n);
+function labelOf(t, bottom) { return t.slot === 0 ? 'Bait' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
+function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of the prototype colour scale (46 dB span)
+
+/* ---------- Server ---------- */
+function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+function loadList() { fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+function loadNames() { fetch('/api/status').then(r => r.json()).then(d => { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }).catch(() => {}); }
+function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
+function loadPings() {
+  if (!focus) return; const n = focus;
+  fetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
+    if (n !== focus) return;
+    (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
+  }).catch(() => {});
 }
-// ---- flasher (dial: 0 at top, clockwise, one turn = range) ----
-const fl=$('fl'),fx=fl.getContext('2d');
-function arc(r0,r1,d0,d1,col){const a0=-Math.PI/2+2*Math.PI*d0/range,a1=-Math.PI/2+2*Math.PI*Math.max(d1,d0+range/360)/range;
- fx.beginPath();fx.arc(240,240,r1,a0,a1);fx.arc(240,240,r0,a1,a0,true);fx.closePath();fx.fillStyle=col;fx.fill();}
-function drawFlasher(){
- fx.clearRect(0,0,480,480);fx.fillStyle='#05080d';fx.beginPath();fx.arc(240,240,236,0,7);fx.fill();
- arc(170,215,0,range,'#101826');
- fx.fillStyle='#9fb3c8';fx.font='18px system-ui';fx.textAlign='center';fx.textBaseline='middle';
- const step=range>800?200:100;for(let d=0;d<range;d+=step){const a=-Math.PI/2+2*Math.PI*d/range;fx.fillText((d/100)+'',240+Math.cos(a)*150,240+Math.sin(a)*150);
-  fx.fillRect(240+Math.cos(a)*217-1,240+Math.sin(a)*217-1,3,3);}
- const p=last;if(!p)return;
- if(bg){const s=bg.levels,bb=bgBottom(),pb=p.b<2047?Math.round(p.b/2.5):bb,off=(bb>=0&&pb>=0)?pb-bb:0;
-  for(let i=0;i<s.length;i++){const lv=+s[i];if(!lv)continue;const d=(i+off)*2.5;if(d<0||d>=range)continue;arc(172,213,d,d+2.5,C[lv]);}}
- p.r.forEach(r=>arc(172,213,r[0]*2.5,r[0]*2.5+2.5,C[r[1]]));
- p.t.forEach(t=>{const w=Math.max(2.5,t[3]*2.5);arc(168,217,t[1]-w/2,t[1]+w/2,t[0]==0?'#ffffff':C[t[2]]);});
- fx.fillStyle='#e8edf4';fx.font='bold 44px system-ui';fx.fillText(p.b<2047?(p.b/100).toFixed(1)+' m':'--',240,222);
- const fish=p.t.filter(t=>t[0]!=0);fx.font='20px system-ui';fx.fillStyle=fish.length?C[fish[0][2]]:'#8a97ab';
- fx.fillText(fish.length?fish.length+' fish | '+fish.map(t=>(t[1]/100).toFixed(1)).join(' / ')+' m':'no fish',240,270);
+
+/* ---------- Holes ---------- */
+function renderHoles() {
+  $('sim').setAttribute('aria-checked', String(!!L.sim)); $('simb').hidden = !L.sim;
+  $('st').textContent = 'frame ' + (L.frame || 0) + ' | blocks ' + (L.blocks_ok || 0) + ' ok, ' + (L.blocks_bad || 0) + ' bad';
+  const nodes = (L.nodes || []).slice().sort((a, b) => a.node - b.node);
+  let h = '';
+  nodes.forEach(n => {
+    const ln = lines[n.node] || {}, fish = !!ln.fish, off = ln.online === false || n.age > 30, foc = n.node === L.focus;
+    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : '';
+    h += `<button type="button" class="hole${fish ? ' fish' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
+      `<span class="hd"><span>${nameOf(n.node)}</span>${badge}</span>` +
+      `<span class="big">${n.fish ? `<i class="sw" style="background:${palCss(RV[n.lvl] || 0.5)}"></i>${n.fish} fish` : 'No fish'}</span>` +
+      `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
+      `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
+      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span></button>`;
+  });
+  if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
+  $('holes').innerHTML = h;
+  if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
+  const f = nodes.find(n => n.node === focus);
+  if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
 }
-// playback: 4 pings/s, catch up when the queue grows (radio delivers in bursts of ~1 s)
-setInterval(()=>{if(!focus||!queue.length)return;let n=1+Math.floor(queue.length/8);if(queue.length>40)queue.splice(0,queue.length-12);while(n--&&queue.length)drawPing(queue.shift());},250);
-setInterval(loadPings,700);setInterval(loadList,2000);setInterval(loadNames,5000);
-// keep the picture on resize (phones fire resize when the address bar hides)
-window.addEventListener('resize',()=>{if(!focus)return;const r=wf.getBoundingClientRect(),w=Math.max(200,Math.round(r.width));if(w===wf.width)return;
- const t=document.createElement('canvas');t.width=wf.width;t.height=wf.height;t.getContext('2d').drawImage(wf,0,0);
- wf.width=w;wx.fillStyle=CB[0];wx.fillRect(0,0,w,wf.height);wx.drawImage(t,w-t.width,0);});
-loadNames();loadList();
-</script></body></html>)rawliteral");
-  server.send(200, "text/html", html);
+$('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
+$('sim').addEventListener('click', () => post({ sim: !L.sim }));
+$('stop').addEventListener('click', () => post({ focus: 0 }));
+
+function setFocus(n) {
+  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
+  $('main').classList.toggle('nofocus', !n);
+  $('ttl').textContent = n ? nameOf(n) : 'Sonar';
+  $('sub').textContent = n ? 'Live sonar, about 1 s behind' + (L.sim ? ' · simulated pings' : '') : 'Pick a hole to stream it';
+  if (n) { loadPings(); render(); }
+}
+
+/* ---------- Pings -> display records ---------- */
+// p = [seq, index, bottom_cm, [[slot, depth_cm, strength, width]], [[bin, level]], hard, nf_neg, [[slot, flick, spread, elen, mature]]]
+function addPing(p) {
+  const prev = recs.length ? recs[recs.length - 1] : null;
+  const b = p[2] < 2047 ? p[2] / 100 : (prev ? prev.b : null);
+  const rec = { i: p[1], b, hard: p[5], nf: -p[6], t: p[3].map(x => ({ slot: x[0], d: x[1] / 100, s: x[2] / 31, w: x[3] })), r: p[4], px: null };
+  rec.t.forEach(t => t.label = labelOf(t, b));
+  (p[7] || []).forEach(x => { info[x[0]] = { flick: x[1] * 0.25, spread: x[2] * 0.5, elen: x[3] * BIN, mature: !!x[4], i: rec.i }; });
+  recs.push(rec); if (recs.length > HIST) recs.shift();
+}
+function pixels(rec) {
+  if (rec.px) return rec.px;
+  const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
+  const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
+  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? GREY : PAL, BGV[l]); } }
+  for (const r of rec.r) put(r[0], PAL, RV[r[1]]);
+  for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
+    const j0 = Math.round(t.d / BIN);
+    for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
+    const v = clamp(Math.max(t.s, 0.5) * 1.12, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
+  }
+  return rec.px = px;
+}
+function baitLine() {
+  const ds = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) for (const t of recs[k].t) if (t.slot === 0) ds.push(t.d);
+  if (!ds.length) return null; ds.sort((a, b) => a - b); return ds[ds.length >> 1];
+}
+function velOf(slot) {
+  const n = recs.length; if (!n) return 0;
+  const cur = recs[n - 1].t.find(t => t.slot === slot); if (!cur) return 0;
+  for (let k = n - 5; k >= Math.max(0, n - 9); k--) { const o = recs[k].t.find(t => t.slot === slot); if (o) return (cur.d - o.d) / ((n - 1 - k) * 0.25); }
+  return 0;
+}
+function trendOf(vel) { return vel < -0.04 ? 'rising' : vel > 0.04 ? 'sinking' : 'holding'; }
+const ARROW = { rising: '↑', sinking: '↓', holding: '' };
+
+/* ---------- Canvases ---------- */
+const fallC = $('fall'), fallX = fallC.getContext('2d'); fallC.width = HIST; fallC.height = N; const fallImg = fallX.createImageData(HIST, N);
+const zoomC = $('zoom'), zoomX = zoomC.getContext('2d'); zoomC.width = HIST; zoomC.height = ZR; const zoomImg = zoomX.createImageData(HIST, ZR);
+const ovC = $('fallOv'), ovX = ovC.getContext('2d'), zovC = $('zoomOv'), zovX = zovC.getContext('2d');
+const flC = $('flash'), flX = flC.getContext('2d');
+function fit(cv) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  return { w, h, dpr };
+}
+function drawFall() {
+  const data = fallImg.data, off = HIST - recs.length;
+  for (let x = 0; x < HIST; x++) {
+    const p = x >= off ? pixels(recs[x - off]) : null;
+    for (let i = 0; i < N; i++) {
+      const o = (i * HIST + x) * 4;
+      if (p) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
+      data[o + 3] = 255;
+    }
+  }
+  fallX.putImageData(fallImg, 0, 0);
+}
+function drawZoom() {
+  const data = zoomImg.data, off = HIST - recs.length;
+  for (let x = 0; x < HIST; x++) {
+    const rec = x >= off ? recs[x - off] : null, p = rec ? pixels(rec) : null;
+    const start = rec && rec.b != null ? Math.round(rec.b / BIN) - (ZR - 6) : 0;
+    for (let r = 0; r < ZR; r++) {
+      const o = (r * HIST + x) * 4, i = start + r;
+      if (p && rec.b != null && i >= 0 && i < N) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
+      data[o + 3] = 255;
+    }
+  }
+  zoomX.putImageData(zoomImg, 0, 0);
+  const { w, h, dpr } = fit(zovC); zovX.clearRect(0, 0, w, h);
+  if (opts.overlays && recs.length) {
+    const y = ((ZR - 6) / ZR) * h;
+    zovX.strokeStyle = HARD[recs[recs.length - 1].hard].c; zovX.lineWidth = 1.5 * dpr;
+    zovX.setLineDash([4 * dpr, 4 * dpr]); zovX.beginPath(); zovX.moveTo(0, y); zovX.lineTo(w, y); zovX.stroke(); zovX.setLineDash([]);
+    zovX.font = `${11 * dpr}px ${FONT}`; zovX.fillStyle = 'rgba(215,230,234,0.75)'; zovX.textBaseline = 'bottom';
+    zovX.fillText('bottom', 6 * dpr, y - 3 * dpr);
+  }
+}
+function pill(g, text, x, y, dpr, color) {
+  g.font = `600 ${12 * dpr}px ${FONT}`;
+  const tw = g.measureText(text).width, ph = 18 * dpr, pw = tw + 14 * dpr;
+  const px = Math.max(2 * dpr, x - pw), py = y - ph / 2;
+  g.fillStyle = 'rgba(10,30,38,0.82)'; g.beginPath();
+  if (g.roundRect) g.roundRect(px, py, pw, ph, 9 * dpr); else g.rect(px, py, pw, ph);
+  g.fill(); g.fillStyle = color; g.fillRect(px + 6 * dpr, py + ph / 2 - 3 * dpr, 3 * dpr, 6 * dpr);
+  g.fillStyle = '#E6F0F2'; g.textBaseline = 'middle'; g.fillText(text, px + 12 * dpr, y + 0.5 * dpr);
+}
+function drawOverlay() {
+  const { w, h, dpr } = fit(ovC), g = ovX; g.clearRect(0, 0, w, h);
+  const yOf = dm => dm / MAXD * h, off = HIST - recs.length, xOf = k => ((k + off) + 0.5) / HIST * w;
+  const step = units === 'ft' ? 5 / 3.28084 : 1;
+  g.font = `${11 * dpr}px ${FONT}`; g.textBaseline = 'bottom';
+  for (let dm = step; dm < MAXD - 0.05; dm += step) {
+    const y = Math.round(yOf(dm)) + 0.5;
+    g.strokeStyle = 'rgba(215,230,234,0.09)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+    g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), 6 * dpr, y - 2 * dpr);
+  }
+  g.fillStyle = 'rgba(215,230,234,0.5)';
+  g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
+  const nw = g.measureText('now').width; g.fillText('now', w - nw - 6 * dpr, h - 5 * dpr);
+  if (!opts.overlays || !recs.length) return;
+  const bait = baitLine();
+  if (bait != null) {
+    const yb = yOf(bait);
+    g.strokeStyle = 'rgba(230,240,242,0.35)'; g.lineWidth = 1 * dpr; g.setLineDash([6 * dpr, 6 * dpr]);
+    g.beginPath(); g.moveTo(0, yb); g.lineTo(w, yb); g.stroke(); g.setLineDash([]);
+    g.fillStyle = 'rgba(230,240,242,0.6)'; g.fillText('bait line', 26 * dpr, yb - 3 * dpr);
+  }
+  g.beginPath(); let started = false;
+  recs.forEach((r, k) => { if (r.b == null) return; const x = xOf(k), y = yOf(r.b); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true; });
+  g.strokeStyle = HARD[recs[recs.length - 1].hard].c; g.lineWidth = 2 * dpr; g.stroke();
+  const tl = new Map();
+  recs.forEach((r, k) => { for (const t of r.t) { if (t.label === 'Near bottom') continue; if (!tl.has(t.slot)) tl.set(t.slot, []); tl.get(t.slot).push({ x: xOf(k), y: yOf(t.d), v: t.s, k }); } });
+  for (const [slot, pts] of tl) {
+    g.beginPath(); let pk = -9;
+    for (const p of pts) { if (p.k - pk > 1) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); pk = p.k; }
+    const last = pts[pts.length - 1];
+    g.strokeStyle = palCss(clamp(Math.max(0.5, last.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
+  }
+  const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'Bait') && t.s > 0.08).sort((a, b) => a.d - b.d);
+  let lastY = -1e9;
+  for (const t of cur) {
+    let y = yOf(t.d) - 12 * dpr; if (y - lastY < 20 * dpr) y = lastY + 20 * dpr; lastY = y;
+    const a = ARROW[trendOf(velOf(t.slot))];
+    pill(g, `${t.label} ${fmtD(t.d)}${a ? ' ' + a : ''}`, w - 8 * dpr, y, dpr, palCss(Math.max(0.5, t.s)));
+  }
+}
+function drawFlash() {
+  const { w, h, dpr } = fit(flC), g = flX; g.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 4 * dpr, r1 = R * 0.95, r0 = R * 0.75;
+  const SPAN = Math.PI * 2 * 0.92, A0 = -Math.PI / 2, ang = i => A0 + (i / N) * SPAN;
+  g.beginPath(); g.arc(cx, cy, r1, A0, A0 + SPAN); g.arc(cx, cy, r0, A0 + SPAN, A0, true); g.closePath(); g.fillStyle = '#0F2A33'; g.fill();
+  const n = recs.length;
+  for (const [k, alpha] of [[n - 3, 0.22], [n - 2, 0.42], [n - 1, 1]]) {
+    if (k < 0) continue; const p = pixels(recs[k]); g.globalAlpha = alpha;
+    for (let i = 0; i < N; i++) {
+      const Rr = p[i * 4], Gg = p[i * 4 + 1], Bb = p[i * 4 + 2]; if (Rr + Gg + Bb < 95) continue;
+      g.beginPath(); g.arc(cx, cy, r1, ang(i), ang(i + 1) + 0.003); g.arc(cx, cy, r0, ang(i + 1) + 0.003, ang(i), true); g.closePath();
+      g.fillStyle = `rgb(${Rr},${Gg},${Bb})`; g.fill();
+    }
+  }
+  g.globalAlpha = 1;
+  if (n) for (const t of recs[n - 1].t) {
+    if (t.s <= 0.08) continue; const i = t.d / BIN;
+    g.beginPath(); g.arc(cx, cy, r1 + 1 * dpr, ang(i - 2), ang(i + 2)); g.arc(cx, cy, r0 - 1 * dpr, ang(i + 2), ang(i - 2), true); g.closePath();
+    g.fillStyle = palCss(clamp(Math.max(0.5, t.s) * 1.12, 0, 1)); g.fill();
+  }
+  const step = units === 'ft' ? 5 / 3.28084 : 1;
+  g.font = `${11 * dpr}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let dm = 0; dm < MAXD - 0.05; dm += step) {
+    const a = A0 + (dm / MAXD) * SPAN, ca = Math.cos(a), sa = Math.sin(a);
+    g.strokeStyle = 'rgba(215,230,234,0.5)'; g.lineWidth = 1 * dpr;
+    g.beginPath(); g.moveTo(cx + ca * (r0 - 2 * dpr), cy + sa * (r0 - 2 * dpr)); g.lineTo(cx + ca * (r0 - 7 * dpr), cy + sa * (r0 - 7 * dpr)); g.stroke();
+    g.fillStyle = 'rgba(215,230,234,0.6)';
+    g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), cx + ca * (r0 - 16 * dpr), cy + sa * (r0 - 16 * dpr));
+  }
+  const bait = baitLine();
+  if (opts.overlays && bait != null) {
+    const a = A0 + (bait / MAXD) * SPAN;
+    g.strokeStyle = 'rgba(230,240,242,0.8)'; g.lineWidth = 2 * dpr; g.beginPath();
+    g.moveTo(cx + Math.cos(a) * (r1 + 1 * dpr), cy + Math.sin(a) * (r1 + 1 * dpr)); g.lineTo(cx + Math.cos(a) * (r1 - 6 * dpr), cy + Math.sin(a) * (r1 - 6 * dpr)); g.stroke();
+  }
+  const cur = n ? recs[n - 1] : null;
+  g.fillStyle = '#E8F1F3'; g.font = `700 ${R * 0.36}px ${FONT}`; g.textBaseline = 'alphabetic';
+  g.fillText(cur && cur.b != null ? fmtNum(cur.b) : '–', cx, cy + R * 0.08);
+  g.fillStyle = 'rgba(215,230,234,0.7)'; g.font = `500 ${R * 0.11}px ${FONT}`;
+  g.fillText(units === 'ft' ? 'ft to bottom' : 'm to bottom', cx, cy + R * 0.25);
+  g.textAlign = 'left';
+}
+
+/* ---------- Cards ---------- */
+function liveTargets() {
+  if (!recs.length) return [];
+  return recs[recs.length - 1].t.filter(t => t.s > 0.08).slice().sort((a, b) => a.d - b.d).slice(0, 5);
+}
+function updTargets() {
+  const el = $('tlist'), list = liveTargets();
+  if (!list.length) { el.innerHTML = '<p class="empty">' + (recs.length ? 'Nothing moving under the hole right now.' : 'Waiting for pings…') + '</p>'; return; }
+  const bait = list.find(t => t.slot === 0);
+  el.innerHTML = list.map(t => {
+    const rel = bait && t.slot !== 0 ? toDb(t.s) - toDb(bait.s) : null, tr = trendOf(velOf(t.slot));
+    const meta = [tr === 'holding' ? 'holding depth' : tr, rel == null ? '' : `${rel > 0 ? '+' : ''}${rel.toFixed(0)} dB vs bait`].filter(Boolean).join(', ');
+    return `<button type="button" class="trow" data-slot="${t.slot}" aria-pressed="${t.slot === selSlot}"><span class="dot" style="background:${palCss(Math.max(0.5, t.s))}"></span><span class="nm">${t.label}</span><span class="dp">${fmtD(t.d)}</span><span class="meta">${meta}</span></button>`;
+  }).join('');
+}
+function pickDefault() {
+  const rank = t => t.label === 'Fish' ? 0 : t.label === 'Near bottom' ? 1 : 2;
+  const ts = liveTargets().slice().sort((a, b) => rank(a) - rank(b) || b.s - a.s);
+  return ts[0] || null;
+}
+function updEcho() {
+  const list = liveTargets();
+  let T = userPicked && selSlot != null ? list.find(t => t.slot === selSlot) : null;
+  if (!T) { userPicked = false; T = pickDefault(); selSlot = T ? T.slot : null; }
+  const set = (id, v) => { $(id).textContent = v; };
+  set('mWidthNote', units === 'ft' ? 'the pulse alone is about 4 in' : 'the pulse alone is about 10 cm');
+  if (!T) { set('echoWho', 'No target'); set('echoDepth', ''); ['mFlick', 'mSpread', 'mWidth', 'mRel'].forEach(i => set(i, '–')); set('echoRead', 'Pick a target to see its echo.'); return; }
+  const I = info[T.slot], bait = list.find(t => t.slot === 0 && t !== T);
+  const rel = bait ? toDb(T.s) - toDb(bait.s) : null;
+  set('echoWho', T.label); set('echoDepth', fmtD(T.d));
+  set('mFlick', I ? I.flick.toFixed(1) + ' dB' : '–');
+  set('mSpread', I ? I.spread.toFixed(1) + ' dB' : '–');
+  set('mWidth', I ? (units === 'ft' ? (I.elen * 39.37).toFixed(1) + ' in' : (I.elen * 100).toFixed(0) + ' cm') : '–');
+  set('mRel', rel == null ? '–' : `${rel > 0 ? '+' : ''}${rel.toFixed(1)} dB`);
+  let read;
+  if (!I || !I.mature) read = 'Collecting pings for this target.';
+  else if (I.spread >= 3.5 && I.flick >= 1.6) read = 'Flickers, and looks different at each frequency. That is typical of a swim bladder, so likely a fish.';
+  else if (I.spread < 2.5 && I.flick < 1.2) read = 'Steady, and the same at every frequency. That is typical of metal or a hard lure.';
+  else read = 'Mixed signature. Needs a few more pings to call.';
+  set('echoRead', read);
+}
+function updReadouts() {
+  const cur = recs.length ? recs[recs.length - 1] : null, bait = baitLine();
+  $('roBait').textContent = bait == null ? '–' : fmtD(bait);
+  $('roBottom').textContent = cur ? HARD[cur.hard].t : '–';
+  $('roNoise').textContent = cur ? cur.nf.toFixed(0) + ' dB' : '–';
+  $('zoomSpan').textContent = units === 'ft' ? 'last 5 ft above bottom, stretched' : 'last 1.5 m above bottom, stretched';
+}
+function render() { if (!focus) return; drawFall(); drawZoom(); drawOverlay(); drawFlash(); updTargets(); updEcho(); updReadouts(); }
+const pickRow = e => { const b = e.target.closest('.trow'); if (!b) return; selSlot = Number(b.dataset.slot); userPicked = true; updTargets(); updEcho(); drawOverlay(); };
+$('tlist').addEventListener('click', pickRow);
+
+/* ---------- Controls ---------- */
+const TOGGLES = [
+  ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
+  ['bgsep', 'Static scene in grey', 'Bottom and weeds fade back. Anything that moves stays in colour.']
+];
+const tUl = $('toggles');
+tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
+function syncControls() {
+  tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
+  document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
+  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
+}
+tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
+document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
+$('play').addEventListener('click', () => { playing = !playing; syncControls(); });
+
+// playback: 4 pings/s; the radio delivers about one block per second, so catch up when the queue grows
+setInterval(() => {
+  if (!focus || !playing || !queue.length) return;
+  if (queue.length > 40) queue.splice(0, queue.length - 12);
+  let n = 1 + Math.floor(queue.length / 8);
+  while (n-- && queue.length) addPing(queue.shift());
+  render();
+}, 250);
+setInterval(loadPings, 700); setInterval(loadList, 2000); setInterval(loadNames, 5000);
+let rz = null;
+new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length) render(); }); }).observe(document.body);
+syncControls(); loadNames(); loadList();
+})();
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleWebSonar() {
+  server.send_P(200, "text/html", SONAR_PAGE);
 }
