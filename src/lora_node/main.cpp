@@ -1775,11 +1775,16 @@ static wifi_interface_t ebIf = WIFI_IF_STA;
 void setupEbChalet() {
   const wifi_mode_t m = WiFi.getMode();
   if (m == WIFI_MODE_NULL) { DEBUG_PRINTLN(F("Backbone: Wi-Fi off, no ESP-NOW")); return; }
-  ebIf = (m == WIFI_MODE_AP) ? WIFI_IF_AP : WIFI_IF_STA;
+  // LR must never be enabled on the AP interface: an LR-enabled AP sends its beacon in LR and phones
+  // can no longer see/join it (ESP-IDF Wi-Fi guide, "LR Compatibility"). LR goes on the station
+  // interface only, so an AP-only chalet gets its (unconnected) station interface added.
+  if (m == WIFI_MODE_AP) { WiFi.mode(WIFI_AP_STA); delay(100); }
+  ebIf = WIFI_IF_STA;
   uint8_t proto = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
   #if ESPNOW_LONG_RANGE_MODE
-  proto = (settings.ebLrOnly && ebIf == WIFI_IF_STA) ? (uint8_t)WIFI_PROTOCOL_LR : (uint8_t)(proto | WIFI_PROTOCOL_LR);
+  proto = settings.ebLrOnly ? (uint8_t)WIFI_PROTOCOL_LR : (uint8_t)(proto | WIFI_PROTOCOL_LR);
   #endif
+  // order matters (esp-idf #9933 / #11751): protocol after Wi-Fi start, ESP-NOW rate after esp_now_init
   esp_err_t e = esp_wifi_set_protocol(ebIf, proto);
   if (e != ESP_OK) DEBUG_PRINTF("Backbone: set protocol failed: %d\n", e);
   uint8_t primary; wifi_second_chan_t secondary;
@@ -1800,7 +1805,7 @@ void setupEbChalet() {
   if (e != ESP_OK) Serial.printf("Backbone: LR rate not set (%d)\n", e);
   #endif
   espNowReady = true;
-  Serial.printf("Backbone: ESP-NOW on %s, %s\n", ebIf == WIFI_IF_STA ? "station" : "AP",
+  Serial.printf("Backbone: ESP-NOW on the station interface, %s (phone AP stays b/g/n)\n",
                 settings.ebLrOnly ? "LR only" : "b/g/n + LR");
 }
 
