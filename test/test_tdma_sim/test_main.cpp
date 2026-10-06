@@ -3,6 +3,7 @@
 #include <unity.h>
 #include <hub_role.h>
 #include <chalet_role.h>
+#include <sonar_sim.h>
 #include <cstdlib>
 #include <cstdio>
 
@@ -27,6 +28,38 @@ struct World {
   int max_abs_sync_err_us = 0;
   uint32_t node_changes = 0;
   uint8_t chalet_state[256];
+  // sonar test mode: 2 virtual sonar nodes per hub, fed into the real codec + transport
+  bool sonar = false;
+  sonar::SonarSource src[NH][2];
+  sonar::SonarStore<16, 256> store;
+  uint32_t focus_pings_made = 0;
+  int max_hub_packet = 0;
+  static uint8_t vnode(uint8_t hub, uint8_t k) { return static_cast<uint8_t>(128 + (hub & 0x0F) * 8 + k); }
+  void enableSonar() {
+    sonar = true;
+    chalet.flags = static_cast<uint8_t>(chalet.flags | BF_SONAR_SIM);
+    chalet.sonar_sink = &store;
+    for (int h = 0; h < NH; h++)
+      for (uint8_t k = 0; k < 2; k++) {
+        src[h][k].begin(vnode(ids[h], k), vnode(ids[h], k));
+        hub[h].table.observe(vnode(ids[h], k), LS_IDLE, 0, 0, 100, 0);
+      }
+  }
+  void sonarTicks(uint16_t f) {
+    for (int h = 0; h < NH; h++) {
+      if (!hub[h].sonarSim()) continue;
+      for (uint8_t k = 0; k < 2; k++) {
+        hub[h].table.observe(vnode(ids[h], k), LS_IDLE, 0, 0, 100, f);
+        const bool focus = hub[h].focusNode() == src[h][k].node();
+        for (int t = 0; t < 4; t++) {
+          sonar::Block out[2];
+          const uint8_t n = src[h][k].tick(focus, out, 2);
+          if (focus) focus_pings_made++;
+          for (uint8_t i = 0; i < n; i++) hub[h].sonar.push(out[i].data, out[i].len, f);
+        }
+      }
+    }
+  }
 
   static int idx(uint8_t id) { return id == CHALET ? 0 : id; }
   uint32_t rnd() { rng = rng * 1103515245u + 12345u; return rng >> 8; }
@@ -73,6 +106,7 @@ struct World {
       }
     }
     for (int h = 0; h < NH; h++) if (!fresh[h]) hub[h].onBeaconMissed();
+    if (sonar) sonarTicks(f);
     // hubs without a plan send a random JOIN between slots (ALOHA, ~1 in 3 frames)
     for (int h = 0; h < NH; h++) {
       if (!hub[h].wantsAsyncJoin() || (rnd() % 3) != 0) continue;
@@ -87,7 +121,10 @@ struct World {
       uint8_t pk[NH][MAX_PACKET]; size_t pl[NH];
       for (int h = 0; h < NH; h++) {
         const SlotAction a = hub[h].action(i, (rnd() % 2) == 0);
-        if (a == ACT_TX_HUB) { pl[h] = hub[h].buildHub(pk[h], MAX_PACKET, 0, 4000, 1, false, 0); txs[ntx++] = h; }
+        if (a == ACT_TX_HUB) {
+          pl[h] = hub[h].buildHub(pk[h], MAX_PACKET, 0, 4000, 1, false, 0); txs[ntx++] = h;
+          if (static_cast<int>(pl[h]) > max_hub_packet) max_hub_packet = static_cast<int>(pl[h]);
+        }
         else if (a == ACT_TX_JOIN) { pl[h] = hub[h].buildJoin(pk[h], MAX_PACKET); txs[ntx++] = h; }
       }
       if (ntx > 1) collisions++;
@@ -213,9 +250,57 @@ static void test_many_seeds_lossy(void) {
   TEST_ASSERT_EQUAL(0, failures);
 }
 
+// Sonar test mode end to end: virtual sonar nodes on every hub, FOCUS on a node of the REMOTE hub C
+// (its stream goes through relay B), BASE summaries from all others, line alerts still on time.
+static void test_sonar_focus_through_relay(void) {
+  int results[3];
+  const uint8_t losses[3] = {0, 10, 20};
+  for (int L = 0; L < 3; L++) {
+    World* x = new World();
+    x->rng = 4242u + L;
+    x->setLink(CHALET, A, true); x->setLink(CHALET, B, true); x->setLink(A, B, true); x->setLink(B, C, true);
+    x->enableSonar();
+    uint16_t f = 1;
+    for (; f <= 20; f++) x->runFrame(f);
+    TEST_ASSERT_EQUAL(B, x->viaOf(C));
+    const uint8_t focus = World::vnode(C, 1);
+    x->chalet.focus_node = focus;
+    x->loss_pct = losses[L];
+    for (int k = 0; k < 3; k++) x->runFrame(f++);        // focus reaches C, FOCUS allowance planned
+    x->focus_pings_made = 0;
+    const uint32_t seq0 = x->store.lastSeq();
+    for (int k = 0; k < 60; k++) x->runFrame(f++);
+    const sonar::StoredPing* out[256];
+    const uint16_t got = x->store.pingsSince(focus, seq0, out, 256);
+    // every hub's virtual nodes reported a summary
+    int with_sum = 0;
+    for (int h = 0; h < NH; h++) for (uint8_t k = 0; k < 2; k++) { const sonar::NodeSonar* ns = x->store.find(World::vnode(ids[h], k)); if (ns && ns->has_sum) with_sum++; }
+    // background of the focus node complete (8 segments)
+    const sonar::NodeSonar* fn = x->store.find(focus);
+    // line alert of a normal node on C still arrives quickly while C streams sonar
+    x->hub[2].table.observe(31, LS_TRIPPED, 1, 0, 90, f);
+    int alert = 0;
+    while (x->chalet_state[31] != LS_TRIPPED && alert < 30) { x->runFrame(f++); alert++; }
+    results[L] = static_cast<int>(100u * got / (x->focus_pings_made ? x->focus_pings_made : 1));
+    printf("sonar sim, loss %u%%: focus pings %u/%u (%d%%), summaries %d/6, bg mask 0x%02X, alert %d frames, max hub pkt %d B, outbox drops C=%u\n",
+           losses[L], got, static_cast<unsigned>(x->focus_pings_made), results[L], with_sum, fn ? fn->bg_mask : 0, alert,
+           x->max_hub_packet, static_cast<unsigned>(x->hub[2].sonar.dropped + x->hub[2].sonar.expired));
+    TEST_ASSERT_EQUAL(6, with_sum);
+    TEST_ASSERT_NOT_NULL(fn);
+    TEST_ASSERT_TRUE(alert <= (L == 0 ? 1 : 10));
+    if (L == 0) { TEST_ASSERT_GREATER_OR_EQUAL(95, results[L]); TEST_ASSERT_EQUAL(0xFF, fn->bg_mask); }
+    delete x;
+  }
+  // No ACK on sonar: at 20 % loss per link a block from remote C needs beacon->B, echo->C, C->B and B->chalet
+  // (plus free-run when one beacon is missed): ~0.8^3 to 0.8^4 = 41-51 % expected.
+  TEST_ASSERT_GREATER_OR_EQUAL(35, results[2]);
+  TEST_ASSERT_GREATER_OR_EQUAL(70, results[1]);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_full_scenario);
   RUN_TEST(test_many_seeds_lossy);
+  RUN_TEST(test_sonar_focus_through_relay);
   return UNITY_END();
 }

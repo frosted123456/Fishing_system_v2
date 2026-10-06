@@ -29,12 +29,16 @@ class ChaletRole {
   uint8_t cmd_seq = 0;
   uint8_t silence_10s = 0;
   uint8_t focus_node = 0;
+  sonar::SonarSink* sonar_sink = nullptr;   // gets every SEC_SONAR block (direct or relayed)
 
   ChaletRole() { memset(&beacon, 0, sizeof(beacon)); }
 
   // Builds and encodes the beacon for `frame_no`. Returns its length.
   size_t startFrame(uint16_t frame_no, uint8_t* buf, size_t cap) {
     frame = frame_no;
+    // the hub that reports the focus node gets the bigger FOCUS allowance
+    const NodeView* fv = focus_node ? nodes.find(focus_node) : nullptr;
+    planner.cfg.focus_hub = fv != nullptr ? fv->owner : ID_NONE;
     planner.buildBeacon(frame, beacon);
     beacon.flags = static_cast<uint8_t>((flags & ~(BF_TEST | BF_ADAPTIVE)) |
                                         (planner.cfg.test_mode != TEST_OFF ? BF_TEST : 0) |
@@ -56,7 +60,7 @@ class ChaletRole {
     if (h.type == PT_JOIN) { planner.onJoin(h.src, 0, rssi, frame); return false; }   // JOIN slot or random
     if (h.type != PT_HUB) return false;
     planner.onDirectPacket(h.src, frame, rssi, snr_q4, s.mode, s.kind == SLOT_HUB && s.owner == h.src);
-    res = consumeHubPacket(p, len, planner.cfg.network_id, frame, planner, nodes);
+    res = consumeHubPacket(p, len, planner.cfg.network_id, frame, planner, nodes, sonar_sink);
     test_bytes_rx += res.test_bytes;
     if (res.malformed) bad_packets++;
     return res.ok;

@@ -54,6 +54,8 @@ struct PlannerConfig {
   uint8_t allowance;        // bytes per hub slot, normal operation
   uint8_t test_allowance;   // bytes per hub slot in test modes
   uint16_t frame_ms;
+  uint8_t focus_hub;        // hub reporting the FOCUS sonar node (ID_NONE = none)
+  uint8_t focus_allowance;  // its slot allowance (est. 180 B = FOCUS stream + line state)
 };
 
 template <uint8_t MAX_HUBS = 10>
@@ -79,6 +81,7 @@ class ChaletPlanner {
   ChaletPlanner() {
     memset(&cfg, 0, sizeof(cfg));
     cfg.allowance = 96; cfg.test_allowance = 160; cfg.frame_ms = 1000;
+    cfg.focus_hub = ID_NONE; cfg.focus_allowance = 180;
     for (uint8_t i = 0; i < MAX_HUBS; i++) hubs_[i].used = false;
     n_acks_ = 0;
   }
@@ -184,11 +187,13 @@ class ChaletPlanner {
       if (--acks_[i].ttl == 0) acks_[i] = acks_[--n_acks_]; else i++;
     }
     uint8_t allow = (cfg.test_mode != TEST_OFF) ? cfg.test_allowance : cfg.allowance;
+    uint8_t focus = (cfg.focus_hub != ID_NONE && cfg.focus_allowance > allow) ? cfg.focus_allowance : allow;
     for (;;) {
-      fill(frame, bc, allow);
+      fill(frame, bc, allow, focus);
       const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
       if (planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL, blen)) break;
-      if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); continue; }
+      if (focus > allow + 16) { focus = static_cast<uint8_t>(focus - 16); continue; }   // shrink FOCUS first
+      if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); focus = allow; continue; }
       while (bc.n_slots > 0 && !planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL,
                                          static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks)))) {
         bc.n_slots--;              // last resort: drop the last direct slots
@@ -293,7 +298,7 @@ class ChaletPlanner {
     }
   }
 
-  void fill(uint16_t frame, Beacon& bc, uint8_t allow) {
+  void fill(uint16_t frame, Beacon& bc, uint8_t allow, uint8_t focus) {
     bc.n_slots = 0;
     uint8_t relays[MAX_RELAYS]; uint8_t n_relays = 0;
     for (uint8_t i = 0; i < MAX_HUBS; i++) {
@@ -313,14 +318,21 @@ class ChaletPlanner {
       if (!h.used || h.via == 0) continue;
       bool relay_ok = false;
       for (uint8_t k = 0; k < n_relays; k++) if (relays[k] == h.via) relay_ok = true;
-      if (relay_ok) push(bc, SLOT_HUB, h.id, MODE_SF9_BW500, allow, h.via);
+      // a remote FOCUS hub: its relay must carry it too, keep the sum under one packet
+      uint8_t a = allow;
+      if (h.id == cfg.focus_hub && focus > allow) {
+        const uint16_t room = static_cast<uint16_t>(MAX_PACKET - allow);
+        a = static_cast<uint8_t>(focus < room ? focus : room);
+        if (a < allow) a = allow;
+      }
+      if (relay_ok) push(bc, SLOT_HUB, h.id, MODE_SF9_BW500, a, h.via);
     }
     // 4. direct hubs
     uint8_t idx = 0;
     for (uint8_t i = 0; i < MAX_HUBS && bc.n_slots < MAX_SLOTS; i++) {
       const HubInfo& h = hubs_[i];
       if (!h.used || h.via != 0) continue;
-      uint16_t a = allow;
+      uint16_t a = (h.id == cfg.focus_hub) ? focus : allow;
       for (uint8_t s = 0; s < bc.n_slots; s++)       // relay carries its remote hubs' packets
         if (bc.slots[s].kind == SLOT_HUB && bc.slots[s].via == h.id) a = static_cast<uint16_t>(a + bc.slots[s].allowance - 2);
       if (a > MAX_PACKET) a = MAX_PACKET;

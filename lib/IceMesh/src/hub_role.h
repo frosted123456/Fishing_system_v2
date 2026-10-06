@@ -42,6 +42,11 @@ class HubRole {
   int8_t beacon_snr_q4 = 0;
   uint32_t beacons_rx = 0, echoes_rx = 0;
   uint8_t last_cmd_seq = 0;
+  sonar::SonarOutbox sonar;   // blocks waiting for this hub's slot
+
+  // Chalet requests carried by the plan
+  uint8_t focusNode() const { return have_plan ? plan.focus_node : 0; }
+  bool sonarSim() const { return have_plan && (plan.flags & BF_SONAR_SIM) != 0; }
 
   HubRole() { memset(&plan, 0, sizeof(plan)); resetFrameScratch(); n_joins_ = 0; n_nb_last_ = 0; nodeinfo_idx_ = 0; }
 
@@ -154,6 +159,7 @@ class HubRole {
     in.nodeinfo_start = nodeinfo_idx_;
     in.line_rot = line_rot_;
     in.test = test; in.test_counter = test_counter; in.test_mode_seen = plan.test_mode;
+    in.sonar = &sonar;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
     nodeinfo_idx_ = r.nodeinfo_next;
     line_rot_ = r.line_rot_next;

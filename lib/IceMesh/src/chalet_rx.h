@@ -5,6 +5,7 @@
 #include "tdma_proto.h"
 #include "chalet_nodes.h"
 #include "chalet_planner.h"
+#include "sonar_link.h"
 
 namespace icemesh {
 namespace tdma {
@@ -18,13 +19,15 @@ struct ChaletRxResult {
   uint8_t n_records;
   uint8_t n_relayed;
   uint16_t test_bytes;
+  uint8_t n_sonar;            // sonar blocks handed to the sink
   bool malformed;
 };
 
 namespace detail {
 template <uint8_t MH, uint8_t MN>
 inline void consumeSections(uint8_t hub, const uint8_t* body, size_t len, uint16_t frame, bool allow_relay,
-                            ChaletPlanner<MH>& planner, ChaletNodes<MN>& nodes, ChaletRxResult& out) {
+                            ChaletPlanner<MH>& planner, ChaletNodes<MN>& nodes, ChaletRxResult& out,
+                            sonar::SonarSink* sink) {
   SectionReader rd(body, len);
   uint8_t t, n; const uint8_t* v;
   while (rd.next(t, v, n)) {
@@ -55,8 +58,11 @@ inline void consumeSections(uint8_t hub, const uint8_t* body, size_t len, uint16
           planner.onRelayed(v[0], hub, frame);
           out.flags = static_cast<uint8_t>(out.flags | (v[2] & (HF_SILENCE_ON | HF_SILENCE_OFF)));   // remote hub's requests
           out.n_relayed++;
-          consumeSections(v[0], v + 3, n - 3u, frame, false, planner, nodes, out);   // one hop only
+          consumeSections(v[0], v + 3, n - 3u, frame, false, planner, nodes, out, sink);   // one hop only
         }
+        break;
+      case SEC_SONAR:
+        if (sink != nullptr && n >= 2) { sink->onSonarBlock(hub, v, n, frame); out.n_sonar++; }
         break;
       case SEC_TEST:
         out.test_bytes = static_cast<uint16_t>(out.test_bytes + n);
@@ -71,7 +77,8 @@ inline void consumeSections(uint8_t hub, const uint8_t* body, size_t len, uint16
 
 template <uint8_t MH, uint8_t MN>
 inline ChaletRxResult consumeHubPacket(const uint8_t* pkt, size_t len, uint8_t net, uint16_t frame,
-                                      ChaletPlanner<MH>& planner, ChaletNodes<MN>& nodes) {
+                                      ChaletPlanner<MH>& planner, ChaletNodes<MN>& nodes,
+                                      sonar::SonarSink* sink = nullptr) {
   ChaletRxResult out;
   memset(&out, 0, sizeof(out));
   Header h;
@@ -79,7 +86,7 @@ inline ChaletRxResult consumeHubPacket(const uint8_t* pkt, size_t len, uint8_t n
   out.ok = true;
   out.hub = h.src;
   out.flags = pkt[HDR_LEN];
-  detail::consumeSections(h.src, pkt + HDR_LEN + 1, len - HDR_LEN - 1, frame, true, planner, nodes, out);
+  detail::consumeSections(h.src, pkt + HDR_LEN + 1, len - HDR_LEN - 1, frame, true, planner, nodes, out, sink);
   return out;
 }
 

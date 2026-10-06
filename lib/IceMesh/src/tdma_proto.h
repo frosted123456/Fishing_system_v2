@@ -29,7 +29,7 @@ static const uint8_t ID_NONE = 0;
 enum PacketType : uint8_t { PT_BEACON = 1, PT_ECHO = 2, PT_HUB = 3, PT_JOIN = 4 };
 enum SlotKind : uint8_t { SLOT_ECHO = 1, SLOT_JOIN = 2, SLOT_HUB = 3 };
 
-enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0x04 };
+enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0x04, BF_SONAR_SIM = 0x08 };
 enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1 };
 enum TestMode : uint8_t { TEST_OFF = 0, TEST_ROTATE = 1, TEST_FIX_SF9 = 2, TEST_FIX_SF8 = 3, TEST_FIX_SF7 = 4, TEST_MODE_COUNT = 5 };
 
@@ -42,7 +42,7 @@ enum SectionType : uint8_t {
   SEC_NODEINFO = 4,  // node battery etc., 3 B each, rotating
   SEC_RELAY = 5,     // a remote hub's packet body, re-packed by its relay hub
   SEC_TEST = 6,      // radio test filler
-  SEC_SONAR = 7,     // reserved (phase 4/5)
+  SEC_SONAR = 7,     // one sonar block (sonar_codec.h) per section, never truncated
 };
 
 enum LineState : uint8_t { LS_IDLE = 0, LS_TRIPPED = 1, LS_RUNNING = 2, LS_FAULT = 3, LS_OFFLINE = 4 };
