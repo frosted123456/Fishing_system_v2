@@ -50,7 +50,7 @@ follow by radio: nothing to reflash on the ice. Protocol details: protocol_v2.md
 ## Bench tests before the first outing (in this order)
 1. **Chalet hears hubs on ESP-NOW**: `TRANSPORT ESPNOW`; Radio → Links: "ESP-NOW heard" must count up for each hub.
    Needs hubs/tip-ups built with `ESPNOW_LONG_RANGE_MODE false` (LR and a phone hotspot cannot share a board, D27).
-2. **Phone hotspot still works** with LR on the chalet (connect, open the suite, trip a tip-up).
+2. **Phone hotspot still works** while the chalet runs ESP-NOW (connect, open the suite, trip a tip-up).
 3. **Back to LoRa**: `TRANSPORT AUTO`; hubs back on LoRa within ~1 min (Links: "backbone no").
 4. **Channel move**: `CHANNEL 3` → every hub follows within ~6-12 s (`RADIO` on a hub shows the channel); `CHANNEL AUTO` after.
 5. **Fallback**: unplug a hub's LoRa antenna (or shield it) in Auto → its holes keep updating through ESP-NOW after ~10 s.
