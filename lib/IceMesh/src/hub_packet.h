@@ -33,12 +33,13 @@ struct HubBuild {
   const uint8_t* joins;       // hub IDs heard in the JOIN slot
   uint8_t n_joins;
   uint8_t nodeinfo_start;     // rotation index
+  uint8_t line_rot;           // rotation of non-pending line records
   bool test;                  // fill the rest with a TEST section
   uint16_t test_counter;
   uint8_t test_mode_seen;     // echoed in the TEST section
 };
 
-struct HubBuildResult { size_t len; uint8_t line_records; uint8_t line_total; uint8_t relayed_full; uint8_t relayed_partial; uint8_t nodeinfo_next; };
+struct HubBuildResult { size_t len; uint8_t line_records; uint8_t line_total; uint8_t relayed_full; uint8_t relayed_partial; uint8_t nodeinfo_next; uint8_t line_rot_next; };
 
 // Re-packs a remote hub packet into a RELAY section value: [orig hub][orig frame lo][orig flags][orig sections...]
 // If the whole body does not fit in `max_value`, only its first section (LINE) is kept.
@@ -54,9 +55,9 @@ inline uint8_t packRelayValue(const uint8_t* pkt, uint8_t len, uint8_t* out, siz
   SectionReader rd(pkt + HDR_LEN + 1, body_len);
   uint8_t t, n; const uint8_t* v;
   if (!rd.next(t, v, n) || t != SEC_LINE) return 0;
-  uint8_t keep = n;
-  while (keep > 0 && 3u + 2u + keep > max_value) keep = static_cast<uint8_t>(keep - LINE_RECORD_LEN);
-  if (keep == 0) return 0;
+  uint8_t keep = static_cast<uint8_t>(n - n % LINE_RECORD_LEN);   // whole records only
+  while (keep >= LINE_RECORD_LEN && 3u + 2u + keep > max_value) keep = static_cast<uint8_t>(keep - LINE_RECORD_LEN);
+  if (keep < LINE_RECORD_LEN || 3u + 2u + keep > max_value) return 0;
   out[3] = SEC_LINE; out[4] = keep;
   memcpy(out + 5, v, keep);
   partial = true;
@@ -74,10 +75,16 @@ inline HubBuildResult buildHubPacket(const HubBuild& in, const LineTable<MAXN>& 
 
   // 1. line state
   LineRecord recs[MAXN];
-  const uint8_t total = table.records(recs, MAXN);
+  uint8_t pend = 0;
+  const uint8_t total = table.records(recs, MAXN, in.line_rot, &pend);
   r.line_total = total;
   uint8_t fit = 0;
   while (fit < total && static_cast<size_t>(fit + 1) * LINE_RECORD_LEN <= w.freeForValue()) fit++;
+  {
+    const uint8_t np = table.nonPendingCount();
+    const uint8_t sent_np = fit > pend ? static_cast<uint8_t>(fit - pend) : 0;
+    r.line_rot_next = np ? static_cast<uint8_t>((in.line_rot + sent_np) % np) : 0;
+  }
   for (uint8_t i = 0; i < fit; i++) encodeLine(recs[i], tmp + i * LINE_RECORD_LEN);
   bool any_pending = false;
   for (uint8_t i = 0; i < fit; i++) any_pending |= recs[i].pending;

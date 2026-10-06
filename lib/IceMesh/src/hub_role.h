@@ -152,9 +152,11 @@ class HubRole {
     in.relayed = relayed_; in.n_relayed = n_relayed_;
     in.joins = joins_; in.n_joins = n_joins_;
     in.nodeinfo_start = nodeinfo_idx_;
+    in.line_rot = line_rot_;
     in.test = test; in.test_counter = test_counter; in.test_mode_seen = plan.test_mode;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
     nodeinfo_idx_ = r.nodeinfo_next;
+    line_rot_ = r.line_rot_next;
     if (r.len > 0) n_joins_ = 0;   // joins reported (repeated by the joiner if lost)
     if (res != nullptr) *res = r;
     return r.len;
@@ -213,6 +215,7 @@ class HubRole {
   Neighbor nb_cur_[MAX_NEIGHBORS], nb_last_[MAX_NEIGHBORS];
   uint8_t n_nb_cur_, n_nb_last_;
   uint8_t nodeinfo_idx_;
+  uint8_t line_rot_ = 0;
   bool fresh_beacon_ = false;
 };
 

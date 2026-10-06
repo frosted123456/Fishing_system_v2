@@ -51,6 +51,10 @@ static volatile uint8_t g_silence_req_frames = 0;
 static volatile bool g_silence_event = false;
 static volatile bool g_silence_state = false;
 static volatile bool g_reset_event = false;
+// Survives ESP.restart() (not power-off): the RESET ALL already executed, so the beacon repeating it
+// for 5 s does not reboot this hub a second time.
+RTC_NOINIT_ATTR static uint32_t g_rtc_cmd_magic;
+RTC_NOINIT_ATTR static uint8_t g_rtc_cmd_seq;
 static uint32_t g_test_counter = 0;
 static uint16_t g_last_beacon_len = 40;
 
@@ -92,16 +96,20 @@ static bool waitIrq(uint32_t deadline_us) {
     if (g_irq) return true;
     const int32_t rem = static_cast<int32_t>(deadline_us - nowUs());
     if (rem <= 0) return g_irq;
-    const TickType_t ticks = rem > 2000 ? pdMS_TO_TICKS(rem / 1000) : 1;
-    ulTaskNotifyTake(pdTRUE, ticks);
+    if (rem < 1500) continue;                       // last ms: spin, a tick would overshoot the deadline
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS((rem - 1000) / 1000));
   }
 }
 
 static void clearIrq() { g_irq = false; ulTaskNotifyTake(pdTRUE, 0); }
 
+// Standby with the oscillator kept running: STDBY_RC would make every TX/RX start wait for the
+// TCXO again (RadioLib's TCXO delay, ~5 ms by default — longer than the 3 ms slot LEAD).
+static inline void standbyXosc() { radio.standby(RADIOLIB_SX126X_STANDBY_XOSC); }
+
 static bool setMode(RadioMode m) {
   if (m == g_cur_mode) return true;
-  radio.standby();
+  standbyXosc();
   const ModeInfo& mi = modeInfo(m);
   int s1 = radio.setBandwidth(static_cast<float>(mi.bw_khz));
   int s2 = radio.setSpreadingFactor(mi.sf);
@@ -110,26 +118,37 @@ static bool setMode(RadioMode m) {
   return true;
 }
 
-// Transmit at `at_us` (or now if already past). `end_us` = TxDone time.
-static bool txAt(const uint8_t* buf, size_t len, RadioMode m, uint32_t at_us, uint32_t& end_us) {
+static volatile uint32_t g_tx_late_skips = 0;
+static const uint32_t MAX_TX_LATE_US = 1000;   // est.: later than this, the packet would overrun its slot
+
+// Transmit at `at_us`. Slot transmissions (slot = true) are dropped if we are already more than
+// MAX_TX_LATE_US late; others go out now. `end_us` = TxDone time.
+static bool txAt(const uint8_t* buf, size_t len, RadioMode m, uint32_t at_us, uint32_t& end_us, bool slot = true) {
   if (!g_radio_ok || len == 0) return false;
   setMode(m);
   sleepUntil(at_us);
+  if (slot && static_cast<int32_t>(nowUs() - at_us) > static_cast<int32_t>(MAX_TX_LATE_US)) {
+    g_tx_late_skips = g_tx_late_skips + 1;
+    return false;
+  }
   clearIrq();
-  if (radio.startTransmit(buf, len) != RADIOLIB_ERR_NONE) { radio.standby(); return false; }
+  if (radio.startTransmit(buf, len) != RADIOLIB_ERR_NONE) { standbyXosc(); return false; }
   const uint32_t limit = nowUs() + modeAirtimeUs(m, static_cast<uint16_t>(len)) + 50000;   // est. margin
   const bool ok = waitIrq(limit);
   end_us = ok ? g_irq_us : nowUs();
   radio.finishTransmit();
+  standbyXosc();
   if (ok) g_tx = g_tx + 1;
   return ok;
 }
 
-struct RxRes { bool got; bool crc; uint8_t len; int8_t rssi; int8_t snr_q4; uint32_t end_us; };
+struct RxRes { bool irq; bool got; bool crc; uint8_t len; int8_t rssi; int8_t snr_q4; uint32_t end_us; };
+
+static const uint32_t RX_EXTEND_US = 2000;     // est.: < LEAD_US, so a late packet never eats the next slot
 
 // Listen in mode `m` from `open_us` to `close_us`. A packet whose header arrived before close
-// is completed (up to 400 ms more, est.).
-static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t* buf) {
+// may finish up to `extend_us` later (bounded so it never runs into the next slot / beacon).
+static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t* buf, uint32_t extend_us = RX_EXTEND_US) {
   RxRes r;
   memset(&r, 0, sizeof(r));
   if (!g_radio_ok) { sleepUntil(close_us); return r; }
@@ -141,9 +160,10 @@ static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t*
   bool irq = waitIrq(close_us);
   if (!irq) {
     const uint32_t flags = radio.getIrqFlags();
-    if (flags & 0x0010) irq = waitIrq(close_us + 400000);   // SX126x IRQ HeaderValid: packet in progress
+    if ((flags & 0x0010) && extend_us > 0) irq = waitIrq(close_us + extend_us);   // HeaderValid: packet in progress
   }
   if (irq) {
+    r.irq = true;
     r.end_us = g_irq_us;
     const size_t n = radio.getPacketLength();
     if (n > 0 && n <= MAX_PACKET) {
@@ -160,7 +180,7 @@ static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t*
       }
     }
   }
-  radio.standby();
+  standbyXosc();
   return r;
 }
 
@@ -206,7 +226,7 @@ static void chaletTask() {
   for (;;) {
     // listen for random JOINs until the next frame
     while (static_cast<int32_t>(next - 4000 - nowUs()) > 0) {
-      RxRes r = rxWindow(MODE_SF9_BW500, nowUs(), next - 4000, rx);
+      RxRes r = rxWindow(MODE_SF9_BW500, nowUs(), next - 4000, rx, 0);   // never extend into the beacon
       if (r.got) { Lock l; g_ch->onAsyncPacket(rx, r.len, r.rssi); }
     }
     Beacon plan;
@@ -223,7 +243,7 @@ static void chaletTask() {
       g_frame = frame;
     }
     uint32_t end = 0, ref = next;
-    if (txAt(buf, blen, MODE_SF9_BW500, next, end)) ref = refFromBeaconEnd(end, static_cast<uint16_t>(blen));
+    if (txAt(buf, blen, MODE_SF9_BW500, next, end, false)) ref = refFromBeaconEnd(end, static_cast<uint16_t>(blen));
     for (uint8_t i = 0; i < plan.n_slots; i++) {
       const Slot& s = plan.slots[i];
       if (s.kind == SLOT_ECHO) continue;                         // our own beacon, repeated
@@ -255,7 +275,10 @@ static void chaletTask() {
 // Hub
 // ---------------------------------------------------------------------------------------------
 static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
-  if (cmd == CMD_RESET_ALL) g_reset_event = true;
+  if (cmd == CMD_RESET_ALL) {
+    g_reset_event = true;
+    g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
+  }
   const bool s = (g_hub->plan.flags & BF_SILENCED) != 0;
   if (s != g_silence_state) { g_silence_state = s; g_silence_event = true; }
 }
@@ -286,7 +309,7 @@ static bool listenFor(uint32_t open_us, uint32_t close_us) {
   static uint8_t rx[MAX_PACKET];
   while (!reached(close_us)) {
     RxRes r = rxWindow(MODE_SF9_BW500, open_us, close_us, rx);
-    if (!r.got && !r.crc) return false;           // window closed with nothing (more)
+    if (!r.irq) return false;                     // window closed with nothing (more)
     if (r.got && hubOnPacket(-1, rx, r)) return true;
     open_us = nowUs();
   }
@@ -303,7 +326,7 @@ static void hubSearch(uint32_t& next_join_us) {
     size_t n;
     { Lock l; n = g_hub->buildJoin(jb, sizeof(jb)); }
     uint32_t end;
-    txAt(jb, n, MODE_SF9_BW500, nowUs(), end);
+    txAt(jb, n, MODE_SF9_BW500, nowUs(), end, false);
     next_join_us = nowUs() + 1500000 + (esp_random() % 3000000);   // ALOHA: 1.5-4.5 s (est.)
   }
 }
@@ -413,6 +436,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
   g_chalet = chalet;
   g_net = network_id;
   g_mx = xSemaphoreCreateMutex();
+  g_cmd_seq = static_cast<uint8_t>(esp_random());   // a rebooted chalet must not reuse the last command seq
   g_nodeq = xQueueCreate(32, sizeof(MeshNodeUpdate));
   if (chalet) {
     g_ch = new ChaletRole<10, 32>();
@@ -424,6 +448,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
     g_hub = new HubRole<24>();
     g_hub->network_id = network_id;
     g_hub->self = self_id;
+    if (g_rtc_cmd_magic == 0xC0DE5EED) g_hub->last_cmd_seq = g_rtc_cmd_seq;
   }
   g_radio_ok = radioInit();
   // Core 1 (same as loop), higher priority than loop: the radio preempts loop() for slot timing.
@@ -624,10 +649,19 @@ void meshPrintStatus(Print& out) {
                v.own_slot_mode >= 0 ? meshModeName(static_cast<uint8_t>(v.own_slot_mode)) : "none", v.allowance);
   }
   if (g_ch != nullptr) {
-    Lock l;
-    for (uint8_t i = 0; i < g_ch->planner.capacity(); i++) {
-      const HubInfo* h = g_ch->planner.hubAt(i);
-      if (h == nullptr) continue;
+    // copy under the lock, print after: Serial blocks (~1 ms per 10 chars) and must never
+    // delay the radio task's beacon or slots
+    static HubInfo hubs[10];
+    uint8_t nh = 0;
+    {
+      Lock l;
+      for (uint8_t i = 0; i < g_ch->planner.capacity() && nh < 10; i++) {
+        const HubInfo* h = g_ch->planner.hubAt(i);
+        if (h != nullptr) hubs[nh++] = *h;
+      }
+    }
+    for (uint8_t i = 0; i < nh; i++) {
+      const HubInfo* h = &hubs[i];
       out.printf("[mesh] hub %u via %u mode %s last %d dBm SNR %.1f |", h->id, h->via, meshModeName(h->mode),
                  h->last_rssi, h->last_snr_q4 / 4.0f);
       for (uint8_t m = 0; m < MODE_COUNT; m++) {
@@ -638,6 +672,7 @@ void meshPrintStatus(Print& out) {
       out.println();
     }
   }
+  out.printf("[mesh] late TX skipped: %lu\n", (unsigned long)g_tx_late_skips);
 }
 
 uint8_t meshHubSummaries(MeshHubSummary* out, uint8_t max) {

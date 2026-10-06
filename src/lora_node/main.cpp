@@ -4286,8 +4286,10 @@ void recordAlert(uint8_t nodeId) {
   alertHistoryIdx = (alertHistoryIdx + 1) % ALERT_HISTORY_SIZE;
   if (alertHistoryCount < ALERT_HISTORY_SIZE) alertHistoryCount++;
   
-  // Clear silence when new alert comes in
+  // Clear silence when new alert comes in — and tell the network (v2: beacon / hub request)
+  const bool wasSilenced = alertsSilenced;
   alertsSilenced = false;
+  if (wasSilenced) { silenceTime = 0; silenceExpireTime = 0; sendSilenceSync(); }
   
   DEBUG_PRINTF("Alert recorded: node %d\n", nodeId);
 }
@@ -4504,7 +4506,23 @@ void meshLoop() {
       MeshNodeSnapshot snap[32];
       const uint8_t k = meshNodeSnapshot(snap, 32);
       for (uint8_t i = 0; i < k; i++) {
-        if (snap[i].state == MESH_LS_OFFLINE || snap[i].node == NODE_ID) continue;
+        if (snap[i].node == NODE_ID || snap[i].node == 0) continue;
+        // Reconcile: if an update was lost (queue full while loop() was busy), rebuild it from the
+        // mesh's current view so a trip can never be missed.
+        const int idx0 = findNodeIndexForMesh(snap[i].node);
+        bool mismatch = (idx0 < 0);
+        if (!mismatch) {
+          const NodeState& n0 = network.nodes[idx0];
+          const bool fish = (snap[i].state == MESH_LS_TRIPPED || snap[i].state == MESH_LS_RUNNING);
+          mismatch = (fish != (bool)HAS_FLAG(n0.flags, FLAG_FISH_ON)) ||
+                     ((snap[i].state == MESH_LS_OFFLINE) == n0.online) ||
+                     ((snap[i].state == MESH_LS_FAULT) != (bool)HAS_FLAG(n0.flags, FLAG_SENSOR_ERROR));
+        }
+        if (mismatch) {
+          MeshNodeUpdate fix = {snap[i].node, snap[i].owner, 0xFF, snap[i].state, snap[i].turns, snap[i].flags};
+          applyMeshNodeUpdate(fix);
+        }
+        if (snap[i].state == MESH_LS_OFFLINE) continue;
         const int idx = findNodeIndexForMesh(snap[i].node);
         if (idx < 0) continue;
         NodeState& n = network.nodes[idx];

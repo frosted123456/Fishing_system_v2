@@ -45,19 +45,26 @@ class LineTable {
     if (e != nullptr && e->pending && e->seq == (seq & 0x0F)) e->pending = false;
   }
 
-  // Up to `max` records, pending ones first. Returns the count.
-  uint8_t records(LineRecord* out, uint8_t max) const {
+  // Up to `max` records: all pending ones first, then the others starting at the `rot`-th
+  // non-pending entry (cyclic). Rotating `rot` makes every node appear even when the slot
+  // allowance only fits part of the table. Returns the count; `pending_out` = pending ones.
+  uint8_t records(LineRecord* out, uint8_t max, uint8_t rot = 0, uint8_t* pending_out = nullptr) const {
     uint8_t n = 0;
-    for (int pass = 0; pass < 2; pass++) {
-      for (uint8_t i = 0; i < MAX_NODES && n < max; i++) {
-        const E& e = e_[i];
-        if (!e.used || e.pending != (pass == 0)) continue;
-        out[n].node = e.node; out[n].state = e.state; out[n].seq = e.seq; out[n].pending = e.pending;
-        out[n].turns = e.turns; out[n].flags = e.flags;
-        n++;
-      }
+    for (uint8_t i = 0; i < MAX_NODES && n < max; i++)
+      if (e_[i].used && e_[i].pending) put(out[n++], e_[i]);
+    if (pending_out != nullptr) *pending_out = n;
+    const uint8_t np = nonPendingCount();
+    for (uint8_t k = 0; k < np && n < max; k++) {
+      const E* e = nthNonPending(static_cast<uint8_t>((rot + k) % np));
+      if (e != nullptr) put(out[n++], *e);
     }
     return n;
+  }
+
+  uint8_t nonPendingCount() const {
+    uint8_t c = 0;
+    for (uint8_t i = 0; i < MAX_NODES; i++) if (e_[i].used && !e_[i].pending) c++;
+    return c;
   }
 
   bool anyPending() const {
@@ -91,6 +98,14 @@ class LineTable {
 
  private:
   struct E { bool used; bool pending; uint8_t node, state, seq, turns, flags, battery; uint32_t last_seen; };
+  static void put(LineRecord& r, const E& e) {
+    r.node = e.node; r.state = e.state; r.seq = e.seq; r.pending = e.pending; r.turns = e.turns; r.flags = e.flags;
+  }
+  const E* nthNonPending(uint8_t k) const {
+    for (uint8_t i = 0; i < MAX_NODES; i++)
+      if (e_[i].used && !e_[i].pending) { if (k == 0) return &e_[i]; k--; }
+    return nullptr;
+  }
   E* find(uint8_t node) { for (uint8_t i = 0; i < MAX_NODES; i++) if (e_[i].used && e_[i].node == node) return &e_[i]; return nullptr; }
   E* alloc(uint32_t now_ms) {
     E* victim = nullptr;

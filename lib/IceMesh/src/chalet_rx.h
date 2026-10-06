@@ -53,6 +53,7 @@ inline void consumeSections(uint8_t hub, const uint8_t* body, size_t len, uint16
       case SEC_RELAY:
         if (allow_relay && n >= 3 && v[0] != ID_NONE) {
           planner.onRelayed(v[0], hub, frame);
+          out.flags = static_cast<uint8_t>(out.flags | (v[2] & (HF_SILENCE_ON | HF_SILENCE_OFF)));   // remote hub's requests
           out.n_relayed++;
           consumeSections(v[0], v + 3, n - 3u, frame, false, planner, nodes, out);   // one hop only
         }

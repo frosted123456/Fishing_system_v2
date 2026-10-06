@@ -369,6 +369,51 @@ static void test_relay_partial_when_too_big(void) {
   TEST_ASSERT_EQUAL(0, out[4] % 3);         // whole records only
 }
 
+static void test_line_rotation_covers_all_nodes(void) {
+  LineTable<24> t;
+  for (uint8_t n = 1; n <= 20; n++) t.observe(n, LS_IDLE, 0, 0, 80, 0);
+  t.observe(7, LS_TRIPPED, 0, 0, 80, 1);                    // one pending
+  HubBuild in; memset(&in, 0, sizeof(in));
+  in.network_id = 0x42; in.self = 5; in.allowance = 7 + 2 + 5 * 3;   // 5 records per packet
+  bool seen[21] = {false};
+  uint8_t buf[MAX_PACKET];
+  for (int f = 0; f < 6; f++) {
+    HubBuildResult r = buildHubPacket(in, t, buf, sizeof buf);
+    TEST_ASSERT_EQUAL(5, r.line_records);
+    LineRecord first; decodeLine(buf + HDR_LEN + 1 + 2, first);
+    TEST_ASSERT_EQUAL(7, first.node);                         // pending always first
+    for (uint8_t k = 0; k < r.line_records; k++) { LineRecord x; decodeLine(buf + HDR_LEN + 3 + 3 * k, x); seen[x.node] = true; }
+    in.line_rot = r.line_rot_next;
+  }
+  for (uint8_t n = 1; n <= 20; n++) TEST_ASSERT_TRUE(seen[n]);   // 19 others / 4 per packet -> 5 packets
+}
+
+static void test_relayed_silence_request(void) {
+  LineTable<24> t7; t7.observe(31, LS_IDLE, 0, 0, 70, 0);
+  HubBuild in7; memset(&in7, 0, sizeof(in7)); in7.network_id = 0x42; in7.self = 7; in7.frame = 3; in7.allowance = 60;
+  in7.flags = HF_SILENCE_ON;
+  RelayItem item; item.len = static_cast<uint8_t>(buildHubPacket(in7, t7, item.data, sizeof item.data).len);
+  LineTable<24> t5;
+  HubBuild in5; memset(&in5, 0, sizeof(in5)); in5.network_id = 0x42; in5.self = 5; in5.frame = 3; in5.allowance = 120;
+  in5.relayed = &item; in5.n_relayed = 1;
+  uint8_t buf[MAX_PACKET];
+  const size_t len = buildHubPacket(in5, t5, buf, sizeof buf).len;
+  Planner p = makePlanner(); ChaletNodes<16> nodes;
+  ChaletRxResult rx = consumeHubPacket(buf, len, 0x42, 3, p, nodes);
+  TEST_ASSERT_TRUE((rx.flags & HF_SILENCE_ON) != 0);
+}
+
+static void test_relay_repack_odd_length_safe(void) {
+  // malformed remote LINE section of 7 bytes (not a multiple of 3) must not wrap
+  uint8_t pkt[32]; PacketWriter w(pkt, sizeof pkt); w.beginHub(0x42, 7, 1, 0);
+  uint8_t v[7] = {1, 2, 3, 4, 5, 6, 7}; w.add(SEC_LINE, v, 7);
+  uint8_t pad[10] = {0}; w.add(SEC_TEST, pad, 10);
+  uint8_t out[MAX_PACKET]; bool partial = false;
+  const uint8_t n = packRelayValue(pkt, static_cast<uint8_t>(w.size()), out, 12, partial);
+  TEST_ASSERT_TRUE(n <= 12);
+  if (n) TEST_ASSERT_EQUAL(0, out[4] % 3);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_line_event_and_ack);
@@ -391,5 +436,8 @@ int main(int, char**) {
   RUN_TEST(test_hub_packet_priorities_and_truncation);
   RUN_TEST(test_relay_repack_and_chalet_consume);
   RUN_TEST(test_relay_partial_when_too_big);
+  RUN_TEST(test_line_rotation_covers_all_nodes);
+  RUN_TEST(test_relayed_silence_request);
+  RUN_TEST(test_relay_repack_odd_length_safe);
   return UNITY_END();
 }
