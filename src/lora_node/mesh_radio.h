@@ -71,3 +71,14 @@ const char* meshTestModeName(uint8_t mode);
 // ---- chalet: per-hub summary for the OLED ----
 struct MeshHubSummary { uint8_t id, via, mode; int8_t rssi; float snr; uint32_t rx, sched; };
 uint8_t meshHubSummaries(MeshHubSummary* out, uint8_t max);
+
+// ---- sonar: test mode (fake data) + FOCUS stream. Blocks: lib/IceMesh/src/sonar_codec.h ----
+// Virtual sonar nodes on hubs use IDs 128 + (hub ID & 0x0F) * 8 + k: keep real node IDs below 128.
+uint8_t meshSonarVirtualId(uint8_t hub_id, uint8_t k);
+void meshSetSonarSim(bool on);               // chalet: BF_SONAR_SIM in the beacon
+bool meshSonarSim();                         // chalet: configured; hub: as seen in the beacon
+uint8_t meshFocusNode();                     // chalet: configured; hub: from the beacon
+bool meshHubPushSonar(const uint8_t* blk, uint8_t len);   // hub: queue one block for the next slots
+String meshSonarListJson();                  // chalet: /api/sonar (one summary per sonar node)
+String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings);   // chalet: /api/sonar/pings
+String meshSonarBgJson(uint8_t node);        // chalet: /api/sonar/bg (2-bit background profile)

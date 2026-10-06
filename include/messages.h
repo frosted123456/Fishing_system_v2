@@ -63,6 +63,8 @@ enum MessageType : uint8_t {
   MSG_LORA_DISCOVERY  = 0x42,
   MSG_CONFIG_UPDATE   = 0x50,   // Remote config update (supports hops)
   MSG_CONFIG_ACK      = 0x51,   // Config update acknowledgment (supports hops)
+  MSG_SONAR           = 0x60,   // v2: node -> hub, [net][node][type] + one sonar block (sonar_codec.h)
+  MSG_SONAR_CTRL      = 0x61,   // v2: hub -> nodes, SonarCtrlMessage (sim switch + FOCUS node)
   MSG_PING            = 0x80,
   MSG_PONG            = 0x81,
   MSG_RESET_CMD       = 0x90,   // Reset all nodes command
@@ -212,6 +214,17 @@ typedef struct __attribute__((packed)) {
   uint8_t  reserved[3];     // Padding
   uint8_t  checksum;        // XOR checksum
 } ConfigAckMessage;
+
+// v2 sonar control (6 bytes) - hub broadcast every second while the sonar test mode is on,
+// and right after any message from a node (the node listens briefly after it transmits).
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  sender_id;
+  uint8_t  msg_type;        // MSG_SONAR_CTRL
+  uint8_t  focus_node;      // 0 = none
+  uint8_t  sim_on;          // 1 = sonar nodes generate fake data
+  uint8_t  reserved;
+} SonarCtrlMessage;
 
 // Reset command message (8 bytes) - broadcast to all nodes
 typedef struct __attribute__((packed)) {

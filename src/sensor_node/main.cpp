@@ -62,6 +62,22 @@
 
 #include "config.h"
 #include "messages.h"
+#include <sonar_sim.h>      // v2: fake sonar for the sonar test mode (lib/IceMesh)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 SONAR TEST MODE (see docs/SONAR_SIM.md)
+// The chalet turns it on; hubs relay the switch (MSG_SONAR_CTRL). While it is on, this node stays
+// awake (no deep sleep: battery cost!) and sends fake sonar blocks (MSG_SONAR) to its hub:
+// a summary every 4 s, or the full stream when the chalet picks this hole as FOCUS.
+// ═══════════════════════════════════════════════════════════════════════════
+#ifndef SONAR_SIM_ALLOWED
+#define SONAR_SIM_ALLOWED 1         // 0 = this node ignores the sonar test mode
+#endif
+#ifndef SONAR_SIM_FORCE
+#define SONAR_SIM_FORCE 0           // 1 = bench test: fake sonar from boot, no chalet needed
+#endif
+#define SONAR_CTRL_WAIT_MS     120  // listen after each wake-up TX (est.: hub answers from its loop)
+#define SONAR_CTRL_TIMEOUT_MS  30000UL   // no control for this long: test mode off, back to sleep
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBALS
@@ -77,6 +93,10 @@ RTC_DATA_ATTR uint32_t bootCount = 0;
 RTC_DATA_ATTR uint32_t totalUptimeSec = 0;
 RTC_DATA_ATTR uint16_t messageSeq = 0;      // Monotonic sequence for dedup
 RTC_DATA_ATTR bool lastReedState = false;
+RTC_DATA_ATTR bool sonarSimOn = false;              // v2 sonar test mode (survives a reboot loop guard)
+volatile bool sonarCtrlSeen = false;
+volatile bool sonarCtrlSim = false;
+volatile uint8_t sonarCtrlFocus = 0;
 
 // BUG FIX #7: Track actual sleep duration for accurate timing
 // Records expected sleep duration so we can properly decrement counters on wake
@@ -117,6 +137,8 @@ volatile bool sendSuccess = false;
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupPins();
+void sonarListenCtrl(uint32_t wait_ms);
+void sonarLoop();
 void setupEspNow();
 void readBattery();
 bool readReedSwitch();
@@ -291,6 +313,17 @@ void setup() {
     }
   }
   
+  #if SONAR_SIM_ALLOWED
+  // v2 sonar test mode: the hub answers our TX with its sonar control; if the test mode is on,
+  // stay awake and let loop() stream fake sonar (reed, heartbeat and alerts keep working there).
+  if (SONAR_SIM_FORCE) sonarSimOn = true;
+  else sonarListenCtrl(SONAR_CTRL_WAIT_MS);
+  if (sonarSimOn && SLEEP_ENABLED) {
+    DEBUG_PRINTLN(F("Sonar test mode ON - staying awake (fake sonar)"));
+    return;
+  }
+  #endif
+
   // Calculate actual elapsed time since boot (before entering deep sleep)
   unsigned long elapsedMs = millis();
   totalUptimeSec += (elapsedMs / 1000);
@@ -328,6 +361,9 @@ void setup() {
 
 void loop() {
   static unsigned long lastUptimeUpdate = 0;
+  #if SONAR_SIM_ALLOWED
+  sonarLoop();
+  #endif
 
   // Update uptime every second
   if (millis() - lastUptimeUpdate >= 1000) {
@@ -844,6 +880,15 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
   }
 
+  // v2 sonar control from the hub (test mode switch + FOCUS node)
+  if (msgType == MSG_SONAR_CTRL && len >= (int)sizeof(SonarCtrlMessage)) {
+    const SonarCtrlMessage* c = (const SonarCtrlMessage*)data;
+    sonarCtrlFocus = c->focus_node;
+    sonarCtrlSim = (c->sim_on != 0);
+    sonarCtrlSeen = true;
+    return;
+  }
+
   // Handle reset command from gateway
   if (msgType == MSG_RESET_CMD && len >= sizeof(ResetCmdMessage)) {
     ResetCmdMessage* resetMsg = (ResetCmdMessage*)data;
@@ -1065,5 +1110,61 @@ uint32_t estimateActualSleepDuration(esp_sleep_wakeup_cause_t wakeReason) {
     default:
       // Fresh boot or reset - no sleep time to account for
       return 0;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 SONAR TEST MODE
+// ═══════════════════════════════════════════════════════════════════════════
+
+void sonarListenCtrl(uint32_t wait_ms) {
+  const unsigned long t0 = millis();
+  while (!sonarCtrlSeen && millis() - t0 < wait_ms) delay(5);
+  if (sonarCtrlSeen) { sonarCtrlSeen = false; sonarSimOn = sonarCtrlSim; }
+}
+
+void sonarLoop() {
+  static icemesh::sonar::SonarSource src;
+  static bool started = false;
+  static unsigned long lastTick = 0, lastCtrl = 0;
+  static uint8_t focus = 0;
+  if (sonarCtrlSeen) {
+    sonarCtrlSeen = false;
+    lastCtrl = millis();
+    focus = sonarCtrlFocus;
+    sonarSimOn = sonarCtrlSim || SONAR_SIM_FORCE;
+  }
+  if (sonarSimOn && !started) {
+    src.begin(NODE_ID, 0xF15A0000UL + NODE_ID);
+    started = true; lastTick = millis(); lastCtrl = millis();
+  }
+  if (!sonarSimOn) {
+    if (started) {
+      started = false;
+      DEBUG_PRINTLN(F("Sonar test mode OFF"));
+      if (SLEEP_ENABLED) {
+        totalUptimeSec += millis() / 1000;
+        if (HAS_FLAG(currentFlags, FLAG_FISH_ON)) { fishOnMonitorMode = true; enterDeepSleepFast(); }
+        else { fishOnMonitorMode = false; enterDeepSleep(); }
+      }
+    }
+    return;
+  }
+  if (!SONAR_SIM_FORCE && millis() - lastCtrl > SONAR_CTRL_TIMEOUT_MS) {   // hub gone or test mode off
+    sonarSimOn = false;
+    return;
+  }
+  if (millis() - lastTick > 1000UL) lastTick = millis() - 250UL;           // don't burst after a stall
+  while (millis() - lastTick >= 250UL) {                                     // 4 pings/s
+    lastTick += 250UL;
+    icemesh::sonar::Block out[2];
+    const uint8_t n = src.tick(focus == NODE_ID, out, 2);
+    for (uint8_t i = 0; i < n; i++) {
+      uint8_t frame[3 + icemesh::sonar::MAX_BLOCK];
+      frame[0] = NETWORK_ID; frame[1] = NODE_ID; frame[2] = MSG_SONAR;
+      memcpy(frame + 3, out[i].data, out[i].len);
+      // best effort, no retry: a lost block only leaves a gap on the waterfall
+      esp_now_send(gatewayMacKnown ? gatewayMac : ESPNOW_BROADCAST, frame, 3 + out[i].len);
+    }
   }
 }

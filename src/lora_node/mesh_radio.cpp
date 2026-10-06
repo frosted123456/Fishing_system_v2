@@ -16,6 +16,7 @@
 #include "config.h"
 #include <hub_role.h>
 #include <chalet_role.h>
+#include <sonar_link.h>
 
 using namespace icemesh;
 using namespace icemesh::tdma;
@@ -64,6 +65,8 @@ static volatile bool g_cfg_adaptive = false;
 static volatile bool g_cfg_reset_stats = false;
 static volatile uint8_t g_cfg_focus = 0;
 static volatile bool g_cfg_reset_all = false;
+static volatile bool g_cfg_sonar_sim = false;
+static sonar::SonarStore<16, 128>* g_sonar = nullptr;   // chalet only (~16 KB)
 static uint8_t g_cmd_seq = 0;
 static uint32_t g_cmd_until_ms = 0;
 static uint32_t g_silence_until_ms = 0;
@@ -197,7 +200,7 @@ static void chaletApplyConfig() {   // under lock
   if (g_ch->cmd != CMD_NONE && static_cast<int32_t>(millis() - g_cmd_until_ms) >= 0) g_ch->cmd = CMD_NONE;
   const bool silenced = g_silence_state && static_cast<int32_t>(g_silence_until_ms - millis()) > 0;
   if (g_silence_state && !silenced) { g_silence_state = false; g_silence_event = true; }
-  g_ch->flags = silenced ? BF_SILENCED : 0;
+  g_ch->flags = static_cast<uint8_t>((silenced ? BF_SILENCED : 0) | (g_cfg_sonar_sim ? BF_SONAR_SIM : 0));
   const uint32_t rem_s = silenced ? (g_silence_until_ms - millis()) / 1000 : 0;
   g_ch->silence_10s = static_cast<uint8_t>(rem_s / 10 > 255 ? 255 : rem_s / 10);
 }
@@ -440,6 +443,8 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
   g_nodeq = xQueueCreate(32, sizeof(MeshNodeUpdate));
   if (chalet) {
     g_ch = new ChaletRole<10, 32>();
+    g_sonar = new sonar::SonarStore<16, 128>();
+    g_ch->sonar_sink = g_sonar;
     PlannerConfig& c = g_ch->planner.cfg;
     c.network_id = network_id; c.self_id = self_id; c.frame_ms = 1000;
     c.allowance = 96; c.test_allowance = 160;          // est. budgets, see docs/protocol_v2.md
@@ -688,4 +693,125 @@ uint8_t meshHubSummaries(MeshHubSummary* out, uint8_t max) {
     for (uint8_t m = 0; m < MODE_COUNT; m++) { o.rx += h->stats[m].received; o.sched += h->stats[m].scheduled; }
   }
   return n;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Sonar (test mode + FOCUS)
+// ---------------------------------------------------------------------------------------------
+uint8_t meshSonarVirtualId(uint8_t hub_id, uint8_t k) { return static_cast<uint8_t>(128 + (hub_id & 0x0F) * 8 + (k & 7)); }
+void meshSetSonarSim(bool on) { g_cfg_sonar_sim = on; }
+
+bool meshSonarSim() {
+  if (g_chalet) return g_cfg_sonar_sim;
+  if (g_hub == nullptr) return false;
+  Lock l;
+  return g_hub->sonarSim();
+}
+
+uint8_t meshFocusNode() {
+  if (g_chalet) return g_cfg_focus;
+  if (g_hub == nullptr) return 0;
+  Lock l;
+  return g_hub->focusNode();
+}
+
+bool meshHubPushSonar(const uint8_t* blk, uint8_t len) {
+  if (g_hub == nullptr) return false;
+  Lock l;
+  return g_hub->sonar.push(blk, len, g_hub->plan.frame);
+}
+
+String meshSonarListJson() {
+  String s;
+  s.reserve(1600);
+  s = "{\"sim\":"; s += g_cfg_sonar_sim ? "true" : "false";
+  s += ",\"focus\":"; s += g_cfg_focus;
+  s += ",\"frame\":"; s += g_frame;
+  s += ",\"nodes\":[";
+  if (g_sonar != nullptr) {
+    static sonar::NodeSonar copy[16];
+    uint8_t n = 0;
+    uint32_t ok = 0, bad = 0;
+    {
+      Lock l;
+      for (uint8_t i = 0; i < g_sonar->capacity() && n < 16; i++) {
+        const sonar::NodeSonar* ns = g_sonar->at(i);
+        if (ns != nullptr) copy[n++] = *ns;
+      }
+      ok = g_sonar->blocks_ok; bad = g_sonar->blocks_bad;
+    }
+    for (uint8_t i = 0; i < n; i++) {
+      const sonar::NodeSonar& ns = copy[i];
+      char b[200];
+      snprintf(b, sizeof(b),
+               "%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s}",
+               i ? "," : "", ns.node, ns.hub, static_cast<int>(static_cast<int16_t>(g_frame - ns.frame)), ns.sum.ping,
+               ns.sum.bottom_cm, ns.sum.n_targets, ns.sum.nearest_cm, ns.sum.nearest_level, ns.sum.activity,
+               ns.bg_ver, ns.bg_mask, ns.has_sum ? "true" : "false");
+      s += b;
+    }
+    s += "],\"blocks_ok\":"; s += ok; s += ",\"blocks_bad\":"; s += bad;
+    s += "}";
+    return s;
+  }
+  s += "]}";
+  return s;
+}
+
+// {"node":N,"last":seq,"pings":[[seq,index,bottom,[[track,depth,level,width],..],[[bin,level],..]],..]}
+String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings) {
+  String s;
+  if (g_sonar == nullptr) return F("{\"pings\":[]}");
+  if (max_pings > 64) max_pings = 64;
+  static sonar::StoredPing copy[64];
+  uint16_t n = 0;
+  uint32_t last;
+  {
+    Lock l;
+    const sonar::StoredPing* ptr[64];
+    n = g_sonar->pingsSince(node, since, ptr, 64);
+    const uint16_t skip = n > max_pings ? static_cast<uint16_t>(n - max_pings) : 0;   // newest ones
+    for (uint16_t i = skip; i < n; i++) copy[i - skip] = *ptr[i];
+    n = static_cast<uint16_t>(n - skip);
+    last = g_sonar->lastSeq();
+  }
+  s.reserve(80 + n * 70);
+  s = "{\"node\":"; s += node; s += ",\"last\":"; s += last; s += ",\"pings\":[";
+  for (uint16_t i = 0; i < n; i++) {
+    const sonar::Ping& p = copy[i].p;
+    char b[64];
+    snprintf(b, sizeof(b), "%s[%lu,%u,%u,[", i ? "," : "", static_cast<unsigned long>(copy[i].seq), p.index, p.bottom_cm);
+    s += b;
+    for (uint8_t k = 0; k < p.n_targets; k++) {
+      snprintf(b, sizeof(b), "%s[%u,%u,%u,%u]", k ? "," : "", p.t[k].track, p.t[k].depth_cm, p.t[k].level, p.t[k].width);
+      s += b;
+    }
+    s += "],[";
+    for (uint8_t k = 0; k < p.n_resid; k++) {
+      snprintf(b, sizeof(b), "%s[%u,%u]", k ? "," : "", p.r[k].bin, p.r[k].level);
+      s += b;
+    }
+    s += "]]";
+  }
+  s += "]}";
+  return s;
+}
+
+String meshSonarBgJson(uint8_t node) {
+  if (g_sonar == nullptr) return F("{}");
+  static uint8_t lv[sonar::BINS];
+  uint8_t ver = 0, mask = 0;
+  bool found = false;
+  {
+    Lock l;
+    const sonar::NodeSonar* ns = g_sonar->find(node);
+    if (ns != nullptr) { memcpy(lv, ns->bg, sizeof(lv)); ver = ns->bg_ver; mask = ns->bg_mask; found = true; }
+  }
+  String s;
+  s.reserve(560);
+  s = "{\"node\":"; s += node; s += ",\"ver\":"; s += ver; s += ",\"mask\":"; s += mask;
+  s += ",\"bin_mm\":"; s += sonar::BIN_MM; s += ",\"levels\":\"";
+  if (found) for (uint16_t i = 0; i < sonar::BINS; i++) s += static_cast<char>('0' + (lv[i] & 3));
+  s += "\"}";
+  return s;
 }
