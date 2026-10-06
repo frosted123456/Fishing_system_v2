@@ -378,6 +378,7 @@ static void devCmdQueue(uint8_t node, uint8_t cmd, uint8_t value);
 static void relayRequest(uint8_t dev, bool on);
 void simRequest(uint8_t node, bool sonar, bool hall);
 void simAll(bool on);
+void demoSet(uint8_t hubs, uint8_t holes);
 bool simAnyOn();
 static inline uint8_t simValueOf(bool sonar, bool hall, uint8_t tph) {
   return static_cast<uint8_t>((sonar ? MESH_SIM_SONAR : 0) | (hall ? MESH_SIM_HALL : 0) | ((tph > 63 ? 63 : tph) << 2));
@@ -701,6 +702,7 @@ void loop() {
       break;
 
     case ROLE_GATEWAY_OFFSHORE:
+      meshDemoTick();   // v2: demo network (fake hubs inside this box), when on
       if (settings.webServerEnabled) loopWebServer();
       checkWiFiStatus();
       checkSerialWifiConfig();
@@ -1904,6 +1906,8 @@ static uint8_t simRequested(uint8_t node) {
 
 void simRequest(uint8_t node, bool sonar, bool hall) {
   const uint8_t v = (sonar || hall) ? simValueOf(sonar, hall, simRate) : 0;
+  if (node == 255) meshDemoSetSim(255, v);                              // demo holes: at once (they live here)
+  else if (meshDemoSim(node) != 0xFF) { meshDemoSetSim(node, v); return; }
   if (node == 255) {
     chSimAllSet = true; chSimAllValue = v;
     memset(simReqs, 0, sizeof(simReqs));
@@ -1921,6 +1925,23 @@ void simRequest(uint8_t node, bool sonar, bool hall) {
 void simAll(bool on) {
   settings.sonarSim = on; saveSettings(); meshSetSonarSim(on);
   simRequest(255, on, on);
+}
+
+// v2 demo network (chalet): fake hubs + holes inside this box (mesh_radio.cpp meshDemo*). Turning it
+// off or smaller removes the demo holes from the tables, so no offline ghosts stay on the pages.
+void demoSet(uint8_t hubs, uint8_t holes) {
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
+  meshDemoSet(hubs, holes);
+  int w = 1;
+  for (int i = 1; i < network.node_count; i++) {
+    const NodeState& n = network.nodes[i];
+    const bool gone = meshDemoNode(n.node_id) && meshDemoSim(n.node_id) == 0xFF;
+    if (!gone) { if (w != i) network.nodes[w] = network.nodes[i]; w++; }
+  }
+  for (int i = w; i < network.node_count; i++) memset(&network.nodes[i], 0, sizeof(NodeState));
+  network.node_count = w;
+  updateAlertState();
+  Serial.printf("Demo network: %u hub(s) x %u hole(s)%s\n", meshDemoHubs(), meshDemoHoles(), meshDemoHubs() ? "" : " - off");
 }
 
 bool simAnyOn() {
@@ -2841,6 +2862,13 @@ void checkSerialWifiConfig() {
     else if (a == "ON") hubHotspotOn();
     else if (a == "OFF") hubHotspotOff();
     else Serial.printf("Hotspot %s. Usage: HOTSPOT ON|OFF\n", wifiApActive ? "ON" : "off");
+  } else if (line.startsWith("DEMO")) {
+    // v2 demo network (chalet): DEMO <hubs 0-4> [holes 1-4] | DEMO OFF
+    String a = line.substring(4); a.trim(); a.toUpperCase();
+    if (currentRole != ROLE_GATEWAY_OFFSHORE) Serial.println(F("The demo network runs on the chalet"));
+    else if (a == "OFF" || a == "0") demoSet(0, 3);
+    else if (a.toInt() >= 1 && a.toInt() <= 4) { const int sp = a.indexOf(' '); demoSet((uint8_t)a.toInt(), sp > 0 ? (uint8_t)a.substring(sp + 1).toInt() : 3); }
+    else Serial.printf("Demo network: %u hub(s) x %u hole(s). Usage: DEMO <1-4> [holes 1-4] | DEMO OFF\n", meshDemoHubs(), meshDemoHoles());
   } else if (line.startsWith("SIM")) {
     // v2 simulation (chalet): SIM ALL ON|OFF, SIM <hole> SONAR|HALL|BOTH|OFF, SIM RATE <trips/hour>, SIM
     String a = line.substring(3); a.trim(); a.toUpperCase();
@@ -3578,6 +3606,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <h2>Test &amp; simulation</h2>
       <div class="form">
         <div class="btnrow"><button class="btn" type="button" id="simAllOn">Everything ON</button><button class="btn" type="button" id="simAllOff">Everything OFF</button></div>
+        <label class="f">Demo network on this box (no other hardware)<select id="simDemo"><option value="0">Off</option><option value="1x3">1 hub x 3 holes</option><option value="2x3">2 hubs x 3 holes</option><option value="3x3">3 hubs x 3 holes</option><option value="4x3">4 hubs x 3 holes</option><option value="3x4">3 hubs x 4 holes</option><option value="4x4">4 hubs x 4 holes</option></select><small>Fake hubs and holes inside the chalet, marked DEMO / SIM. Off after a reboot.</small></label>
         <span class="tog"><span id="lblSim2">Test holes on the hubs (virtual tip-ups)</span><button type="button" class="switch" role="switch" id="fSim" aria-labelledby="lblSim2" aria-checked="false"></button></span>
         <label class="f">Fake fish (flag up) per hole<select id="simRate"><option value="2">about 2 per hour</option><option value="6">about 6 per hour</option><option value="12">about 12 per hour</option><option value="30">about 30 per hour</option><option value="60">about 1 per minute</option></select><small>Applies to the next switch you turn on</small></label>
         <div class="tablewrap"><table class="simt" id="simTable"></table></div>
@@ -4231,6 +4260,7 @@ function postSim(o) { api('/api/sim', o).then(d => { sim = d; renderSim(); }).ca
 function renderSim() {
   if (!sim) return;
   $('fSim').setAttribute('aria-checked', String(!!sim.virtual));
+  if (document.activeElement !== $('simDemo')) { const dv = sim.demo_hubs ? sim.demo_hubs + 'x' + sim.demo_holes : '0'; $('simDemo').value = [...$('simDemo').options].some(o => o.value === dv) ? dv : '0'; }
   if (document.activeElement !== $('simRate')) $('simRate').value = String([2, 6, 12, 30, 60].reduce((a, b) => Math.abs(b - sim.rate) < Math.abs(a - sim.rate) ? b : a, 6));
   let h = '<tr><th>Hole</th><th>Fake sonar</th><th>Fake fish</th><th></th></tr>';
   (sim.holes || []).forEach(x => {
@@ -4255,6 +4285,7 @@ $('fSim').addEventListener('click', () => postSim({ virtual: !(sim && sim.virtua
 $('simAllOn').addEventListener('click', () => postSim({ all: true }));
 $('simAllOff').addEventListener('click', () => postSim({ all: false }));
 $('simRate').addEventListener('change', e => postSim({ rate: +e.target.value }));
+$('simDemo').addEventListener('change', e => { const v = e.target.value.split('x'); postSim({ demo: +v[0] || 0, demo_holes: +v[1] || 3 }); });
 function renderAbout() {
   if (!st) return;
   const w = st.wifi || {}, l = st.lora || {};
@@ -4894,6 +4925,7 @@ static void buildScreenModel() {
       ScrHubLink& o = m.hubs[m.n_hubs++];
       o.id = hl[k].id; o.lora_rssi = hl[k].rssi; o.eb_hops = hl[k].hops;
       o.lora_ok = hl[k].lora_age_s >= 0 && hl[k].lora_age_s < 30; o.eb_ok = hl[k].eb_age_s >= 0 && hl[k].eb_age_s < 30;
+      o.demo = hl[k].demo;
     }
   } else {
     MeshHubView v; meshHubView(v);
@@ -4937,7 +4969,7 @@ enum OptItem : uint8_t {
   OI_NETRESET, OI_REBOOT, OI_BUILT,
   OI_W_STATUS, OI_W_NAME, OI_W_CHOOSE, OI_W_TYPE, OI_W_ADDR, OI_W_RETRY, OI_W_CH, OI_W_AP, OI_W_APPASS, OI_W_FORGET,
   OI_SC_NET, OI_SC_AGAIN,
-  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE
+  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES
 };
 struct OptRow { uint8_t item, idx; };
 static const uint8_t OPT_MAX = 56;
@@ -4972,6 +5004,7 @@ static const char* optHint(uint8_t item) {
     case OI_SC_AGAIN: return "OK: scan again";
     case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: return "OK: ask to confirm";
     case OI_S_HOLE: return "OK: next mode";
+    case OI_S_DEMO: return "OK: off/1/2/3/4 hubs";
     case OI_NONE: case OI_BUILT: case OI_W_STATUS: case OI_W_NAME: case OI_W_ADDR: case OI_W_CH: case OI_W_AP: case OI_W_APPASS:
       return "Esc: back";
     default: return "OK: change";
@@ -5035,6 +5068,9 @@ static void optBuild(ScrOptions* o) {
     }
     if (optScanN != -2) optRow(o, OI_SC_AGAIN, 0, "Scan again", "");
   } else if (optMenu == OM_SIM) {
+    if (meshDemoHubs()) snprintf(v, sizeof(v), "%u hubs", meshDemoHubs()); else snprintf(v, sizeof(v), "off");
+    optRow(o, OI_S_DEMO, 0, "Demo network", v);
+    if (meshDemoHubs()) { snprintf(v, sizeof(v), "%u", meshDemoHoles()); optRow(o, OI_S_DEMOHOLES, 0, "Holes per hub", v); }
     optRow(o, OI_S_ALL, 0, "All holes", simAnyOn() ? "ON" : "OFF");
     optRow(o, OI_S_VIRTUAL, 0, "Test holes", settings.sonarSim ? "ON" : "OFF");
     snprintf(v, sizeof(v), "%u /h", simRate); optRow(o, OI_S_RATE, 0, "Fake fish rate", v);
@@ -5042,9 +5078,10 @@ static void optBuild(ScrOptions* o) {
     for (int i = 0; i < network.node_count && optN < OPT_MAX; i++) {
       const NodeState& n = network.nodes[i];
       if (n.node_id == 0 || n.node_id == NODE_ID || !n.initialized) continue;
-      const uint8_t req = simRequested(n.node_id) & 3;
+      const uint8_t dv = meshDemoSim(n.node_id);   // demo hole: what it runs (no confirmation needed)
+      const uint8_t req = (dv != 0xFF ? dv : simRequested(n.node_id)) & 3;
       const bool on = HAS_FLAG(n.flags, FLAG_SIM);
-      snprintf(v, sizeof(v), "%s%s", SIMTXT[req], (req != 0) != on ? "~" : "");   // ~ = the hole has not confirmed yet
+      snprintf(v, sizeof(v), "%s%s", SIMTXT[req], dv == 0xFF && (req != 0) != on ? "~" : "");   // ~ = the hole has not confirmed yet
       char nm[20]; if (n.name[0]) snprintf(nm, sizeof(nm), "%s", n.name); else snprintf(nm, sizeof(nm), "Hole %u", n.node_id);
       optRow(o, OI_S_HOLE, (uint8_t)i, nm, v);
     }
@@ -5178,6 +5215,8 @@ static void optActivate(const OptRow& row) {
       else { optTextStep = 1; snprintf(optText, sizeof(optText), "%s", strcmp(optSsid, storedSsid) == 0 ? storedPassword : ""); optMode = SO_TEXT; }
       break;
     case OI_S_ALL: simAll(!simAnyOn()); break;
+    case OI_S_DEMO: demoSet((uint8_t)((meshDemoHubs() + 1) % 5), meshDemoHoles()); break;   // off -> 1 -> 2 -> 3 -> 4 -> off
+    case OI_S_DEMOHOLES: demoSet(meshDemoHubs(), (uint8_t)(meshDemoHoles() % 4 + 1)); break;
     case OI_S_VIRTUAL: settings.sonarSim = !settings.sonarSim; meshSetSonarSim(settings.sonarSim); saveSettings(); break;
     case OI_S_RATE: {
       uint8_t k = 0; while (k < 5 && RATE_STEPS[k] <= simRate) k++;
@@ -5186,7 +5225,8 @@ static void optActivate(const OptRow& row) {
     case OI_S_HOLE: {
       if (row.idx >= network.node_count) break;
       const uint8_t node = network.nodes[row.idx].node_id;
-      const uint8_t nx = (uint8_t)((simRequested(node) + 1) & 3);   // off -> sonar -> fish -> both -> off
+      const uint8_t dv = meshDemoSim(node);
+      const uint8_t nx = (uint8_t)(((dv != 0xFF ? dv : simRequested(node)) + 1) & 3);   // off -> sonar -> fish -> both -> off
       simRequest(node, (nx & MESH_SIM_SONAR) != 0, (nx & MESH_SIM_HALL) != 0);
       break;
     }
@@ -6213,6 +6253,7 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   if (isNew) {
     String saved = loadNodeName(u.node);
     if (saved.length() > 0) { strncpy(n->name, saved.c_str(), sizeof(n->name) - 1); n->name[sizeof(n->name) - 1] = '\0'; }
+    else if (meshDemoNode(u.node)) meshDemoName(u.node, n->name, sizeof(n->name));
   }
   const bool wasFish = HAS_FLAG(n->flags, FLAG_FISH_ON);
   const bool fish = (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING);
@@ -6631,6 +6672,8 @@ static String simJson() {
   s = "{\"virtual\":"; s += settings.sonarSim ? "true" : "false";
   s += ",\"rate\":"; s += simRate;
   s += ",\"all\":"; s += chSimAllSet ? String(chSimAllValue) : String(-1);
+  s += ",\"demo_hubs\":"; s += meshDemoHubs();
+  s += ",\"demo_holes\":"; s += meshDemoHoles();
   s += ",\"holes\":[";
   bool first = true;
   for (int i = 0; i < network.node_count; i++) {
@@ -6640,7 +6683,8 @@ static String simJson() {
     first = false;
     s += "{\"id\":"; s += n.node_id;
     s += ",\"name\":\""; for (const char* c = n.name; *c; c++) if (*c != '"' && *c != '\\') s += *c; s += "\"";
-    s += ",\"req\":"; s += simRequested(n.node_id);
+    const uint8_t dv = meshDemoSim(n.node_id);   // demo hole: what it runs (256 = explicitly off, for the page)
+    s += ",\"req\":"; s += dv != 0xFF ? String(dv ? dv : 256) : String(simRequested(n.node_id));
     s += ",\"on\":"; s += HAS_FLAG(n.flags, FLAG_SIM) ? "true" : "false";
     s += ",\"virtual\":"; s += n.node_id >= 128 ? "true" : "false";
     s += "}";
@@ -6658,6 +6702,7 @@ void handleWebApiSimPost() {
   if (doc.containsKey("rate")) { const int r = doc["rate"].as<int>(); if (r >= 1 && r <= 63) simRate = (uint8_t)r; }
   if (doc.containsKey("virtual")) { settings.sonarSim = doc["virtual"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
   if (doc.containsKey("all")) simAll(doc["all"].as<bool>());
+  if (doc.containsKey("demo")) demoSet((uint8_t)(doc["demo"] | 0), (uint8_t)(doc["demo_holes"] | 3));
   if (doc.containsKey("hole")) {
     const int h = doc["hole"].as<int>();
     if (h > 0 && h <= 255) simRequest((uint8_t)h, doc["sonar"] | false, doc["hall"] | false);

@@ -30,7 +30,7 @@ struct ScrHole {
   uint8_t sim;               // simulation on this hole: bit0 sonar, bit1 Hall sensor (trips)
 };
 
-struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; };
+struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; bool demo; };   // demo = fake hub inside the chalet
 
 // Options page: the list (and its text entry / yes-no) is decided by the firmware, drawn here.
 struct ScrRow { char label[20]; char value[18]; bool sub; };   // sub = opens a list (">")

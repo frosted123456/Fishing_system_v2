@@ -18,6 +18,7 @@
 #include <chalet_role.h>
 #include <sonar_link.h>
 #include <eb_link.h>
+#include <sonar_sim.h>
 
 using namespace icemesh;
 using namespace icemesh::tdma;
@@ -124,7 +125,7 @@ static volatile uint32_t g_eb_hub_last_ms = 0;  // chalet: last hub packet over 
 struct DevCmdEvt { uint8_t cmd, target, value; };
 static DevCmdEvt g_devq[4];
 static volatile uint8_t g_devq_n = 0;   // under lock
-struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; };
+struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; bool demo; };
 static HubPath g_paths[12];                     // chalet, under lock: how each hub was last heard
 // Setup phase (chalet): no automatic channel move until a hub has been in the network for 5 min, or
 // 10 min after boot (a channel so busy that no hub can join). Hubs: TransportPolicy::armed().
@@ -1453,11 +1454,222 @@ uint8_t meshHubLinks(MeshHubLink* out, uint8_t max) {
     const HubPath& p = g_paths[i];
     if (p.id == 0) continue;
     MeshHubLink& o = out[n++];
-    o.id = p.id; o.hops = p.hops;
+    o.id = p.id; o.hops = p.hops; o.demo = p.demo;
     o.lora_age_s = p.lora_ms ? static_cast<int32_t>((now - p.lora_ms) / 1000) : -1;
     o.eb_age_s = p.eb_ms ? static_cast<int32_t>((now - p.eb_ms) / 1000) : -1;
     const HubInfo* h = g_ch->planner.find(p.id);
     o.rssi = h != nullptr ? h->last_rssi : 0;
   }
   return n;
+}
+
+// =============================================================================================
+// v2 DEMO NETWORK (chalet only, no other hardware) - docs/SONAR_SIM.md "Demo network"
+// Up to 4 fake hubs with 1-4 holes each run inside the chalet. Each one is a real HubRole: its line
+// table, sonar outbox and hub packet are the ones a real hub uses; the packet goes into the chalet
+// through the backbone entry (onEbHubPacket) and the chalet's backbone beacon is fed back to it (acks,
+// focus, CMD_SET_SIM). Fake sonar: a light BASE summary every 2 s per hole, and the full fake fish
+// finder (SonarSource, ~15 KB, one only) for the FOCUS hole. Fake Hall trips per hole when asked.
+// IDs (keep them free in a real network): hubs 121-124, their own hole = hub ID, other holes =
+// meshSonarVirtualId(hub, 0..2) (200-226). Not saved: off after every reboot.
+// Threads: the demo state is used from loop() only; the lock is taken only around the chalet objects
+// (g_ch, g_paths), never around the fake sonar work, so the radio task keeps its timing.
+// =============================================================================================
+static const uint8_t DEMO_HUB0 = 121, DEMO_MAX_HUBS = 4, DEMO_MAX_HOLES = 4;
+struct DemoHole {
+  uint8_t id, sim, batt, nf, act_bits;
+  bool tripped;
+  uint32_t until_ms, next_ms;
+  uint16_t bottom_cm, bait_cm, ping;
+  uint16_t fd[3]; uint8_t fl[3];   // fake fish: depth, level (0 = none)
+};
+struct DemoHub { HubRole<8>* role; DemoHole holes[DEMO_MAX_HOLES]; };
+static DemoHub g_demo[DEMO_MAX_HUBS];
+static uint8_t g_demo_hubs = 0, g_demo_holes = 3;
+static sonar::SonarSource* g_demo_src = nullptr;   // full fake sonar of the FOCUS hole
+static uint8_t g_demo_src_node = 0;
+static uint32_t g_demo_rng = 0x1234567u;
+
+static uint32_t demoRand() { g_demo_rng ^= g_demo_rng << 13; g_demo_rng ^= g_demo_rng >> 17; g_demo_rng ^= g_demo_rng << 5; return g_demo_rng; }
+
+static uint8_t demoHoleId(uint8_t hub, uint8_t k) { return k == 0 ? hub : meshSonarVirtualId(hub, static_cast<uint8_t>(k - 1)); }
+
+bool meshDemoNode(uint8_t id) {
+  for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)
+    for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++) if (demoHoleId(static_cast<uint8_t>(DEMO_HUB0 + h), k) == id) return true;
+  return false;
+}
+
+static DemoHole* demoHole(uint8_t id) {
+  for (uint8_t h = 0; h < g_demo_hubs; h++)
+    for (uint8_t k = 0; k < g_demo_holes; k++) if (g_demo[h].holes[k].id == id) return &g_demo[h].holes[k];
+  return nullptr;
+}
+
+uint8_t meshDemoHubs() { return g_demo_hubs; }
+uint8_t meshDemoHoles() { return g_demo_holes; }
+
+uint8_t meshDemoSim(uint8_t id) {
+  const DemoHole* d = demoHole(id);
+  return d ? d->sim : 0xFF;
+}
+
+void meshDemoName(uint8_t id, char* out, size_t n) {   // "Demo A1": pocket letter, hole number
+  for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)
+    for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++)
+      if (demoHoleId(static_cast<uint8_t>(DEMO_HUB0 + h), k) == id) { snprintf(out, n, "Demo %c%u", 'A' + h, k + 1); return; }
+  if (n) out[0] = 0;
+}
+
+static void demoApplySim(uint8_t target, uint8_t value) {
+  for (uint8_t h = 0; h < g_demo_hubs; h++)
+    for (uint8_t k = 0; k < g_demo_holes; k++) {
+      DemoHole& d = g_demo[h].holes[k];
+      if (target != 255 && target != d.id) continue;
+      d.sim = value; d.tripped = false; d.next_ms = 0;
+    }
+}
+
+void meshDemoSetSim(uint8_t id, uint8_t value) { demoApplySim(id, value); }
+
+void meshDemoSet(uint8_t hubs, uint8_t holes) {
+  if (!g_chalet || g_ch == nullptr) return;
+  if (hubs > DEMO_MAX_HUBS) hubs = DEMO_MAX_HUBS;
+  if (holes < 1) holes = 1;
+  if (holes > DEMO_MAX_HOLES) holes = DEMO_MAX_HOLES;
+  if (hubs == g_demo_hubs && holes == g_demo_holes) return;
+  {
+    Lock l;   // forget what is not in the new layout (holes and hubs), so the pages do not keep offline ghosts
+    for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)
+      for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++)
+        if (h >= hubs || k >= holes) g_ch->nodes.forget(demoHoleId(static_cast<uint8_t>(DEMO_HUB0 + h), k));
+    for (uint8_t i = 0; i < 12; i++) if (g_paths[i].demo && g_paths[i].id >= DEMO_HUB0 + hubs) memset(&g_paths[i], 0, sizeof(g_paths[i]));
+  }
+  g_demo_rng ^= millis();
+  for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++) {
+    DemoHub& d = g_demo[h];
+    const uint8_t hub_id = static_cast<uint8_t>(DEMO_HUB0 + h);
+    if (h < hubs && d.role == nullptr) {
+      d.role = new HubRole<8>();
+      d.role->network_id = g_net; d.role->self = hub_id;
+    }
+    if (h < hubs) {
+      d.role->table = LineTable<8>();   // fresh table for the new layout
+      for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++) {
+        DemoHole& o = d.holes[k];
+        const bool keep = o.id == demoHoleId(hub_id, k) && k < g_demo_holes && h < g_demo_hubs;
+        if (!keep) {
+          memset(&o, 0, sizeof(o));
+          o.id = demoHoleId(hub_id, k);
+          o.sim = MESH_SIM_SONAR;                                       // fake sonar on, fake trips off
+          o.batt = static_cast<uint8_t>(55 + demoRand() % 45);
+          o.bottom_cm = static_cast<uint16_t>(350 + demoRand() % 650);  // 3.5-10 m
+          o.bait_cm = static_cast<uint16_t>(o.bottom_cm - 40 - demoRand() % 80);
+        }
+      }
+    }
+  }
+  g_demo_hubs = hubs; g_demo_holes = holes;
+  if (hubs == 0 && g_demo_src != nullptr) { delete g_demo_src; g_demo_src = nullptr; g_demo_src_node = 0; }
+}
+
+// light fake sonar: bottom, bait and 0-3 fish wandering, as one BASE block (what a non-focus hole sends)
+static void demoSummary(DemoHole& d, HubRole<8>& role) {
+  for (uint8_t i = 0; i < 3; i++) {
+    if (d.fl[i] == 0) {
+      if (demoRand() % 100 < 12) {   // a fish comes in
+        d.fd[i] = static_cast<uint16_t>(100 + demoRand() % (d.bottom_cm > 160 ? d.bottom_cm - 120 : 40));
+        d.fl[i] = static_cast<uint8_t>(1 + demoRand() % 3);
+      }
+    } else {
+      const int step = static_cast<int>(demoRand() % 31) - 15;
+      int nd = static_cast<int>(d.fd[i]) + step;
+      if (nd < 60) nd = 60;
+      if (nd > d.bottom_cm - 15) nd = d.bottom_cm - 15;
+      d.fd[i] = static_cast<uint16_t>(nd);
+      if (demoRand() % 100 < 10) d.fl[i] = 0;   // it leaves
+    }
+  }
+  sonar::Summary s;
+  memset(&s, 0, sizeof(s));
+  d.ping = static_cast<uint16_t>(d.ping + 8);
+  s.node = d.id; s.ping = d.ping; s.hard = sonar::BH_MEDIUM;
+  s.bottom_cm = static_cast<uint16_t>(d.bottom_cm + demoRand() % 5 - 2);
+  s.list[s.n_list].track = 0; s.list[s.n_list].depth_cm = d.bait_cm; s.list[s.n_list].level = 2; s.n_list++;
+  uint8_t fish = 0;
+  for (uint8_t i = 0; i < 3; i++) {
+    if (d.fl[i] == 0 || s.n_list >= sonar::MAX_TARGETS) continue;
+    s.list[s.n_list].track = 1; s.list[s.n_list].depth_cm = d.fd[i]; s.list[s.n_list].level = d.fl[i]; s.n_list++;
+    fish++;
+  }
+  s.n_targets = fish;
+  d.act_bits = static_cast<uint8_t>((d.act_bits << 1) | (fish ? 1 : 0));
+  uint8_t a = 0; for (uint8_t b = d.act_bits; b; b >>= 1) a = static_cast<uint8_t>(a + (b & 1));
+  s.activity = static_cast<uint8_t>(a * 2 > 15 ? 15 : a * 2);
+  sonar::summaryNearest(s);
+  uint8_t blk[sonar::MAX_BLOCK];
+  const size_t len = sonar::encodeSummary(s, blk, sizeof(blk));
+  if (len > 0) role.sonar.push(blk, static_cast<uint8_t>(len), role.frameNow());
+}
+
+static bool demoTripped(DemoHole& d, uint32_t now) {
+  if (!(d.sim & MESH_SIM_HALL)) { d.tripped = false; return false; }
+  const uint32_t mean = 3600000UL / ((d.sim >> 2) ? (d.sim >> 2) : 6);
+  if (d.tripped && static_cast<int32_t>(now - d.until_ms) >= 0) { d.tripped = false; d.next_ms = 0; }
+  if (!d.tripped) {
+    if (d.next_ms == 0) { d.next_ms = now + mean / 2 + demoRand() % (mean + 1); if (d.next_ms == 0) d.next_ms = 1; }
+    if (static_cast<int32_t>(now - d.next_ms) >= 0) { d.tripped = true; d.until_ms = now + 20000UL + demoRand() % 70001UL; }
+  }
+  return d.tripped;
+}
+
+// chalet loop(): 4 times a second at most. Packets every 500 ms, BASE every 2 s, focus pings 4/s.
+void meshDemoTick() {
+  if (g_demo_hubs == 0 || g_ch == nullptr) return;
+  static uint32_t last_ms = 0, last_pkt = 0, last_base = 0;
+  static uint8_t eb[MAX_PACKET], pl[MAX_PACKET];
+  const uint32_t now = millis();
+  if (now - last_ms < 250) return;
+  last_ms = now;
+  // 1. the chalet beacon, as the hubs get it on the backbone: acks, focus, commands
+  size_t bl; uint8_t focus;
+  { Lock l; bl = g_ch->buildEbBeacon(eb, sizeof(eb)); focus = g_ch->focus_node; }
+  for (uint8_t h = 0; h < g_demo_hubs; h++) {
+    HubRole<8>& r = *g_demo[h].role;
+    uint8_t cmd = CMD_NONE;
+    if (bl > 0 && r.onEbBeacon(eb, bl, cmd) && cmd == CMD_SET_SIM) demoApplySim(r.last_cmd_target, r.last_cmd_value);
+  }
+  // 2. focus hole: the full fake fish finder (4 pings/s)
+  DemoHole* fd = demoHole(focus);
+  if (fd != nullptr && (fd->sim & MESH_SIM_SONAR)) {
+    if (g_demo_src == nullptr) g_demo_src = new sonar::SonarSource();
+    if (g_demo_src_node != focus) { g_demo_src->begin(focus, 7919UL * focus + 17UL, static_cast<uint16_t>(demoRand())); g_demo_src_node = focus; }
+    sonar::Block out[2];
+    const uint8_t n = g_demo_src->tick(true, out, 2);
+    for (uint8_t h = 0; h < g_demo_hubs; h++)
+      for (uint8_t k = 0; k < g_demo_holes; k++)
+        if (g_demo[h].holes[k].id == focus)
+          for (uint8_t i = 0; i < n; i++) g_demo[h].role->sonar.push(out[i].data, out[i].len, g_demo[h].role->frameNow());
+  }
+  const bool base = now - last_base >= 2000;
+  if (base) last_base = now;
+  if (now - last_pkt < 500) return;
+  last_pkt = now;
+  // 3. each hub: line states, BASE sonar, packet -> chalet
+  for (uint8_t h = 0; h < g_demo_hubs; h++) {
+    DemoHub& d = g_demo[h];
+    HubRole<8>& r = *d.role;
+    for (uint8_t k = 0; k < g_demo_holes; k++) {
+      DemoHole& o = d.holes[k];
+      const uint8_t st = demoTripped(o, now) ? MESH_LS_TRIPPED : MESH_LS_IDLE;
+      r.table.observe(o.id, st, 0, MESH_LF_SIM, o.batt, now);
+      if (base && (o.sim & MESH_SIM_SONAR) && o.id != focus) demoSummary(o, r);
+    }
+    const size_t n = r.buildHubFree(pl, sizeof(pl), 0, 3900, static_cast<uint16_t>(now / 60000UL), r.frameNow());
+    if (n == 0) continue;
+    Lock l;
+    ChaletRxResult res;
+    if (g_ch->onEbHubPacket(pl, n, 0, res)) chaletHandle(res, true, 0);
+    for (uint8_t i = 0; i < 12; i++) if (g_paths[i].id == r.self) g_paths[i].demo = true;
+  }
 }

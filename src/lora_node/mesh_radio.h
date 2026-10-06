@@ -120,7 +120,17 @@ String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glan
 // ---- raw views for the OLED screens (chalet) ----
 struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; };   // t: depth | level << 11 | bait << 13
 struct MeshPingLite { uint16_t bottom_cm; uint8_t n; uint16_t d[5]; uint8_t lv[5]; uint8_t bait_mask; };
-struct MeshHubLink { uint8_t id; int8_t rssi; int32_t lora_age_s, eb_age_s; uint8_t hops; };
+struct MeshHubLink { uint8_t id; int8_t rssi; int32_t lora_age_s, eb_age_s; uint8_t hops; bool demo; };
 bool meshSonarSummary(uint8_t node, MeshSonarLite& out);
 uint8_t meshFocusPings(uint8_t node, MeshPingLite* out, uint8_t max);   // newest `max` pings, oldest first
 uint8_t meshHubLinks(MeshHubLink* out, uint8_t max);
+
+// ---- v2 demo network (chalet only, no other hardware; docs/SONAR_SIM.md) ----
+void meshDemoSet(uint8_t hubs, uint8_t holes_per_hub);   // 0 hubs = off; 1-4 hubs, 1-4 holes each
+uint8_t meshDemoHubs();
+uint8_t meshDemoHoles();
+bool meshDemoNode(uint8_t id);                            // a demo hole ID (fixed IDs, on or off)
+uint8_t meshDemoSim(uint8_t id);                          // its simulation value (0xFF = not running)
+void meshDemoSetSim(uint8_t id, uint8_t value);           // 255 = every demo hole (applied at once)
+void meshDemoName(uint8_t id, char* out, size_t n);       // "Demo A1"
+void meshDemoTick();                                      // chalet loop()

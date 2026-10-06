@@ -83,3 +83,19 @@ set one by one or all at once: Settings → Test & simulation, serial `SIM <hole
 - Every hole running a simulation reports it (tip-up `FLAG_SIM` → hub `LF_SIM` → chalet) and is marked **SIM** on the
   page, the phone alert and the OLED. Test holes (virtual, IDs ≥ 128) are always SIM.
 - "Test holes on the hubs" (the former sonar test mode switch) creates the virtual holes; they run fake sonar by default.
+
+## Demo network (chalet only, no other hardware) — 2026-10-06
+Frank: "I thought I could fake entire modules, but I need to program and power a module to activate test mode."
+The test holes above are made by a hub, so a powered hub was needed. The demo network runs **inside the chalet box**.
+
+| | |
+|---|---|
+| Turn on | OLED: Menu › Settings › Simulation › **Demo network** (off/1/2/3/4 hubs) and **Holes per hub** (1-4) · web: Settings › Test & simulation › "Demo network on this box" · serial: `DEMO 3 3`, `DEMO OFF` |
+| Default | 3 hubs × 3 holes (Frank's layout), fake sonar on every hole, fake fish (Hall) **off** (turn on per hole or "All holes") |
+| How | each fake hub is a real `HubRole` (line table, sonar outbox, hub packet); its packet enters the chalet through the backbone entry `onEbHubPacket`, and the chalet's backbone beacon is fed back to it (acks, FOCUS, `CMD_SET_SIM`). Pages, alerts, web, glance and FOCUS see it like a real pocket |
+| Sonar | non-focus holes: light BASE summary every 2 s (bottom, bait, 0-3 wandering fish); the FOCUS hole: the full fake fish finder (`SonarSource`, ~15 KB, only one) |
+| Marks | hubs: **DEMO** on the home page, "H121 SIM" on Network; holes: SIM flag, names "Demo A1"… |
+| IDs | hubs 121-124 (own hole = hub ID), other holes 200-226 (`meshSonarVirtualId`). Keep these IDs free in a real network |
+| Not saved | off after every reboot (never left running on the ice). Turning it off removes the demo holes from the pages |
+| Not simulated | LoRa airtime / slots (the demo hubs never join the LoRa plan), radio range, battery |
+| Host test | `test/test_demo_net` (holes appear with pocket + SIM, acks clear, BASE reaches the store, SET_SIM reaches the hubs, forget) |

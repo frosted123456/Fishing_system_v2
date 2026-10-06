@@ -79,6 +79,13 @@ class ChaletNodes {
   }
   const NodeView* at(uint8_t i) const { return (i < MAX_NODES && v_[i].used) ? &v_[i] : nullptr; }
   static uint8_t capacity() { return MAX_NODES; }
+  // Drops a node from the table (demo network switched off). Returns false if it was not there.
+  bool forget(uint8_t node) {
+    NodeView* v = findMut(node);
+    if (v == nullptr) return false;
+    v->used = false;
+    return true;
+  }
 
  private:
   NodeView* findMut(uint8_t node) {

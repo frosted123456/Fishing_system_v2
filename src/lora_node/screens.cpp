@@ -159,7 +159,7 @@ void homeChalet(u8g2_t* u, const ScreenModel& m, bool blink) {
     if (!two) {
       // link of that pocket, at the right
       const char* lk = "";
-      for (uint8_t k = 0; k < m.n_hubs; k++) if (m.hubs[k].id == pk[p]) lk = m.hubs[k].lora_ok ? "" : (m.hubs[k].eb_ok ? "ESP-NOW" : "LOST");
+      for (uint8_t k = 0; k < m.n_hubs; k++) if (m.hubs[k].id == pk[p]) lk = m.hubs[k].demo ? "DEMO" : m.hubs[k].lora_ok ? "" : (m.hubs[k].eb_ok ? "ESP-NOW" : "LOST");
       if (lk[0]) snprintf(s, sizeof(s), "%s", lk);
       else if (off) snprintf(s, sizeof(s), "%d off", off);
       else snprintf(s, sizeof(s), "OK");
@@ -334,7 +334,8 @@ void networkPage(u8g2_t* u, const ScreenModel& m) {
     int x = 0, y = 41;
     for (uint8_t k = 0; k < m.n_hubs; k++) {
       const ScrHubLink& h = m.hubs[k];
-      if (h.lora_ok) snprintf(s, sizeof(s), "H%u %d", h.id, h.lora_rssi);
+      if (h.demo) snprintf(s, sizeof(s), "H%u SIM", h.id);
+      else if (h.lora_ok) snprintf(s, sizeof(s), "H%u %d", h.id, h.lora_rssi);
       else if (h.eb_ok) snprintf(s, sizeof(s), "H%u E%u", h.id, h.eb_hops);
       else snprintf(s, sizeof(s), "H%u --", h.id);
       u8g2_DrawStr(u, x, y, s);
