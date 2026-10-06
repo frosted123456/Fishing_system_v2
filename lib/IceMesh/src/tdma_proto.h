@@ -22,7 +22,10 @@ namespace tdma {
 static const uint8_t VER = 0xF2;
 static const uint8_t HDR_LEN = 6;
 static const uint8_t MAX_PACKET = 255;
-static const uint8_t MAX_SLOTS = 12;
+#ifndef ICEMESH_MAX_SLOTS
+#define ICEMESH_MAX_SLOTS 12    // slots per beacon (tools/sim builds variants with -DICEMESH_MAX_SLOTS=16)
+#endif
+static const uint8_t MAX_SLOTS = ICEMESH_MAX_SLOTS;
 static const uint8_t MAX_ACKS = 16;
 static const uint8_t ID_NONE = 0;
 
