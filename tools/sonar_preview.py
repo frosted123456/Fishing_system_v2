@@ -18,7 +18,7 @@ PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
 
 def page_html():
     src = open(os.path.join(ROOT, "src", "lora_node", "main.cpp"), encoding="utf-8").read()
-    i = src.index("void handleWebSonar()")
+    i = src.index("void handleWebSonar() {")
     a = src.index('R"rawliteral(', i) + len('R"rawliteral(')
     return src[a:src.index(')rawliteral"', a)]
 

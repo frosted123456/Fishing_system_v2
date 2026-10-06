@@ -18,10 +18,11 @@ class SonarSim {
  public:
   enum { PINGS_PER_S = 4, MAX_FISH = 2 };
 
-  void begin(uint32_t seed) {
+  // start_index: first ping index (use a random value on hardware so a restart does not look like old pings)
+  void begin(uint32_t seed, uint16_t start_index = 0) {
     rng_ = seed ? seed * 2654435761u : 0x9E3779B9u;
     if (rng_ == 0) rng_ = 1;
-    t_ = 0;
+    t_ = start_index;
     bottom0_mm_ = static_cast<int32_t>(range(2500, 9500));    // 2.5-9.5 m
     bait_off_mm_ = static_cast<int32_t>(range(300, 1200));    // bait 30-120 cm above bottom
     weed_mm_ = static_cast<int32_t>(range(0, 450));
@@ -41,7 +42,7 @@ class SonarSim {
     memset(&p, 0, sizeof(p));
     p.index = static_cast<uint16_t>(t_);
     // bottom: slow +-4 cm swell over 90 s; rare loss of bottom lock
-    const float ph = static_cast<float>(t_ % 360u) * (6.2831853f / 360.0f);
+    const float ph = static_cast<float>(t_ % 360u) * (6.2831853f / 360.0f);   // phase only, index offset is harmless
     bottom_mm_ = bottom0_mm_ + static_cast<int32_t>(40.0f * sinf(ph));
     const bool lost = (rnd() % 400u) == 0;
     p.bottom_cm = lost ? DEPTH_NONE : clampDepth(bottom_mm_ / 10);
@@ -192,8 +193,8 @@ class SonarSource {
   SonarSim sim;
   uint32_t blocks_out = 0, pings_dropped = 0;
 
-  void begin(uint8_t node, uint32_t seed) {
-    node_ = node; sim.begin(seed);
+  void begin(uint8_t node, uint32_t seed, uint16_t start_index = 0) {
+    node_ = node; sim.begin(seed, start_index);
     n_pend_ = 0; since_base_ = BASE_EVERY; since_bg_ = BG_EVERY; bg_seg_ = 0; act_bits_ = 0;
     was_focus_ = false; last_bg_ver_ = sim.bgVersion(); last_fish_ = 0;
     memset(&last_, 0, sizeof(last_));

@@ -4761,7 +4761,7 @@ void sonarHubLoop() {
   while (activeVirt > want) { activeVirt--; meshHubObserveNode(meshSonarVirtualId(NODE_ID, activeVirt), MESH_LS_OFFLINE, 0, 0, 0); }
   while (activeVirt < want) {
     const uint8_t id = meshSonarVirtualId(NODE_ID, activeVirt);
-    sonarVirt[activeVirt].begin(id, (uint32_t)id * 7919UL + NODE_ID);
+    sonarVirt[activeVirt].begin(id, (uint32_t)id * 7919UL + NODE_ID, (uint16_t)esp_random());
     meshHubObserveNode(id, MESH_LS_IDLE, 0, 0, 100);
     activeVirt++;
   }

@@ -1135,7 +1135,7 @@ void sonarLoop() {
     sonarSimOn = sonarCtrlSim || SONAR_SIM_FORCE;
   }
   if (sonarSimOn && !started) {
-    src.begin(NODE_ID, 0xF15A0000UL + NODE_ID);
+    src.begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());
     started = true; lastTick = millis(); lastCtrl = millis();
   }
   if (!sonarSimOn) {

@@ -48,9 +48,8 @@ Hub sections, in this order, within the slot allowance:
 | RELAY | remote hub's packet re-packed: hub, frame lo, flags, its sections. If it doesn't fit: LINE trimmed to whole records, other sections kept whole while they fit, TEST dropped |
 | HEALTH | every 8 frames: battery, uptime, fw, beacon RSSI/SNR as heard, beacons lost /64, timing error, neighbour hubs + RSSI |
 | JOINS | hub IDs heard joining (relay duty) |
-| NODEINFO | rotating {node, battery %, flags} |
 | SONAR | one sonar block per section (§6b), whole blocks only: BASE, then DATA (oldest first), then BG |
-| NODEINFO | (after SONAR) rotating {node, battery %, flags} |
+| NODEINFO | rotating {node, battery %, flags} |
 | TEST | filler up to the allowance in test mode (counter + pattern) |
 Line states: 0 idle, 1 tripped, 2 running, 3 fault, 4 offline (hub lost the node).
 

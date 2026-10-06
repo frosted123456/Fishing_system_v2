@@ -104,6 +104,10 @@ static void test_store_dedup_restart_bg(void) {
   const uint8_t n3 = static_cast<uint8_t>(makeData(133, 0, 4, b));   // node restarted: counter back to 0
   st.onSonarBlock(1, b, n3, 7);
   TEST_ASSERT_EQUAL(12, st.pingsSince(133, 0, out, 64));
+  // node restarts again right after: index 0 is just behind the last one (3): accepted after RESTART_RUN old pings
+  const uint8_t r1 = static_cast<uint8_t>(makeData(133, 0, 4, b)); st.onSonarBlock(1, b, r1, 7);   // 4 old in a row
+  const uint8_t r2 = static_cast<uint8_t>(makeData(133, 0, 4, b)); st.onSonarBlock(1, b, r2, 7);   // 8th old -> accepted from here
+  TEST_ASSERT_TRUE(st.pingsSince(133, 0, out, 64) > 12);
   // background: segments of version 3, then a new version resets the mask
   for (uint8_t s = 0; s < 8; s++) { const uint8_t m = static_cast<uint8_t>(makeBg(133, s, 3, b)); st.onSonarBlock(1, b, m, 8); }
   TEST_ASSERT_EQUAL(0xFF, st.find(133)->bg_mask);

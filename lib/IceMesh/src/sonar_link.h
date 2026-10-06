@@ -109,6 +109,7 @@ struct NodeSonar {
   uint8_t bg_mask;          // segments received for bg_ver
   uint8_t gain;
   uint16_t act_bits;         // fish present in the last 16 DATA pings (activity when streaming)
+  uint8_t old_run;           // consecutive 'old' pings/summaries: a run means the node restarted
   uint8_t bg[BINS];
 };
 
@@ -131,7 +132,8 @@ class SonarStore : public SonarSink {
       case BT_BASE: {
         Summary s;
         if (!decodeSummary(blk, len, s)) { blocks_bad++; return; }
-        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && s.ping != ns->sum.ping) { old_pings++; return; }
+        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && s.ping != ns->sum.ping && ++ns->old_run < 2) { old_pings++; return; }
+        ns->old_run = 0;
         ns->sum = s; ns->has_sum = true;
         break;
       }
@@ -141,7 +143,8 @@ class SonarStore : public SonarSink {
         ns->gain = d.gain;
         for (uint8_t i = 0; i < d.n; i++) {
           const Ping& p = d.pings[i];
-          if (ns->has_ping && isOld(p.index, ns->last_ping)) { old_pings++; continue; }   // duplicate (relay) or late
+          if (ns->has_ping && isOld(p.index, ns->last_ping) && ++ns->old_run < RESTART_RUN) { old_pings++; continue; }   // duplicate (relay) or late
+          ns->old_run = 0;
           ns->last_ping = p.index; ns->has_ping = true;
           StoredPing& sp = ring_[head_];
           sp.seq = ++seq_; sp.node = node; sp.p = p;
@@ -192,7 +195,7 @@ class SonarStore : public SonarSink {
     const int16_t d = seqDiff(idx, last);
     return d <= 0 && d > -static_cast<int16_t>(RESTART_GAP);
   }
-  enum { RESTART_GAP = 256 };
+  enum { RESTART_GAP = 256, RESTART_RUN = 8 };   // a duplicate block is 1-15 pings; 8+ old pings in a row = restart
 
   NodeSonar* slot(uint8_t node, uint16_t frame) {
     for (uint8_t i = 0; i < MAXN; i++) if (nodes_[i].used && nodes_[i].node == node) return &nodes_[i];
