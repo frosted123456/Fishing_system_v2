@@ -64,7 +64,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // ═══════════════════════════════════════════════════════════════════════════
 
 #define HEARTBEAT_INTERVAL_SEC  30      // More frequent heartbeats (was 60)
-#define NODE_TIMEOUT_SEC        90      // Faster offline detection (was 120)
+#define NODE_TIMEOUT_SEC        150     // v2: >= 2.5 node heartbeats (sim finding S3: 90 s showed nodes offline after one lost heartbeat)
 #define DEBOUNCE_MS             50
 #define SILENCE_AUTO_CLEAR_MS   (5 * 60 * 1000)  // 5 minutes auto-unsilence
 

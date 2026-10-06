@@ -51,7 +51,9 @@ inline bool netLr(uint8_t c) { return (c & 4u) != 0; }
 inline uint8_t netChannel(uint8_t c) { return static_cast<uint8_t>(c >> 4); }
 enum TestMode : uint8_t { TEST_OFF = 0, TEST_ROTATE = 1, TEST_FIX_SF9 = 2, TEST_FIX_SF8 = 3, TEST_FIX_SF7 = 4, TEST_MODE_COUNT = 5 };
 
-enum HubFlags : uint8_t { HF_SILENCE_ON = 0x01, HF_SILENCE_OFF = 0x02, HF_PENDING = 0x04 };
+// HF_EB_RELAY: this hub rebroadcasts ESP-NOW backbone frames. HF_EB_PATH: this hub currently sends on the
+// backbone too (fallback / ESP-NOW mode). Both are reports for the chalet's Radio view only.
+enum HubFlags : uint8_t { HF_SILENCE_ON = 0x01, HF_SILENCE_OFF = 0x02, HF_PENDING = 0x04, HF_EB_RELAY = 0x08, HF_EB_PATH = 0x10 };
 
 enum SectionType : uint8_t {
   SEC_LINE = 1,      // line-state records, 3 B each — always first

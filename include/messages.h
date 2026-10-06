@@ -65,6 +65,9 @@ enum MessageType : uint8_t {
   MSG_CONFIG_ACK      = 0x51,   // Config update acknowledgment (supports hops)
   MSG_SONAR           = 0x60,   // v2: node -> hub, [net][node][type] + one sonar block (sonar_codec.h)
   MSG_SONAR_CTRL      = 0x61,   // v2: hub -> nodes, SonarCtrlMessage (sim switch + FOCUS node)
+  MSG_DEV_CMD         = 0x62,   // v2: hub -> one node, DevCmdMessage (backbone relay on/off)
+  MSG_EB_BEACON       = 0x70,   // v2: ESP-NOW backbone, chalet beacon (lib/IceMesh/src/eb_link.h)
+  MSG_EB_HUB          = 0x71,   // v2: ESP-NOW backbone, hub packet (eb_link.h)
   MSG_PING            = 0x80,
   MSG_PONG            = 0x81,
   MSG_RESET_CMD       = 0x90,   // Reset all nodes command
@@ -226,6 +229,18 @@ typedef struct __attribute__((packed)) {
   uint8_t  reserved;
 } SonarCtrlMessage;
 
+// v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
+// (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
+enum : uint8_t { DEVCMD_RELAY = 1 };
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  sender_id;
+  uint8_t  msg_type;        // MSG_DEV_CMD
+  uint8_t  target;          // node ID
+  uint8_t  cmd;             // DEVCMD_*
+  uint8_t  value;           // relay: 1 on, 0 off
+} DevCmdMessage;
+
 // Reset command message (8 bytes) - broadcast to all nodes
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
@@ -239,7 +254,7 @@ typedef struct __attribute__((packed)) {
 // NODE STATE TRACKING (for deduplication and state management)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define MAX_NODES 16
+#define MAX_NODES 48       // v2: 10 hubs x (hub hole + 3 tip-ups) + spares (was 16)
 #define ALERT_MIN_HOLD_MS 1000    // 1 second debounce - prevents false clears from reed bounce
 
 // Per-node tracking for sequence and state

@@ -63,6 +63,27 @@
 #include "config.h"
 #include "messages.h"
 #include <sonar_sim.h>      // v2: fake sonar for the sonar test mode (lib/IceMesh)
+#include <eb_link.h>        // v2: ESP-NOW backbone relay (lib/IceMesh)
+#include <rx_ring.h>
+#include <Preferences.h>
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 BACKBONE RELAY (docs/protocol_v2.md §6c)
+// Set from the chalet (relay on/off for this node ID, delivered by the hub as MSG_DEV_CMD right
+// after this node transmits) and kept in NVS. While on, the node stays awake (no deep sleep:
+// battery cost!) and rebroadcasts ESP-NOW backbone frames between hubs and the chalet.
+// EB_RELAY_FORCE=1: a spare board that is always a relay.
+// ═══════════════════════════════════════════════════════════════════════════
+#ifndef EB_RELAY_FORCE
+#define EB_RELAY_FORCE 0
+#endif
+RTC_DATA_ATTR bool ebRelayOn = false;       // copy of the NVS setting, read again on power-on only
+volatile int8_t devCmdRelay = -1;           // relay command received (-1 none, 0 off, 1 on)
+static icemesh::RxRing<8, 250> ebRing;
+static uint32_t ebRelayed = 0;
+void ebRelayLoadSetting(bool power_on);
+void ebRelayApplyCmd();
+void ebRelayLoop();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2 SONAR TEST MODE (see docs/SONAR_SIM.md)
@@ -212,6 +233,8 @@ void setup() {
 
   // Store wake reason for next cycle
   lastWakeReason = wakeReason;
+  ebRelayLoadSetting(wakeReason != ESP_SLEEP_WAKEUP_EXT0 && wakeReason != ESP_SLEEP_WAKEUP_GPIO &&
+                     wakeReason != ESP_SLEEP_WAKEUP_TIMER);
 
   // Check if we're in FISH_ON monitor mode (fast heartbeat)
   if (fishOnMonitorMode) {
@@ -313,16 +336,19 @@ void setup() {
     }
   }
   
-  #if SONAR_SIM_ALLOWED
-  // v2 sonar test mode: the hub answers our TX with its sonar control; if the test mode is on,
-  // stay awake and let loop() stream fake sonar (reed, heartbeat and alerts keep working there).
-  if (SONAR_SIM_FORCE) sonarSimOn = true;
+  // v2: the hub answers our TX with its sonar control and pending commands (backbone relay).
+  // Sonar test mode or relay on: stay awake, loop() keeps reed, heartbeat and alerts working.
+  if (SONAR_SIM_ALLOWED && SONAR_SIM_FORCE) sonarSimOn = true;
   else sonarListenCtrl(SONAR_CTRL_WAIT_MS);
-  if (sonarSimOn && SLEEP_ENABLED) {
+  ebRelayApplyCmd();
+  if (SONAR_SIM_ALLOWED && sonarSimOn && SLEEP_ENABLED) {
     DEBUG_PRINTLN(F("Sonar test mode ON - staying awake (fake sonar)"));
     return;
   }
-  #endif
+  if (ebRelayOn && SLEEP_ENABLED) {
+    DEBUG_PRINTLN(F("Backbone relay ON - staying awake"));
+    return;
+  }
 
   // Calculate actual elapsed time since boot (before entering deep sleep)
   unsigned long elapsedMs = millis();
@@ -364,6 +390,7 @@ void loop() {
   #if SONAR_SIM_ALLOWED
   sonarLoop();
   #endif
+  ebRelayLoop();
 
   // Update uptime every second
   if (millis() - lastUptimeUpdate >= 1000) {
@@ -880,6 +907,19 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     }
   }
 
+  // v2 backbone frames: only relays care (copied here, handled in loop())
+  if (msgType == icemesh::eb::MSG_EB_BEACON || msgType == icemesh::eb::MSG_EB_HUB) {
+    if (ebRelayOn) ebRing.push(mac, data, len, 0);
+    return;
+  }
+
+  // v2 device command for this node (backbone relay on/off)
+  if (msgType == MSG_DEV_CMD && len >= (int)sizeof(DevCmdMessage)) {
+    const DevCmdMessage* c = (const DevCmdMessage*)data;
+    if (c->target == NODE_ID && c->cmd == DEVCMD_RELAY) devCmdRelay = c->value ? 1 : 0;
+    return;
+  }
+
   // v2 sonar control from the hub (test mode switch + FOCUS node)
   if (msgType == MSG_SONAR_CTRL && len >= (int)sizeof(SonarCtrlMessage)) {
     const SonarCtrlMessage* c = (const SonarCtrlMessage*)data;
@@ -1120,7 +1160,64 @@ uint32_t estimateActualSleepDuration(esp_sleep_wakeup_cause_t wakeReason) {
 void sonarListenCtrl(uint32_t wait_ms) {
   const unsigned long t0 = millis();
   while (!sonarCtrlSeen && millis() - t0 < wait_ms) delay(5);
-  if (sonarCtrlSeen) { sonarCtrlSeen = false; sonarSimOn = sonarCtrlSim; }
+  if (sonarCtrlSeen) { sonarCtrlSeen = false; if (SONAR_SIM_ALLOWED) sonarSimOn = sonarCtrlSim; }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 BACKBONE RELAY
+// ═══════════════════════════════════════════════════════════════════════════
+void ebRelayLoadSetting(bool power_on) {
+  if (power_on) {
+    Preferences p;
+    p.begin("node", true);
+    ebRelayOn = p.getBool("ebRelay", false);
+    p.end();
+  }
+  if (EB_RELAY_FORCE) ebRelayOn = true;
+  if (ebRelayOn) DEBUG_PRINTLN(F("Backbone relay: ON"));
+}
+
+void ebRelayApplyCmd() {
+  const int8_t c = devCmdRelay;
+  if (c < 0) return;
+  devCmdRelay = -1;
+  const bool on = (c == 1) || EB_RELAY_FORCE;
+  if (on == ebRelayOn) return;
+  ebRelayOn = on;
+  Preferences p;
+  p.begin("node", false);
+  p.putBool("ebRelay", on);
+  p.end();
+  DEBUG_PRINTF("Backbone relay %s (set by the chalet)\n", on ? "ON" : "off");
+}
+
+void ebRelayLoop() {
+  static icemesh::eb::Dedup dedup;
+  static icemesh::RxRing<8, 250>::Frame f;
+  static unsigned long lastReport = 0;
+  ebRelayApplyCmd();
+  uint8_t budget = 8;
+  while (ebRelayOn && budget-- && ebRing.pop(f)) {
+    icemesh::eb::Header h;
+    const uint8_t* pl;
+    size_t n;
+    if (!icemesh::eb::decode(f.data, f.len, NETWORK_ID, h, pl, n)) continue;
+    if (dedup.seen(h.origin, h.type, h.seq)) continue;
+    if (icemesh::eb::prepareRelay(f.data, f.len, NODE_ID) && esp_now_send(ESPNOW_BROADCAST, f.data, f.len) == ESP_OK) ebRelayed++;
+  }
+  if (ebRelayOn && millis() - lastReport >= 60000UL) {
+    lastReport = millis();
+    DEBUG_PRINTF("Backbone relay: %lu frames relayed\n", (unsigned long)ebRelayed);
+  }
+  // relay turned off (and no sonar test mode): back to the normal deep-sleep cycle
+  static bool awakeForRelay = false;
+  if (ebRelayOn) awakeForRelay = true;
+  if (awakeForRelay && !ebRelayOn && SLEEP_ENABLED && !(SONAR_SIM_ALLOWED && sonarSimOn)) {
+    awakeForRelay = false;
+    totalUptimeSec += millis() / 1000;
+    if (HAS_FLAG(currentFlags, FLAG_FISH_ON)) { fishOnMonitorMode = true; enterDeepSleepFast(); }
+    else { fishOnMonitorMode = false; enterDeepSleep(); }
+  }
 }
 
 void sonarLoop() {
@@ -1142,7 +1239,7 @@ void sonarLoop() {
     if (started) {
       started = false;
       DEBUG_PRINTLN(F("Sonar test mode OFF"));
-      if (SLEEP_ENABLED) {
+      if (SLEEP_ENABLED && !ebRelayOn) {   // a backbone relay stays awake
         totalUptimeSec += millis() / 1000;
         if (HAS_FLAG(currentFlags, FLAG_FISH_ON)) { fishOnMonitorMode = true; enterDeepSleepFast(); }
         else { fishOnMonitorMode = false; enterDeepSleep(); }

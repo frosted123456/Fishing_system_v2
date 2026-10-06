@@ -1,7 +1,7 @@
 # Protocol v2 — TDMA LoRa mesh (as built, 2026-10-05)
 
-Decisions: docs/decisions.md (D1-D12). Review that led here: docs/review_protocol_proposal.md.
-Code: `lib/IceMesh/src` (pure C++11, host-tested, 81 tests) + `src/lora_node/mesh_radio.cpp`
+Decisions: docs/decisions.md (D1-D26). Review that led here: docs/review_protocol_proposal.md.
+Code: `lib/IceMesh/src` (pure C++11, host-tested, 110 tests in 15 suites) + `src/lora_node/mesh_radio.cpp`
 (radio task). **Not yet tested on hardware.** Every value marked (est.) is a starting point
 for the radio test mode.
 
@@ -37,8 +37,8 @@ slot = LEAD 3 ms + airtime(allowance, mode) + TAIL 3 ms            (all est.)
 Header 6 B: `network_id, 0xF2, type, src, superframe u16`.
 | Type | Body |
 |---|---|
-| BEACON / ECHO | flags (test, adaptive, silenced, sonar sim), cmd + cmd_seq (RESET ALL), silence ×10 s, focus node, frame ×10 ms, test mode, slots n × {kind, owner, mode, allowance, via}, acks n × {hub, node, seq} |
-| HUB | flags (silence on/off request, pending), then sections {type, len, value} |
+| BEACON / ECHO | flags (test, adaptive, silenced, sonar sim), cmd + cmd_seq, silence ×10 s, focus node, frame ×10 ms (1 / 1.5 / 2 s), test mode, cmd target + value, net_cfg (§6c), slots n ≤ 16 × {kind, owner, mode, allowance, via}, acks n × {hub, node, seq} |
+| HUB | flags (silence on/off request, pending, backbone relay / path §6c), then sections {type, len, value} |
 | JOIN | firmware version |
 
 Hub sections, in this order, within the slot allowance:
@@ -92,14 +92,59 @@ FOCUS total ≈ 35 B/s incl. section headers. Strength = the prototype's display
 - Node ↔ hub (ESP-NOW): `MSG_SONAR` 0x60 = [net][node][0x60] + one block;
   `MSG_SONAR_CTRL` 0x61 = {net, hub, 0x61, focus node, sim on, 0}. Test mode: docs/SONAR_SIM.md.
 
+## 6c. Network config: LoRa channel, transport, ESP-NOW backbone (2026-10-06)
+Set on the chalet only (Settings → Network, `/api/radio`, serial); hubs follow the beacon and the
+backbone beacon, so **nothing is reprogrammed on the ice**. Code: `tdma_proto.h`, `eb_link.h`,
+`hub_role.h`, `chalet_role.h`, firmware `mesh_radio.cpp`. Simulated (docs/SIM_RESULTS.md, sim v2), **not tested on hardware**.
+
+**Beacon v2** (17 B fixed + slots + acks): byte 13 `cmd_target`, 14 `cmd_value`, 15 `net_cfg`, 16 `n_slots`.
+`net_cfg` = transport (bits 0-1: 0 Auto, 1 LoRa only, 2 ESP-NOW only) | LR (bit 2) | LoRa channel (bits 4-7).
+Commands (one at a time, each in 6 beacons, new `cmd_seq` each; hubs act once per seq):
+| cmd | target | value |
+|---|---|---|
+| 1 RESET ALL | – | – |
+| 2 SET CHANNEL | beacons left before the switch (5 → 0) | channel 0-7 |
+| 3 SET RELAY | device ID (hub or tip-up) | 1 on / 0 off |
+Hub flags (HUB packet byte 6) gain `HF_EB_RELAY` 0x08 (this hub relays the backbone) and `HF_EB_PATH` 0x10
+(this hub also sends on the backbone now) — reports for the Radio tab only.
+
+**LoRa channels** (all 500 kHz, 20 dBm): 1 = 915.0, 2 = 904.0, 3 = 907.0, 4 = 910.0, 5 = 913.0, 6 = 918.0, 7 = 921.0, 8 = 924.0 MHz
+(index 0-7 in code). The chalet measures activity per channel: instantaneous RSSI ~ every ms above −100 dBm (est.),
+on its own channel between frames (network silent then) and 60 ms of one other channel per frame (round robin);
+% kept as a 60 s sliding value. **Auto**: at boot sample every channel 250 ms; every 60 s move when the channel in
+use is > 25 % busy and another is quieter by ≥ 15 points (915.0 MHz gets a 5-point preference) — same rule as the sim.
+A move is announced with SET CHANNEL in 6 beacons (also on the backbone); everyone retunes after the target-0 beacon.
+A hub without beacon hops to the next channel every 2.5 s unless it heard the network (or a backbone beacon naming
+the channel) in the last 10 s. Every device saves the channel it last used (NVS) and starts there after a reboot.
+
+**ESP-NOW backbone (EB)**: ESP-NOW broadcast, Wi-Fi channel `ESPNOW_CHANNEL`, LR rate (the ice side already runs
+ESP-NOW in LR only, `ESPNOW_LONG_RANGE_MODE`). Frame = 7 B header {net, sender (this hop), type, hops, origin, origin seq u16} + payload ≤ 243 B.
+| Type | Payload | Sent by / when |
+|---|---|---|
+| 0x70 EB beacon | the chalet beacon without slots (acks, flags, commands, net_cfg, frame no.) | chalet, every frame, in Auto / ESP-NOW (in LoRa only: 2 min after a change and while a hub talks on the backbone) |
+| 0x71 EB hub | the hub packet built without slot (`buildHubFree`: line states first, sonar, node info, health) | hub, every 1 s while the policy says so, 250 ms after a new line event |
+Relays: any device with the relay setting on (hub, tip-up kept awake, spare board) rebroadcasts frames not seen
+before (dedup on origin/type/seq, 48 entries), up to **2 relays in a row**; its own frames are never relayed back.
+Transport policy per hub (`TransportPolicy`):
+| Setting | Hub sends on | Safety net |
+|---|---|---|
+| Auto | LoRa; + backbone after 10 s without LoRa beacon, until 5 LoRa beacons in a row | – |
+| LoRa only | LoRa | + backbone after 60 s without LoRa beacon |
+| ESP-NOW only | backbone (LoRa radio idle) | LoRa again after 60 s without backbone beacon |
+Sending on both is safe: the chalet keeps one state per node and drops repeated sonar pings.
+Tip-up relay command: the hub sends `MSG_DEV_CMD` 0x62 {net, hub, 0x62, node, 1 = relay, on/off} right after each of the
+node's next 3 messages (a sleeping node only listens ~120 ms after it transmits). A relay tip-up stays awake (battery!).
+
 ## 7. Open points
 | # | Point |
 |---|---|
 | O1 | Guard / window values (LEAD, TAIL, gaps, beacon window) are estimates — check timing error and slot loss in test mode. |
-| O2 | Remote configuration over LoRa removed for now (web page returns an error); to add as a beacon command. |
+| O2 | Remote configuration: only the network settings (transport, channel, relays) and RESET ALL travel as beacon commands (§6c); other hub settings are set on the hub. |
 | O3 | Node firmware still v1 (reed, 2 states). Hall quarter-turn counting, line "running" state and global-ID provisioning come with the WROOM node rewrite. |
 | O4 | Sonar chain built on FAKE data only (§6b): processing v0 = port of the prototype (thresholds tuned on its simulation). Real sizes and thresholds need TUSS4470 recordings; per-hole bait depth setting still missing. |
 | O5 | 125 kHz modes not offered (would need hopping). |
 | O6 | ESP-NOW RSSI is not available with core 2.x callbacks — node-to-hub link quality is not used yet. |
 | O7 | Capacity (calc., est.): a 96 B slot at SF9/500 reserves ≈ 139 ms → about 6 direct hubs per 1 s frame (beacon ≈ 72 ms, join ≈ 30 ms, margin 40 ms). Allowances: 96 B per hub, 180 B for the FOCUS hub (est.); not yet sized from each hub's queue. |
 | O8 | To verify on hardware: TX start latency (log nowUs() around startTransmit), RadioLib 7.7.1 RX IRQ defaults (HeaderValid enabled, DIO1 = RxDone), TCXO delay. A settings save (NVS write) can shift one frame's timing — harmless, only when settings change. |
+| O9 | ESP-NOW backbone untested: (a) that the chalet's mixed b/g/n+LR station receives LR-only hubs (fallback setting: EBMODE LRONLY), (b) real LR range on ice (sim: ~170-390 m per hop, est.), (c) LR traffic next to the phone hotspot. First bench tests: docs/FIELD_GUIDE_NETWORK.md. |
+| O10 | Channel activity threshold (−100 dBm) and the 25 / 15 % rule are sim values; check the activity % on the Settings page against a known busy channel. |

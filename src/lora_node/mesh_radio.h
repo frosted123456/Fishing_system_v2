@@ -35,6 +35,12 @@ struct MeshHubView {           // hub: for OLED / serial during range tests
   uint8_t allowance;
   uint8_t test_mode;
   uint32_t beacons, echoes, tx;
+  uint8_t lora_ch;             // LoRa channel index (0 = 915.0 MHz, see loraChannelMHz)
+  uint8_t transport;           // network setting seen in the beacon (MESH_TR_*)
+  bool lora_on, eb_on;         // paths this hub transmits on right now
+  bool eb_fallback;            // Auto: backbone switched on because LoRa beacons stopped
+  uint32_t eb_beacon_age_ms;   // since the last backbone beacon (0xFFFFFFFF = never)
+  bool relay;                  // this device rebroadcasts backbone frames
 };
 
 // Start the radio task. chalet = ROLE_GATEWAY_OFFSHORE, every other LoRa role is a hub.
@@ -71,6 +77,29 @@ const char* meshTestModeName(uint8_t mode);
 // ---- chalet: per-hub summary for the OLED ----
 struct MeshHubSummary { uint8_t id, via, mode; int8_t rssi; float snr; uint32_t rx, sched; };
 uint8_t meshHubSummaries(MeshHubSummary* out, uint8_t max);
+
+// ---- v2 network config: LoRa channel, transport, ESP-NOW backbone (docs/protocol_v2.md §6c) ----
+enum : uint8_t { MESH_TR_AUTO = 0, MESH_TR_LORA = 1, MESH_TR_ESPNOW = 2 };   // = icemesh::tdma::Transport
+static const uint8_t MESH_CH_AUTO = 255;
+void meshSetStartChannel(uint8_t ch);        // both, before meshBegin: last channel used (NVS); hub starts searching there
+void meshSetTransport(uint8_t tr);           // chalet: MESH_TR_*
+uint8_t meshTransport();                     // chalet: configured; hub: as seen in the beacon (Auto before any)
+void meshSetLoraChannel(uint8_t ch);         // chalet: 0-7 fixed or MESH_CH_AUTO (scan at boot, move when busy)
+uint8_t meshLoraChannelSetting();            // chalet
+uint8_t meshLoraChannel();                   // both: channel in use
+float meshLoraChannelMHz(uint8_t ch);
+void meshRescanChannels();                   // chalet: re-evaluate now (Auto) / apply the fixed channel
+void meshChannelBusy(uint8_t* pct8);         // chalet: foreign activity per channel in % (255 = no data yet)
+// ESP-NOW backbone. The sender callback broadcasts one frame with esp_now_send.
+typedef bool (*MeshEbSendFn)(const uint8_t* frame, size_t len);
+void meshSetEbSender(MeshEbSendFn fn);
+void meshEbReceive(const uint8_t* frame, size_t len);   // loop(): every ESP-NOW frame of type 0x70 / 0x71
+void meshEbTick();                                       // loop(): hub sends its packet on the backbone when needed
+void meshSetEbRelay(bool on);                            // this device rebroadcasts backbone frames
+bool meshEbRelay();
+void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
+bool meshPollRelayCmd(uint8_t& dev, bool& on);           // hub: CMD_SET_RELAY received (dev may be self or a node)
+bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 
 // ---- sonar: test mode (fake data) + FOCUS stream. Blocks: lib/IceMesh/src/sonar_codec.h ----
 // Virtual sonar nodes on hubs use IDs 128 + (hub ID & 0x0F) * 8 + k: keep real node IDs below 128.

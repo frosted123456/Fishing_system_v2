@@ -67,7 +67,7 @@ static void test_hub_chalet_over_backbone(void) {
   hub.table.observe(41, LS_TRIPPED, 2, 0, 80, 0);
   uint8_t b[MAX_PACKET], hp[MAX_PACKET], f[eb::MAX_FRAME];
   // hub -> (relay 7) -> chalet
-  const size_t hl = hub.buildHubFree(hp, eb::MAX_PAYLOAD, 0, 4000, 1, 1);
+  const size_t hl = hub.buildHubFree(hp, eb::MAX_PAYLOAD, HF_EB_RELAY | HF_EB_PATH, 4000, 1, 1);
   TEST_ASSERT_TRUE(hl > HDR_LEN + 3);
   eb::Header h; h.net = 0x42; h.sender = 4; h.type = eb::MSG_EB_HUB; h.hops = 0; h.origin = 4; h.seq = 1;
   size_t fl = eb::encode(h, hp, hl, f, sizeof f);
@@ -79,6 +79,8 @@ static void test_hub_chalet_over_backbone(void) {
   TEST_ASSERT_TRUE(ch.onEbHubPacket(p, pn, d.hops, r));
   TEST_ASSERT_EQUAL(1, r.n_changes); TEST_ASSERT_EQUAL(41, r.changes[0].node); TEST_ASSERT_EQUAL(LS_TRIPPED, r.changes[0].new_state);
   TEST_ASSERT_EQUAL(1, ch.eb_hubs[0].hops);
+  TEST_ASSERT_EQUAL(4, r.hub);                                 // relay / backbone flags reach the chalet (Radio view)
+  TEST_ASSERT_EQUAL(HF_EB_RELAY | HF_EB_PATH, r.flags & (HF_EB_RELAY | HF_EB_PATH));
   TEST_ASSERT_TRUE(hub.table.anyPending());
   // chalet beacon over the backbone carries the ack and the network config
   ch.startFrame(2, b, sizeof b);

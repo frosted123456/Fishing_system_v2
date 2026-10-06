@@ -105,3 +105,49 @@ Link margins at SF9/500 (mean, no fading; chalet = C):
 
 Re-run: `g++ -std=c++11 -O2 -Ilib/IceMesh/src tools/sim/mesh_sim.cpp -o mesh_sim && ./mesh_sim all 5 30 current`
 (fixA/fixB: add `-DICEMESH_MAX_SLOTS=16` and pass `fixA` / `fixB`). `SIM_DETAIL=1` per-hub delivery, `SIM_LATE=1` slow alerts, `SIM_MARGINS=1` link table.
+
+---
+
+# Sim v2: Frank's field setup + 10 hubs, busy LoRa, ESP-NOW backbone (2026-10-06)
+
+Same tool, extended (`tools/sim/mesh_sim.cpp` v2), on the code that is now in the firmware: MAX_SLOTS 16, frame
+1 / 1.5 / 2 s chosen by the chalet, node timeout 150 s, 8 LoRa channels with Auto channel moves, ESP-NOW backbone
+with relays and the Auto / LoRa / ESP-NOW transport policy. 3 seeds × 30 min per row.
+Re-run: `g++ -std=c++11 -O2 -Ilib/IceMesh/src tools/sim/mesh_sim.cpp -o mesh_sim && ./mesh_sim "p3*" 3 30` (or `"h10*"`).
+
+**Layouts.** `pockets3` = D20: 3 pockets at ~250 / 485 / 660 m from the chalet, 3 holes each, the hub (Heltec)
+is one of the holes, **every hole has a sonar** (fake). `hubs10` = 10 hubs × (hub hole + 3 tip-ups).
+**New model parts (estimates):** foreign LoRa traffic per channel (duty cycle, random strength, capture 6 dB);
+ESP-NOW between boards: 20 dBm, path loss 40.2 dB @ 1 m + 10·n·log d (n = 2.5 normal, 3.5 "pess"), sensitivity
+−98 dBm at 1 Mbps / −104 dBm LR 250 kbps (est.), 6 dB fading; relays = hub 1 + one spare board between pocket 2 and 3.
+
+| Scenario | What | Trips | Missed | Alert p50/p95/max (s) | Hub packets LoRa / ESP-NOW | Hub time on backbone | FOCUS pings | Channel moves |
+|---|---|---|---|---|---|---|---|---|
+| p3_lora | quiet LoRa, Auto | 106 | 0 | 1 / 1 / 3 | 16093 / 0 | 0 % | 97 % | 0 |
+| p3_ch0_busy | 915 MHz gets 60 % foreign traffic at 5 min | 102 | 0 | 1 / 1 / 1 | 16056 / 0 | 0 % | 97 % | 1 per run |
+| p3_ch0_busy_fixed | same, channel fixed | 102 | 0 | 1 / 4 / 7 | 10763 / 0 | 0 % | 68 % | 0 |
+| p3_all_busy | every channel 35 % busy, Auto, 2 relays | 105 | 0 | 1 / 4 / 7 | 11657 / 0 | 0 % | 76 % | 0 |
+| p3_lora_out | LoRa unusable 10-20 min, Auto, 2 relays | 102 | 0 | 1 / 1 / 3 | 10691 / 5006 | 33 % | 94 % | 0 |
+| p3_lora_out_norelay | same, no relay | 106 | **7** | 1 / 4 / 13 | 10644 / 2998 | 33 % | 78 % | 0 |
+| p3_espnow | ESP-NOW only (1 Mbps), 2 relays | 114 | 0 | 1 / 1 / 3 | 0 / 15209 | 100 % | 93 % | 0 |
+| p3_espnow_lr | ESP-NOW only, LR, 2 relays | 105 | 0 | 1 / 1 / 1 | 0 / 16099 | 100 % | 97 % | 0 |
+| p3_espnow_norelay | ESP-NOW only, no relay | 100 | **10** | 1 / 24 / 47 | 0 / 9018 | 100 % | 59 % | 0 |
+| p3_espnow_pess | ESP-NOW only, 2 relays, pessimistic 2.4 GHz (n = 3.5) | 99 | **41** | 4 / 54 / 72 | 0 / 1430 | 99 % | 10 % | 0 |
+| p3_espnow_pess_lr | same with LR | 105 | **3** | 1 / 15 / 55 | 0 / 8580 | 100 % | 58 % | 0 |
+| p3_degraded | +10 dB LoRa loss, bursts ×5, tip-up ESP-NOW 50 % | 97 | 0 | 1 / 1 / 6 | 15748 / 0 | 0 % | 81 % | 0 |
+| h10_lora | 10 hubs, quiet LoRa (frame ≈ 2 s) | 349 | 0 | 1 / 2 / 8 | 21675 / 1 | 0 % | 77 % | 0 |
+| h10_degraded | 10 hubs, +10 dB, bursts ×5, ESP-NOW 50 % | 342 | 0 | 1 / 6 / 30 | 18100 / 80 | 1 % | 52 % | 0 |
+| h10_storm | 10 hubs, half the holes trip within 5 s | 343 | 0 | 1 / 3 / 8 | 21646 / 1 | 0 % | 77 % | 0 |
+| h10_busy | 10 hubs, every channel 20 % busy | 331 | 0 | 2 / 6 / 19 | 17373 / 38 | 1 % | 54 % | 0 |
+
+ESP-NOW range per hop with 6 dB margin (same model, **estimate**): n = 2.5: 745 m (1 Mbps) / 1294 m (LR);
+n = 3.0: 247 / 392 m; n = 3.5: 113 / 167 m. LoRa SF9/500 hub ↔ hub at n = 3.5: ~1.4 km.
+
+## Findings v2
+| # | Finding |
+|---|---|
+| V1 | Frank's setup on quiet LoRa: no miss, alerts p95 1 s, FOCUS 97 %. 10 hubs now fit (frame steps to 2 s): no miss, p95 2 s (sim v1 S1 fixed). |
+| V2 | **Auto channel** removes the cost of a busy channel (p95 1 s vs 4 s fixed, FOCUS 97 vs 68 %), one move per run, no lost alert during the move. |
+| V3 | **LoRa gone** for 10 min: Auto + 2 relays keeps every alert (p95 1 s); without relays 7 alerts are lost → relays matter when the pockets are far apart. |
+| V4 | **ESP-NOW only works with relays** (0 miss); without them the far pocket is out of reach (10 missed). |
+| V5 | ESP-NOW range is **the** uncertainty: with pessimistic 2.4 GHz propagation even 2 relays lose 41 alerts at 1 Mbps; LR brings it to 3 — the firmware uses LR (D24). Field-test before relying on ESP-NOW only. |

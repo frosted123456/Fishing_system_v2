@@ -30,6 +30,7 @@ frames = json.load(open(TRACE))
 t0 = time.time()
 state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "sil_until": 0,
          "names": {3: "Pointe", 4: "Baie"}, "test": 0, "adaptive": False,
+         "transport": 0, "ch_setting": "auto", "ch": 0, "moves": 0, "relay_req": {}, "lr_only": False,
          "settings": {"buzzerEnabled": True, "alertHoldSec": 30, "heartbeatSec": 60, "reedActiveHigh": True}}
 TESTS = ["off", "rotate", "SF9/500", "SF8/500", "SF7/500"]
 
@@ -63,8 +64,20 @@ def radio():
         modes = [{"mode": "SF9/500", "sched": sched, "rx": sched - (3 if via == 0 else 22), "crc": 1, "rssi_avg": rssi, "rssi_min": rssi - 6, "snr_avg": 6.5, "snr_min": 2.0}]
         hubs.append({"id": hid, "via": via, "mode": "SF9/500", "modes": modes,
                      "health": {"beacon_rssi": rssi + 2, "beacon_snr": 7.0, "beacon_lost64": 1 if via == 0 else 6, "sync_err_us": 40}})
+    mhz = [915.0, 904.0, 907.0, 910.0, 913.0, 918.0, 921.0, 924.0]
+    busy = [4, 31, 2, None, 7, 12, 0, 3]
+    paths = [{"id": 1, "lora_age": 1, "eb_age": -1, "eb_hops": 0, "relay": True, "eb_path": False},
+             {"id": 2, "lora_age": 0, "eb_age": 4, "eb_hops": 1, "relay": False, "eb_path": state["transport"] != 1},
+             {"id": 3, "lora_age": 75, "eb_age": 1, "eb_hops": 2, "relay": False, "eb_path": True}]
     return {"role": "chalet", "radio_ok": True, "frame": el, "rx_ok": 2000 + el * 3, "rx_crc": 12, "tx": 300 + el,
-            "test_mode": TESTS[state["test"]], "adaptive": state["adaptive"], "allowance": 96, "dropped_slots": 0, "hubs": hubs}
+            "test_mode": TESTS[state["test"]], "adaptive": state["adaptive"],
+            "transport": ["auto", "lora", "espnow"][state["transport"]], "channel": state["ch"], "channel_mhz": mhz[state["ch"]],
+            "eb": {"lr": True, "relay": False, "rx": 800 + el, "tx": 400 + el, "relayed": 0, "dup": 35},
+            "channel_setting": state["ch_setting"], "channel_moves": state["moves"],
+            "channels": [{"ch": i, "mhz": mhz[i], "busy": busy[i]} for i in range(8)], "paths": paths,
+            "allowance": 96, "dropped_slots": 0, "hubs": hubs,
+            "eb_ready": True, "eb_lr_only": state["lr_only"],
+            "relay_req": [{"dev": k, "on": v} for k, v in state["relay_req"].items()]}
 
 class H(BaseHTTPRequestHandler):
     def send(self, code, body, ctype="application/json"):
@@ -125,6 +138,14 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/radio":
             if "test" in b: state["test"] = int(b["test"])
             if "adaptive" in b: state["adaptive"] = bool(b["adaptive"])
+            if "transport" in b: state["transport"] = int(b["transport"])
+            if "channel" in b:
+                if b["channel"] == "auto": state["ch_setting"] = "auto"
+                else:
+                    state["ch_setting"] = int(b["channel"]) - 1
+                    if state["ch"] != state["ch_setting"]: state["ch"] = state["ch_setting"]; state["moves"] += 1
+            if "relay" in b: state["relay_req"][int(b["relay"]["dev"])] = bool(b["relay"]["on"])
+            if "ebLrOnly" in b: state["lr_only"] = bool(b["ebLrOnly"])
             return self.send(200, json.dumps(radio()))
         if u.path == "/api/settings":
             state["settings"].update({k: v for k, v in b.items() if k in state["settings"]}); return self.send(200, '{"success":true}')

@@ -17,6 +17,7 @@
 #include <hub_role.h>
 #include <chalet_role.h>
 #include <sonar_link.h>
+#include <eb_link.h>
 
 using namespace icemesh;
 using namespace icemesh::tdma;
@@ -39,7 +40,7 @@ static uint8_t g_net = 0x42;
 static RadioMode g_cur_mode = MODE_COUNT;
 
 static HubRole<24>* g_hub = nullptr;
-static ChaletRole<10, 32>* g_ch = nullptr;
+static ChaletRole<10, 48>* g_ch = nullptr;   // 10 hubs, 48 nodes (3 tip-ups per hub + spares)
 
 // counters (written by the task, read by loop)
 static volatile uint32_t g_rx_ok = 0, g_rx_crc = 0, g_tx = 0, g_last_rx_ms = 0;
@@ -68,8 +69,62 @@ static volatile bool g_cfg_reset_all = false;
 static volatile bool g_cfg_sonar_sim = false;
 static sonar::SonarStore<16, 128>* g_sonar = nullptr;   // chalet only (~16 KB)
 static uint8_t g_cmd_seq = 0;
-static uint32_t g_cmd_until_ms = 0;
 static uint32_t g_silence_until_ms = 0;
+static uint8_t g_self = 0;
+
+// ---- v2 network config: LoRa channel, transport, ESP-NOW backbone (docs/protocol_v2.md §6c) ----
+// Values marked est. come from the simulation (docs/SIM_RESULTS.md), not from field measurements.
+static const float BUSY_DBM = -100.0f;          // est.: RSSI above this on a channel counts as foreign activity
+static const uint8_t CH_BUSY_PCT = 25;          // est.: Auto moves away from a channel busier than this...
+static const uint8_t CH_BETTER_PCT = 15;        // ...when another one is quieter by at least this much
+static const uint32_t CH_EVAL_MS = 60000;
+static const uint32_t SCAN_DWELL_US = 60000;    // chalet: one other channel sampled per frame (between frames)
+static const uint32_t BOOT_SCAN_US = 250000;    // chalet: per channel at boot (Auto)
+static const uint32_t HUB_HOP_MS = 2500;        // hub without beacon: next channel every 2.5 s...
+static const uint32_t HUB_HOP_QUIET_MS = 10000; // ...unless this network was heard in the last 10 s
+static const uint8_t CMD_BEACONS = 6;           // each beacon command is repeated in 6 beacons (SET_CHANNEL: target 5..0)
+static const bool EB_LR = ESPNOW_LONG_RANGE_MODE;   // backbone rate follows the ice side (LR on hubs and tip-ups)
+
+static volatile uint8_t g_lora_ch = 0;          // network channel
+static uint8_t g_tuned_ch = 0;                  // channel the SX1262 is tuned to (radio task only)
+static volatile uint8_t g_req_ch = 0xFF;        // hub: channel named by a backbone beacon (applied by the radio task)
+static volatile uint32_t g_heard_net_ms = 0;    // hub: last packet of this network (LoRa) or backbone channel hint
+static uint32_t g_last_hop_ms = 0;
+static volatile uint32_t g_pending_since_ms = 0;
+static volatile bool g_lora_idle = false;       // hub: LoRa off (ESP-NOW only)
+static volatile bool g_ch_event = false;
+static volatile uint8_t g_cfg_transport = TR_AUTO;
+static volatile uint8_t g_cfg_channel = MESH_CH_AUTO;
+static volatile bool g_cfg_rescan = false;
+static volatile uint8_t g_busy_pct[LORA_CHANNELS] = {255, 255, 255, 255, 255, 255, 255, 255};
+static uint32_t g_busy_n[LORA_CHANNELS], g_busy_hit[LORA_CHANNELS];   // radio task only
+static uint8_t g_scan_rr = 0;
+static uint32_t g_ch_eval_ms = 0;
+static volatile uint16_t g_ch_moves = 0;
+static uint8_t g_ch_switch_after = 0xFF;        // chalet: retune at the end of this frame
+static volatile uint32_t g_eb_beacon_until_ms = 0;
+struct QueuedCmd { uint8_t cmd, target, value; };
+static QueuedCmd g_cmdq[8];                     // chalet, under lock
+static uint8_t g_cmdq_n = 0;
+static uint8_t g_cmd_beacons_left = 0;
+// backbone
+static MeshEbSendFn g_eb_send = nullptr;
+static volatile bool g_eb_relay = false;
+static eb::Dedup* g_dedup = nullptr;            // under lock
+static eb::TransportPolicy g_pol;               // hub, under lock
+static uint16_t g_eb_seq = 0;
+static uint32_t g_eb_last_ms = 0;
+static volatile bool g_eb_kick = false;
+static volatile bool g_hub_eb_on = false, g_hub_lora_on = true;
+static volatile uint32_t g_eb_rx = 0, g_eb_tx = 0, g_eb_relayed = 0, g_eb_dup = 0;
+static volatile uint32_t g_eb_beacon_ms = 0;    // hub: last backbone beacon
+static volatile bool g_eb_beacon_seen = false;
+static volatile uint32_t g_eb_hub_last_ms = 0;  // chalet: last hub packet over the backbone
+static volatile bool g_relay_event = false;
+static volatile uint8_t g_relay_dev = 0;
+static volatile bool g_relay_on = false;
+struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; };
+static HubPath g_paths[12];                     // chalet, under lock: how each hub was last heard
 
 struct Lock {
   Lock() { xSemaphoreTake(g_mx, portMAX_DELAY); }
@@ -145,13 +200,82 @@ static bool txAt(const uint8_t* buf, size_t len, RadioMode m, uint32_t at_us, ui
   return ok;
 }
 
+// ---- LoRa channel + activity meter ----
+static void tune(uint8_t ch) {
+  if (!g_radio_ok || ch >= LORA_CHANNELS || ch == g_tuned_ch) return;
+  standbyXosc();
+  if (radio.setFrequency(loraChannelMHz(ch)) == RADIOLIB_ERR_NONE) g_tuned_ch = ch;
+}
+
+// One instantaneous RSSI sample (radio in RX) for the activity meter of channel ch.
+static inline void busySample(uint8_t ch) {
+  if (ch >= LORA_CHANNELS) return;
+  g_busy_n[ch]++;
+  if (radio.getRSSI(false) > BUSY_DBM) g_busy_hit[ch]++;
+}
+
+// waitIrq() that also samples the RSSI about once per ms (FreeRTOS tick) while waiting.
+static bool waitIrqSampling(uint32_t deadline_us, uint8_t ch) {
+  for (;;) {
+    if (g_irq) return true;
+    const int32_t rem = static_cast<int32_t>(deadline_us - nowUs());
+    if (rem <= 0) return g_irq;
+    if (rem < 2500) return waitIrq(deadline_us);
+    busySample(ch);
+    ulTaskNotifyTake(pdTRUE, 1);
+  }
+}
+
+// Listen on channel ch until until_us only to measure activity (nothing is decoded), then retune
+// to the network channel.
+static void sampleChannel(uint8_t ch, uint32_t until_us) {
+  if (!g_radio_ok) { sleepUntil(until_us); return; }
+  tune(ch);
+  setMode(MODE_SF9_BW500);
+  clearIrq();
+  radio.startReceive();
+  while (static_cast<int32_t>(until_us - nowUs()) > 2500) {
+    busySample(ch);
+    vTaskDelay(1);
+  }
+  sleepUntil(until_us);
+  standbyXosc();
+  clearIrq();
+  tune(g_lora_ch);
+}
+
+// Busy % per channel from the samples, then halve the counters (older samples fade out).
+static void busyPublish() {
+  for (uint8_t c = 0; c < LORA_CHANNELS; c++) {
+    if (g_busy_n[c] >= 50) g_busy_pct[c] = static_cast<uint8_t>((g_busy_hit[c] * 100UL + g_busy_n[c] / 2) / g_busy_n[c]);
+    g_busy_n[c] /= 2; g_busy_hit[c] /= 2;
+  }
+}
+
+// Auto rule (same as the simulation): stay unless the current channel is busier than CH_BUSY_PCT and
+// another one is quieter by CH_BETTER_PCT; 915.0 MHz (channel 0) gets a 5 % preference. -1 = stay.
+static int betterChannel(uint8_t cur) {
+  const uint8_t pc = g_busy_pct[cur];
+  if (pc == 255 || pc <= CH_BUSY_PCT) return -1;
+  int best = -1, bq = 1000;
+  for (uint8_t c = 0; c < LORA_CHANNELS; c++) {
+    if (c == cur || g_busy_pct[c] == 255) continue;
+    const int q = g_busy_pct[c] - (c == 0 ? 5 : 0);
+    if (q < bq) { bq = q; best = c; }
+  }
+  if (best >= 0 && g_busy_pct[best] + CH_BETTER_PCT < pc) return best;
+  return -1;
+}
+
 struct RxRes { bool irq; bool got; bool crc; uint8_t len; int8_t rssi; int8_t snr_q4; uint32_t end_us; };
 
 static const uint32_t RX_EXTEND_US = 2000;     // est.: < LEAD_US, so a late packet never eats the next slot
 
 // Listen in mode `m` from `open_us` to `close_us`. A packet whose header arrived before close
 // may finish up to `extend_us` later (bounded so it never runs into the next slot / beacon).
-static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t* buf, uint32_t extend_us = RX_EXTEND_US) {
+// meter_ch < LORA_CHANNELS: also feeds the activity meter while waiting (chalet, between frames).
+static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t* buf, uint32_t extend_us = RX_EXTEND_US,
+                      uint8_t meter_ch = 0xFF) {
   RxRes r;
   memset(&r, 0, sizeof(r));
   if (!g_radio_ok) { sleepUntil(close_us); return r; }
@@ -160,7 +284,7 @@ static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t*
   if (reached(close_us)) return r;
   clearIrq();
   radio.startReceive();
-  bool irq = waitIrq(close_us);
+  bool irq = meter_ch < LORA_CHANNELS ? waitIrqSampling(close_us, meter_ch) : waitIrq(close_us);
   if (!irq) {
     const uint32_t flags = radio.getIrqFlags();
     if ((flags & 0x0010) && extend_us > 0) irq = waitIrq(close_us + extend_us);   // HeaderValid: packet in progress
@@ -190,22 +314,67 @@ static RxRes rxWindow(RadioMode m, uint32_t open_us, uint32_t close_us, uint8_t*
 // ---------------------------------------------------------------------------------------------
 // Chalet
 // ---------------------------------------------------------------------------------------------
+static void cmdQueue(uint8_t cmd, uint8_t target, uint8_t value) {   // under lock
+  if (cmd == CMD_SET_CHANNEL) {
+    if (g_ch->cmd == CMD_SET_CHANNEL && g_ch->cmd_value == value) return;          // that switch is running
+    for (uint8_t i = 0; i < g_cmdq_n; i++)
+      if (g_cmdq[i].cmd == CMD_SET_CHANNEL) { g_cmdq[i].value = value; return; }   // newest choice wins
+  }
+  if (g_cmdq_n < sizeof(g_cmdq) / sizeof(g_cmdq[0])) { g_cmdq[g_cmdq_n].cmd = cmd; g_cmdq[g_cmdq_n].target = target; g_cmdq[g_cmdq_n].value = value; g_cmdq_n++; }
+}
+
 static void chaletApplyConfig() {   // under lock
   PlannerConfig& c = g_ch->planner.cfg;
   if (c.test_mode != g_cfg_test) { c.test_mode = g_cfg_test; g_ch->planner.resetStats(); }
   c.adaptive = g_cfg_adaptive;
   if (g_cfg_reset_stats) { g_ch->planner.resetStats(); g_cfg_reset_stats = false; }
   g_ch->focus_node = g_cfg_focus;
-  if (g_cfg_reset_all) { g_cfg_reset_all = false; g_cmd_seq++; g_ch->cmd = CMD_RESET_ALL; g_ch->cmd_seq = g_cmd_seq; g_cmd_until_ms = millis() + 5000; }
-  if (g_ch->cmd != CMD_NONE && static_cast<int32_t>(millis() - g_cmd_until_ms) >= 0) g_ch->cmd = CMD_NONE;
+  if (g_cfg_reset_all) { g_cfg_reset_all = false; cmdQueue(CMD_RESET_ALL, 0, 0); }
+  // one command at a time, each in CMD_BEACONS beacons (also sent on the backbone)
+  if (g_ch->cmd != CMD_NONE && g_cmd_beacons_left == 0) g_ch->cmd = CMD_NONE;
+  if (g_ch->cmd == CMD_NONE && g_cmdq_n > 0) {
+    const QueuedCmd q = g_cmdq[0];
+    for (uint8_t i = 1; i < g_cmdq_n; i++) g_cmdq[i - 1] = g_cmdq[i];
+    g_cmdq_n--;
+    g_cmd_seq++;
+    if (g_cmd_seq == 0) g_cmd_seq = 1;   // a hub starts with last seq 0
+    g_ch->cmd = q.cmd; g_ch->cmd_seq = g_cmd_seq; g_ch->cmd_target = q.target; g_ch->cmd_value = q.value;
+    g_cmd_beacons_left = CMD_BEACONS;
+  }
+  if (g_ch->cmd == CMD_SET_CHANNEL) g_ch->cmd_target = static_cast<uint8_t>(g_cmd_beacons_left - 1);   // beacons left before the switch
   const bool silenced = g_silence_state && static_cast<int32_t>(g_silence_until_ms - millis()) > 0;
   if (g_silence_state && !silenced) { g_silence_state = false; g_silence_event = true; }
   g_ch->flags = static_cast<uint8_t>((silenced ? BF_SILENCED : 0) | (g_cfg_sonar_sim ? BF_SONAR_SIM : 0));
   const uint32_t rem_s = silenced ? (g_silence_until_ms - millis()) / 1000 : 0;
   g_ch->silence_10s = static_cast<uint8_t>(rem_s / 10 > 255 ? 255 : rem_s / 10);
+  g_ch->net_cfg = makeNetCfg(g_cfg_transport, EB_LR, g_lora_ch);
 }
 
-static void chaletHandle(const ChaletRxResult& res) {   // under lock
+static void chaletBeaconBuilt() {   // under lock, after startFrame
+  if (g_ch->cmd == CMD_NONE || g_cmd_beacons_left == 0) return;
+  g_cmd_beacons_left--;
+  if (g_ch->cmd == CMD_SET_CHANNEL && g_cmd_beacons_left == 0) g_ch_switch_after = g_ch->cmd_value;   // after the target-0 beacon
+}
+
+static void notePath(uint8_t hub, uint8_t flags, bool eb, uint8_t hops) {   // under lock
+  HubPath* p = nullptr;
+  for (uint8_t i = 0; i < 12 && p == nullptr; i++) if (g_paths[i].id == hub) p = &g_paths[i];
+  for (uint8_t i = 0; i < 12 && p == nullptr; i++) if (g_paths[i].id == 0) p = &g_paths[i];
+  if (p == nullptr) {   // replace the hub heard longest ago
+    p = &g_paths[0];
+    for (uint8_t i = 1; i < 12; i++) {
+      const uint32_t a = g_paths[i].lora_ms > g_paths[i].eb_ms ? g_paths[i].lora_ms : g_paths[i].eb_ms;
+      const uint32_t b = p->lora_ms > p->eb_ms ? p->lora_ms : p->eb_ms;
+      if (a < b) p = &g_paths[i];
+    }
+    memset(p, 0, sizeof(*p));
+  }
+  p->id = hub; p->flags = flags;
+  if (eb) { p->eb_ms = millis(); p->hops = hops; } else { p->lora_ms = millis(); }
+}
+
+static void chaletHandle(const ChaletRxResult& res, bool eb = false, uint8_t hops = 0) {   // under lock
+  if (res.hub != 0 && res.hub != ID_NONE) notePath(res.hub, res.flags, eb, hops);
   for (uint8_t k = 0; k < res.n_changes; k++) {
     MeshNodeUpdate u;
     u.node = res.changes[k].node; u.owner = res.changes[k].owner; u.old_state = res.changes[k].old_state;
@@ -221,33 +390,96 @@ static void chaletHandle(const ChaletRxResult& res) {   // under lock
   }
 }
 
+// Boot: fixed channel, or (Auto) sample every channel and leave the last one used only if it is busy.
+static void chaletBootChannel() {
+  if (g_cfg_channel < LORA_CHANNELS) { g_lora_ch = g_cfg_channel; tune(g_lora_ch); return; }
+  tune(g_lora_ch);
+  for (uint8_t c = 0; c < LORA_CHANNELS; c++) sampleChannel(c, nowUs() + BOOT_SCAN_US);
+  busyPublish();
+  const int b = betterChannel(g_lora_ch);
+  if (b >= 0) { g_lora_ch = static_cast<uint8_t>(b); g_ch_event = true; }
+  tune(g_lora_ch);
+}
+
+// Between frames: sample one other channel (round robin), then listen on the network channel for
+// random JOINs while sampling its activity. Never runs into the beacon (until = beacon - 4 ms).
+static void chaletGap(uint32_t until, bool lora) {
+  static uint8_t rx[MAX_PACKET];
+  if (static_cast<int32_t>(until - nowUs()) > static_cast<int32_t>(SCAN_DWELL_US + 20000)) {
+    g_scan_rr = static_cast<uint8_t>((g_scan_rr + 1) % LORA_CHANNELS);
+    if (g_scan_rr == g_lora_ch) g_scan_rr = static_cast<uint8_t>((g_scan_rr + 1) % LORA_CHANNELS);
+    sampleChannel(g_scan_rr, nowUs() + SCAN_DWELL_US);
+  }
+  while (static_cast<int32_t>(until - nowUs()) > 0) {
+    if (lora) {
+      RxRes r = rxWindow(MODE_SF9_BW500, nowUs(), until, rx, 0, g_lora_ch);   // never extend into the beacon
+      if (r.got) { Lock l; g_ch->onAsyncPacket(rx, r.len, r.rssi); }
+    } else {
+      sampleChannel(g_lora_ch, until);
+    }
+  }
+}
+
+// Every CH_EVAL_MS (or on request): publish the activity, then queue a channel change if the fixed
+// setting differs or (Auto) the channel got busy.
+static void chaletChannelEval() {
+  if (!g_cfg_rescan && millis() - g_ch_eval_ms < CH_EVAL_MS) return;
+  g_cfg_rescan = false;
+  g_ch_eval_ms = millis();
+  busyPublish();
+  int to = -1;
+  if (g_cfg_channel < LORA_CHANNELS) { if (g_cfg_channel != g_lora_ch) to = g_cfg_channel; }
+  else to = betterChannel(g_lora_ch);
+  if (to >= 0) { Lock l; cmdQueue(CMD_SET_CHANNEL, 0, static_cast<uint8_t>(to)); }
+}
+
 static void chaletTask() {
   static uint8_t buf[MAX_PACKET];
   static uint8_t rx[MAX_PACKET];
+  static uint8_t ebp[MAX_PACKET];
+  static uint8_t ebf[eb::MAX_FRAME];
   uint16_t frame = 1;
+  chaletBootChannel();
+  g_ch_eval_ms = millis();
   uint32_t next = nowUs() + 200000;
   for (;;) {
-    // listen for random JOINs until the next frame
-    while (static_cast<int32_t>(next - 4000 - nowUs()) > 0) {
-      RxRes r = rxWindow(MODE_SF9_BW500, nowUs(), next - 4000, rx, 0);   // never extend into the beacon
-      if (r.got) { Lock l; g_ch->onAsyncPacket(rx, r.len, r.rssi); }
-    }
+    const bool lora = g_cfg_transport != TR_ESPNOW;   // ESP-NOW only: no LoRa TX, frames keep running for the backbone
+    chaletGap(next - 4000, lora);
     Beacon plan;
     SlotTime times[MAX_SLOTS];
-    size_t blen;
+    size_t blen, eblen = 0;
     uint32_t frame_us;
     {
       Lock l;
       chaletApplyConfig();
       blen = g_ch->startFrame(frame, buf, sizeof(buf));
+      chaletBeaconBuilt();
       plan = g_ch->beacon;
       memcpy(times, g_ch->times, sizeof(times));
-      frame_us = static_cast<uint32_t>(g_ch->planner.cfg.frame_ms) * 1000UL;
+      // the planner may lengthen the frame (1 / 1.5 / 2 s) when the hubs do not fit
+      frame_us = plan.frame_10ms ? static_cast<uint32_t>(plan.frame_10ms) * 10000UL
+                                 : static_cast<uint32_t>(g_ch->planner.cfg.frame_ms) * 1000UL;
       g_frame = frame;
+      const uint32_t now = millis();
+      // backbone beacon: Auto / ESP-NOW, 2 min after leaving them, and while hubs talk on the backbone
+      const bool eb_beacon = g_eb_send != nullptr &&
+                             (g_cfg_transport != TR_LORA || static_cast<int32_t>(g_eb_beacon_until_ms - now) > 0 ||
+                              now - g_eb_hub_last_ms < 30000UL);
+      if (eb_beacon) eblen = g_ch->buildEbBeacon(ebp, sizeof(ebp));
     }
     uint32_t end = 0, ref = next;
-    if (txAt(buf, blen, MODE_SF9_BW500, next, end, false)) ref = refFromBeaconEnd(end, static_cast<uint16_t>(blen));
-    for (uint8_t i = 0; i < plan.n_slots; i++) {
+    if (lora) {
+      if (txAt(buf, blen, MODE_SF9_BW500, next, end, false)) ref = refFromBeaconEnd(end, static_cast<uint16_t>(blen));
+    } else {
+      sleepUntil(next);
+    }
+    if (eblen > 0) {
+      eb::Header h;
+      h.net = g_net; h.sender = g_self; h.type = eb::MSG_EB_BEACON; h.hops = 0; h.origin = g_self; h.seq = ++g_eb_seq;
+      const size_t n = eb::encode(h, ebp, eblen, ebf, sizeof(ebf));
+      if (n > 0 && g_eb_send(ebf, n)) g_eb_tx = g_eb_tx + 1;
+    }
+    for (uint8_t i = 0; lora && i < plan.n_slots; i++) {
       const Slot& s = plan.slots[i];
       if (s.kind == SLOT_ECHO) continue;                         // our own beacon, repeated
       RxRes r = rxWindow(slotMode(s), ref + times[i].start, ref + times[i].end, rx);
@@ -268,6 +500,12 @@ static void chaletTask() {
         xQueueSend(g_nodeq, &u, 0);
       }
     }
+    if (g_ch_switch_after != 0xFF) {   // the target-0 beacon went out: the network moves now
+      g_lora_ch = g_ch_switch_after; g_ch_switch_after = 0xFF;
+      tune(g_lora_ch);
+      g_ch_moves = g_ch_moves + 1; g_ch_event = true;
+    }
+    chaletChannelEval();
     frame++;
     next += frame_us;
     if (static_cast<int32_t>(next - nowUs()) < 5000) next = nowUs() + 20000;   // fell behind: restart timing
@@ -282,7 +520,9 @@ static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
     g_reset_event = true;
     g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
   }
-  const bool s = (g_hub->plan.flags & BF_SILENCED) != 0;
+  if (cmd == CMD_SET_CHANNEL) g_pending_since_ms = millis();
+  if (cmd == CMD_SET_RELAY) { g_relay_dev = g_hub->last_cmd_target; g_relay_on = g_hub->last_cmd_value != 0; g_relay_event = true; }
+  const bool s = g_hub->silenced();   // beacon or backbone beacon
   if (s != g_silence_state) { g_silence_state = s; g_silence_event = true; }
 }
 
@@ -291,9 +531,11 @@ static bool hubOnPacket(int slot, const uint8_t* p, const RxRes& r) {
   Lock l;
   Header h;
   if (!readHeader(p, r.len, g_net, h)) return false;
+  g_heard_net_ms = millis();                      // our network is on this channel: stop hopping
   if (h.type == PT_BEACON || h.type == PT_ECHO) {
     uint8_t cmd = CMD_NONE;
     if (g_hub->onBeacon(p, r.len, r.end_us, r.rssi, r.snr_q4, cmd)) {
+      g_pol.onLoraBeacon(millis());
       if (h.type == PT_BEACON) g_last_beacon_len = r.len;
       g_frame = g_hub->plan.frame;
       hubBeaconPost(cmd);
@@ -319,8 +561,37 @@ static bool listenFor(uint32_t open_us, uint32_t close_us) {
   return false;
 }
 
+// Radio task: follow a channel switch announced by the chalet (after the target-0 beacon), or, while
+// unsynced, the channel named by the backbone beacon.
+static void hubChannelUpdate(bool synced) {
+  uint8_t to = 0xFF;
+  {
+    Lock l;
+    if (g_hub->channel_switch_pending) {
+      g_req_ch = 0xFF;   // the backbone beacon still names the old channel during the countdown
+      const bool due = seqDiff(static_cast<uint16_t>(g_hub->frameNow() + 1), g_hub->channel_switch_frame) >= 0;
+      if (due || (!synced && millis() - g_pending_since_ms > 15000UL)) {
+        to = g_hub->channel_next; g_hub->channel_switch_pending = false;
+      }
+    } else if (!synced && g_req_ch != 0xFF) {
+      to = g_req_ch; g_req_ch = 0xFF;
+    }
+  }
+  if (to < LORA_CHANNELS && to != g_lora_ch) {
+    g_lora_ch = to; tune(to); g_ch_event = true;
+    g_heard_net_ms = millis();
+  }
+}
+
 static void hubSearch(uint32_t& next_join_us) {
   static uint8_t rx[MAX_PACKET];
+  // no beacon: next channel every HUB_HOP_MS, unless this network was heard recently
+  const uint32_t now = millis();
+  if (now - g_heard_net_ms > HUB_HOP_QUIET_MS && now - g_last_hop_ms > HUB_HOP_MS) {
+    g_lora_ch = static_cast<uint8_t>((g_lora_ch + 1) % LORA_CHANNELS);
+    tune(g_lora_ch);
+    g_last_hop_ms = now;
+  }
   const uint32_t close = nowUs() + 300000;
   RxRes r = rxWindow(MODE_SF9_BW500, nowUs(), close, rx);
   if (r.got && hubOnPacket(-1, rx, r)) return;
@@ -356,7 +627,7 @@ static void hubFrame() {
         size_t n;
         {
           Lock l;
-          uint8_t flags = 0;
+          uint8_t flags = static_cast<uint8_t>((g_eb_relay ? HF_EB_RELAY : 0) | (g_hub_eb_on ? HF_EB_PATH : 0));
           if (g_silence_req_frames > 0) { flags |= g_silence_req; g_silence_req_frames = g_silence_req_frames - 1; }
           const bool test = plan.test_mode != TEST_OFF;
           n = g_hub->buildHub(buf, sizeof(buf), flags, g_battery_mv, static_cast<uint16_t>(millis() / 60000UL),
@@ -388,6 +659,7 @@ static void hubFrame() {
     }
   }
   { Lock l; g_hub->endFrame(); }
+  hubChannelUpdate(true);
 
   // next beacon: listen around its expected start (REF), then the echo slots of the old plan
   // (echo positions shift with the new beacon length, hence the wider windows)
@@ -405,9 +677,26 @@ static void hubFrame() {
 
 static void hubTask() {
   uint32_t next_join = nowUs() + 500000 + (esp_random() % 1000000);
+  tune(g_lora_ch);
   for (;;) {
-    bool synced;
-    { Lock l; synced = g_hub->have_plan && g_hub->sync.synced(); }
+    bool synced, lora_on;
+    {
+      Lock l;
+      const uint32_t now = millis();
+      g_pol.tick(now);
+      lora_on = g_pol.useLora(g_hub->transport(), now);
+      if (!lora_on) g_hub->have_plan = false;   // slot timing is stale when LoRa comes back
+      synced = g_hub->have_plan && g_hub->sync.synced();
+    }
+    g_hub_lora_on = lora_on;
+    if (!lora_on) {   // ESP-NOW only: radio idle, keep following channel changes for the way back
+      if (!g_lora_idle) { standbyXosc(); g_lora_idle = true; }
+      hubChannelUpdate(false);
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    g_lora_idle = false;
+    hubChannelUpdate(synced);
     if (!synced) hubSearch(next_join);
     else hubFrame();
   }
@@ -438,11 +727,15 @@ static bool radioInit() {
 bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
   g_chalet = chalet;
   g_net = network_id;
+  g_self = self_id;
   g_mx = xSemaphoreCreateMutex();
+  g_dedup = new eb::Dedup();
+  g_eb_seq = static_cast<uint16_t>(esp_random());   // a rebooted device must not look like a duplicate
+  g_pol.begin(millis());
   g_cmd_seq = static_cast<uint8_t>(esp_random());   // a rebooted chalet must not reuse the last command seq
   g_nodeq = xQueueCreate(32, sizeof(MeshNodeUpdate));
   if (chalet) {
-    g_ch = new ChaletRole<10, 32>();
+    g_ch = new ChaletRole<10, 48>();
     g_sonar = new sonar::SonarStore<16, 128>();
     g_ch->sonar_sink = g_sonar;
     PlannerConfig& c = g_ch->planner.cfg;
@@ -456,6 +749,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
     if (g_rtc_cmd_magic == 0xC0DE5EED) g_hub->last_cmd_seq = g_rtc_cmd_seq;
   }
   g_radio_ok = radioInit();
+  g_tuned_ch = 0;   // radioInit tunes LORA_FREQUENCY = channel 0; the task retunes to g_lora_ch
   // Core 1 (same as loop), higher priority than loop: the radio preempts loop() for slot timing.
   xTaskCreatePinnedToCore(radioTask, "mesh", 8192, nullptr, 5, &g_task, 1);
   return g_radio_ok;
@@ -464,7 +758,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
 void meshHubObserveNode(uint8_t node, uint8_t state, uint8_t turns, uint8_t flags, uint8_t battery_pct) {
   if (g_hub == nullptr) return;
   Lock l;
-  g_hub->table.observe(node, state, turns, flags, battery_pct, millis());
+  if (g_hub->table.observe(node, state, turns, flags, battery_pct, millis())) g_eb_kick = true;
   g_hub->table.expire(millis(), 10UL * 60UL * 1000UL);   // forget nodes silent for 10 min once acked (est.)
 }
 
@@ -486,6 +780,13 @@ void meshHubView(MeshHubView& v) {
   v.allowance = idx >= 0 ? g_hub->plan.slots[idx].allowance : 0;
   v.test_mode = g_hub->plan.test_mode;
   v.beacons = g_hub->beacons_rx; v.echoes = g_hub->echoes_rx; v.tx = g_tx;
+  const uint32_t now = millis();
+  v.lora_ch = g_lora_ch;
+  v.transport = g_hub->transport();
+  v.lora_on = g_hub_lora_on; v.eb_on = g_hub_eb_on;
+  v.eb_fallback = g_pol.fallbackActive();
+  v.eb_beacon_age_ms = g_eb_beacon_seen ? now - g_eb_beacon_ms : 0xFFFFFFFFUL;
+  v.relay = g_eb_relay;
 }
 
 void meshRequestSilence(bool on) {
@@ -550,6 +851,130 @@ void meshResetStats() { g_cfg_reset_stats = true; }
 void meshSendResetAll() { g_cfg_reset_all = true; }
 void meshSetFocusNode(uint8_t node) { g_cfg_focus = node; }
 
+// ---------------------------------------------------------------------------------------------
+// v2 network config + ESP-NOW backbone (docs/protocol_v2.md §6c)
+// ---------------------------------------------------------------------------------------------
+void meshSetStartChannel(uint8_t ch) { if (ch < LORA_CHANNELS) g_lora_ch = ch; }
+
+void meshSetTransport(uint8_t tr) {
+  if (tr > TR_ESPNOW) return;
+  if (tr != g_cfg_transport) g_eb_beacon_until_ms = millis() + 120000UL;   // hubs on the backbone hear the change
+  g_cfg_transport = tr;
+}
+
+uint8_t meshTransport() {
+  if (g_chalet) return g_cfg_transport;
+  if (g_hub == nullptr || g_mx == nullptr) return TR_AUTO;
+  Lock l;
+  return g_hub->transport();
+}
+
+void meshSetLoraChannel(uint8_t ch) {
+  if (ch >= LORA_CHANNELS && ch != MESH_CH_AUTO) return;
+  g_cfg_channel = ch;
+  if (g_ch != nullptr) g_cfg_rescan = true;   // radio running: fixed channel applied / Auto re-evaluated now
+  else if (ch < LORA_CHANNELS) g_lora_ch = ch;
+}
+uint8_t meshLoraChannelSetting() { return g_cfg_channel; }
+uint8_t meshLoraChannel() { return g_lora_ch; }
+float meshLoraChannelMHz(uint8_t ch) { return loraChannelMHz(ch); }
+void meshRescanChannels() { g_cfg_rescan = true; }
+void meshChannelBusy(uint8_t* pct8) { for (uint8_t c = 0; c < LORA_CHANNELS; c++) pct8[c] = g_busy_pct[c]; }
+
+bool meshPollChannelChanged(uint8_t& ch) {
+  if (!g_ch_event) return false;
+  g_ch_event = false;
+  ch = g_lora_ch;
+  return true;
+}
+
+void meshSetEbSender(MeshEbSendFn fn) { g_eb_send = fn; }
+void meshSetEbRelay(bool on) { g_eb_relay = on; }
+bool meshEbRelay() { return g_eb_relay; }
+
+void meshSetDeviceRelay(uint8_t dev, bool on) {
+  if (g_ch == nullptr || dev == 0 || dev == ID_NONE) return;
+  Lock l;
+  cmdQueue(CMD_SET_RELAY, dev, on ? 1 : 0);
+}
+
+bool meshPollRelayCmd(uint8_t& dev, bool& on) {
+  if (!g_relay_event) return false;
+  g_relay_event = false;
+  dev = g_relay_dev; on = g_relay_on;
+  return true;
+}
+
+// One backbone frame (ESP-NOW type 0x70 / 0x71) from loop(): drop copies, relay, then use it.
+void meshEbReceive(const uint8_t* frame, size_t len) {
+  if (g_mx == nullptr || g_dedup == nullptr) return;
+  eb::Header h;
+  const uint8_t* pl;
+  size_t n;
+  if (!eb::decode(frame, len, g_net, h, pl, n) || h.origin == g_self) return;
+  {
+    Lock l;
+    if (g_dedup->seen(h.origin, h.type, h.seq)) { g_eb_dup = g_eb_dup + 1; return; }
+  }
+  g_eb_rx = g_eb_rx + 1;
+  if (g_eb_relay && g_eb_send != nullptr) {   // relay first: latency adds up per hop
+    static uint8_t copy[eb::MAX_FRAME];
+    memcpy(copy, frame, len);
+    if (eb::prepareRelay(copy, len, g_self) && g_eb_send(copy, len)) g_eb_relayed = g_eb_relayed + 1;
+  }
+  if (g_chalet) {
+    if (h.type != eb::MSG_EB_HUB || g_ch == nullptr) return;
+    Lock l;
+    ChaletRxResult res;
+    g_eb_hub_last_ms = millis();
+    if (g_ch->onEbHubPacket(pl, n, h.hops, res)) chaletHandle(res, true, h.hops);
+    else if (res.hub != 0) notePath(res.hub, res.flags, true, h.hops);
+    return;
+  }
+  if (h.type != eb::MSG_EB_BEACON || g_hub == nullptr) return;
+  Lock l;
+  uint8_t cmd = CMD_NONE;
+  if (!g_hub->onEbBeacon(pl, n, cmd)) return;
+  const uint32_t now = millis();
+  g_pol.onEbBeacon(now);
+  g_eb_beacon_ms = now; g_eb_beacon_seen = true;
+  if (!(g_hub->have_plan && g_hub->sync.synced())) {   // no LoRa beacon: the backbone says which channel
+    const uint8_t c = netChannel(g_hub->info_net_cfg);
+    if (c < LORA_CHANNELS && c != g_lora_ch && !g_hub->channel_switch_pending) g_req_ch = c;
+    g_heard_net_ms = now;
+  }
+  hubBeaconPost(cmd);
+}
+
+// Hub, from loop(): send the hub packet on the backbone when the transport policy says so — every
+// second, sooner (250 ms) after a line change.
+void meshEbTick() {
+  if (g_hub == nullptr || g_mx == nullptr) return;
+  static uint8_t pl[eb::MAX_PAYLOAD];
+  static uint8_t f[eb::MAX_FRAME];
+  size_t n = 0;
+  {
+    Lock l;
+    const uint32_t now = millis();
+    g_pol.tick(now);
+    const bool use = g_pol.useEb(g_hub->transport(), now);
+    g_hub_eb_on = use;
+    if (!use || g_eb_send == nullptr) return;
+    const uint32_t gap = now - g_eb_last_ms;
+    if (gap < 1000UL && !(g_eb_kick && gap >= 250UL)) return;
+    g_eb_kick = false;
+    g_eb_last_ms = now;
+    uint8_t flags = static_cast<uint8_t>((g_eb_relay ? HF_EB_RELAY : 0) | HF_EB_PATH);
+    if (g_silence_req_frames > 0) { flags |= g_silence_req; g_silence_req_frames = g_silence_req_frames - 1; }
+    n = g_hub->buildHubFree(pl, sizeof(pl), flags, g_battery_mv, static_cast<uint16_t>(now / 60000UL), g_hub->frameNow());
+  }
+  if (n == 0) return;
+  eb::Header h;
+  h.net = g_net; h.sender = g_self; h.type = eb::MSG_EB_HUB; h.hops = 0; h.origin = g_self; h.seq = ++g_eb_seq;
+  const size_t fl = eb::encode(h, pl, n, f, sizeof(f));
+  if (fl > 0 && g_eb_send(f, fl)) g_eb_tx = g_eb_tx + 1;
+}
+
 const char* meshModeName(uint8_t mode) { return validMode(mode) ? modeInfo(static_cast<RadioMode>(mode)).name : "-"; }
 const char* meshTestModeName(uint8_t m) {
   switch (m) {
@@ -560,13 +985,54 @@ const char* meshTestModeName(uint8_t m) {
 
 String meshRadioJson() {
   String s;
-  s.reserve(3000);
+  s.reserve(4500);
   s += "{\"role\":\""; s += g_chalet ? "chalet" : "hub"; s += "\"";
   s += ",\"radio_ok\":"; s += g_radio_ok ? "true" : "false";
   s += ",\"frame\":"; s += g_frame;
   s += ",\"rx_ok\":"; s += g_rx_ok; s += ",\"rx_crc\":"; s += g_rx_crc; s += ",\"tx\":"; s += g_tx;
   s += ",\"test_mode\":\""; s += meshTestModeName(meshTestMode()); s += "\"";
   s += ",\"adaptive\":"; s += g_cfg_adaptive ? "true" : "false";
+  // network config + backbone
+  static const char* const TR_NAMES[] = {"auto", "lora", "espnow"};
+  const uint8_t tr = meshTransport();
+  s += ",\"transport\":\""; s += TR_NAMES[tr <= TR_ESPNOW ? tr : 0]; s += "\"";
+  s += ",\"channel\":"; s += g_lora_ch;
+  s += ",\"channel_mhz\":"; s += String(loraChannelMHz(g_lora_ch), 1);
+  s += ",\"eb\":{\"lr\":"; s += EB_LR ? "true" : "false";
+  s += ",\"relay\":"; s += g_eb_relay ? "true" : "false";
+  s += ",\"rx\":"; s += g_eb_rx; s += ",\"tx\":"; s += g_eb_tx;
+  s += ",\"relayed\":"; s += g_eb_relayed; s += ",\"dup\":"; s += g_eb_dup; s += "}";
+  if (g_ch != nullptr) {
+    s += ",\"channel_setting\":"; s += g_cfg_channel == MESH_CH_AUTO ? String("\"auto\"") : String(g_cfg_channel);
+    s += ",\"channel_moves\":"; s += g_ch_moves;
+    s += ",\"channels\":[";
+    for (uint8_t c = 0; c < LORA_CHANNELS; c++) {
+      if (c) s += ",";
+      s += "{\"ch\":"; s += c; s += ",\"mhz\":"; s += String(loraChannelMHz(c), 1);
+      s += ",\"busy\":"; s += g_busy_pct[c] == 255 ? String("null") : String(g_busy_pct[c]); s += "}";
+    }
+    s += "]";
+    // how each hub was last heard (LoRa slot / backbone), ages in s (-1 = never)
+    HubPath paths[12];
+    { Lock l; memcpy(paths, g_paths, sizeof(paths)); }
+    const uint32_t now = millis();
+    s += ",\"paths\":[";
+    bool fp = true;
+    for (uint8_t i = 0; i < 12; i++) {
+      const HubPath& p = paths[i];
+      if (p.id == 0) continue;
+      if (!fp) s += ",";
+      fp = false;
+      s += "{\"id\":"; s += p.id;
+      s += ",\"lora_age\":"; s += p.lora_ms ? static_cast<long>((now - p.lora_ms) / 1000) : -1L;
+      s += ",\"eb_age\":"; s += p.eb_ms ? static_cast<long>((now - p.eb_ms) / 1000) : -1L;
+      s += ",\"eb_hops\":"; s += p.hops;
+      s += ",\"relay\":"; s += (p.flags & HF_EB_RELAY) ? "true" : "false";
+      s += ",\"eb_path\":"; s += (p.flags & HF_EB_PATH) ? "true" : "false";
+      s += "}";
+    }
+    s += "]";
+  }
   if (g_ch != nullptr) {
     // copy under the lock, format outside it (keeps the radio task's timing unaffected)
     static HubInfo hubs[10];
@@ -635,6 +1101,10 @@ String meshRadioJson() {
     s += ",\"lost64\":"; s += v.lost64; s += ",\"sync_err_us\":"; s += v.sync_err_us;
     s += ",\"slot_mode\":\""; s += v.own_slot_mode >= 0 ? meshModeName(static_cast<uint8_t>(v.own_slot_mode)) : "none"; s += "\"";
     s += ",\"allowance\":"; s += v.allowance;
+    s += ",\"lora_on\":"; s += v.lora_on ? "true" : "false";
+    s += ",\"eb_on\":"; s += v.eb_on ? "true" : "false";
+    s += ",\"eb_fallback\":"; s += v.eb_fallback ? "true" : "false";
+    s += ",\"eb_beacon_age\":"; s += v.eb_beacon_age_ms == 0xFFFFFFFFUL ? -1L : static_cast<long>(v.eb_beacon_age_ms / 1000);
   }
   s += "}";
   return s;
@@ -678,6 +1148,28 @@ void meshPrintStatus(Print& out) {
     }
   }
   out.printf("[mesh] late TX skipped: %lu\n", (unsigned long)g_tx_late_skips);
+  static const char* const TR_NAMES[] = {"Auto", "LoRa only", "ESP-NOW only"};
+  const uint8_t tr = meshTransport();
+  out.printf("[net] transport %s | LoRa ch %u (%.1f MHz)%s | backbone rx %lu tx %lu relayed %lu dup %lu | relay %s\n",
+             TR_NAMES[tr <= TR_ESPNOW ? tr : 0], g_lora_ch, loraChannelMHz(g_lora_ch),
+             g_chalet ? (g_cfg_channel == MESH_CH_AUTO ? " auto" : " fixed") : "",
+             (unsigned long)g_eb_rx, (unsigned long)g_eb_tx, (unsigned long)g_eb_relayed, (unsigned long)g_eb_dup,
+             g_eb_relay ? "ON" : "off");
+  if (g_hub != nullptr) {
+    MeshHubView v;
+    meshHubView(v);
+    out.printf("[net] hub sends on: %s%s%s | backbone beacon %s\n", v.lora_on ? "LoRa " : "", v.eb_on ? "ESP-NOW " : "",
+               v.eb_fallback ? "(Auto fallback)" : "",
+               v.eb_beacon_age_ms == 0xFFFFFFFFUL ? "never heard" : (String(v.eb_beacon_age_ms / 1000) + " s ago").c_str());
+  }
+  if (g_ch != nullptr) {
+    out.print("[net] activity %:");
+    for (uint8_t c = 0; c < LORA_CHANNELS; c++) {
+      if (g_busy_pct[c] == 255) out.printf(" %.0f:-", loraChannelMHz(c));
+      else out.printf(" %.0f:%u", loraChannelMHz(c), g_busy_pct[c]);
+    }
+    out.printf(" | moves %u\n", g_ch_moves);
+  }
 }
 
 uint8_t meshHubSummaries(MeshHubSummary* out, uint8_t max) {
@@ -718,7 +1210,7 @@ uint8_t meshFocusNode() {
 bool meshHubPushSonar(const uint8_t* blk, uint8_t len) {
   if (g_hub == nullptr) return false;
   Lock l;
-  return g_hub->sonar.push(blk, len, g_hub->plan.frame);
+  return g_hub->sonar.push(blk, len, g_hub->frameNow());   // frame from the beacon or the backbone beacon
 }
 
 String meshSonarListJson() {
