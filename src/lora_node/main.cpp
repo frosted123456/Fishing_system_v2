@@ -404,6 +404,14 @@ void loadAllNodeNames();
 void setupCardKB();
 void loopCardKB();
 void loopButton();
+// v2 PRG button state (see loopButton)
+static uint32_t buttonHeldMs = 0;            // > 0 while the button is held (display shows the hold bar)
+static uint32_t connectInfoUntil = 0;        // show the "how to connect" screen until then
+static uint32_t hubHotspotUntil = 0;         // hub hotspot auto-off time (0 = off)
+static void drawConnectInfo();
+void hubHotspotOn();
+void hubHotspotOff();
+void resetNetworkSettings();
 void handleKeyPress(char key);
 
 // Menu system
@@ -642,10 +650,7 @@ void loop() {
       // 7A FIX: Skip web server and WiFi status checks in LR mode
       // ESP-NOW LR requires STA mode radio which is unchanged in setupEspNow()
       // We only disable web server polling since there's no AP to serve
-      if (wifiApActive) {   // v2: hub hotspot only when turned on (step 2)
-        if (settings.webServerEnabled) loopWebServer();
-        checkWiFiStatus();
-      }
+      if (wifiApActive && settings.webServerEnabled) loopWebServer();   // v2: hub hotspot on demand (PRG hold 3 s)
       loopLocalSensor();
       checkSerialWifiConfig();
 
@@ -795,11 +800,13 @@ void loopDisplay() {
 
   // Don't update display if sleeping
   if (displaySleeping) return;
+  if (buttonHeldMs > 0) return;   // the hold bar owns the screen while the button is held
 
   // Rate limit display updates
   if (millis() - lastDisplayUpdate < 200) return;
   lastDisplayUpdate = millis();
 
+  if (connectInfoUntil != 0 && static_cast<int32_t>(connectInfoUntil - millis()) > 0 && !activeAlerts) { drawConnectInfo(); return; }
   drawCurrentScreen();
 }
 
@@ -2752,6 +2759,15 @@ void checkSerialWifiConfig() {
       Serial.printf("Backbone relay: %s. Usage: RELAY ON|OFF%s\n", meshEbRelay() ? "ON" : "off",
                     currentRole == ROLE_GATEWAY_OFFSHORE ? ", RELAY <device id> ON|OFF" : "");
     }
+  } else if (line.startsWith("HOTSPOT")) {
+    // v2: hub hotspot on demand (same as holding PRG 3 s)
+    String a = line.substring(7); a.trim(); a.toUpperCase();
+    if (currentRole == ROLE_GATEWAY_OFFSHORE) Serial.println(F("The chalet hotspot is always on (see WIFI settings)"));
+    else if (a == "ON") hubHotspotOn();
+    else if (a == "OFF") hubHotspotOff();
+    else Serial.printf("Hotspot %s. Usage: HOTSPOT ON|OFF\n", wifiApActive ? "ON" : "off");
+  } else if (line == "NETRESET") {
+    resetNetworkSettings();   // same as holding PRG 10 s
   } else if (line.startsWith("EBMODE")) {
     String a = line.substring(6); a.trim(); a.toUpperCase();
     if (currentRole == ROLE_GATEWAY_OFFSHORE && (a == "NORMAL" || a == "LR")) {
@@ -4505,36 +4521,152 @@ void loopCardKB() {
  * - Double press (within 500ms): Cycle through live status pages
  * - Long press (2+ seconds): Wake display if sleeping
  */
+// =============================================================================================
+// v2 PRG BUTTON (one button, same on chalet and hubs; docs/FIELD_GUIDE_NETWORK.md)
+//   short press        : during an alert (or while silenced) silence on/off, otherwise wake / next page
+//   hold 3 s, release  : hub = hotspot on/off (30 min, kept while a phone is connected); chalet = show
+//                        how to connect (network, password, address)
+//   hold 10 s, release : reset the NETWORK settings to defaults (link Auto, LoRa channel Auto, relay
+//                        default, chalet ESP-NOW normal rate). Alerts, names and Wi-Fi credentials are kept.
+// While the button is held the screen shows a bar with both marks, so the user sees what release does.
+// =============================================================================================
+static const uint32_t HOLD_CONNECT_MS = 3000, HOLD_RESET_MS = 10000;
+static const uint32_t HUB_HOTSPOT_MS = 30UL * 60UL * 1000UL;
+static void apName(char* out, size_t n) {
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) snprintf(out, n, "%s-Remote", NETWORK_NAME);
+  else snprintf(out, n, "%s-Hub%u", NETWORK_NAME, (unsigned)NODE_ID);
+}
+
+// Hub hotspot on demand: AP on the ESP-NOW channel next to the station interface that ESP-NOW uses.
+// UNTESTED on hardware: that ESP-NOW keeps working through the mode change (to check on the bench).
+void hubHotspotOn() {
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) return;
+  char ssid[32]; apName(ssid, sizeof(ssid));
+  if (!wifiApActive) {
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(ssid, WIFI_PASSWORD, ESPNOW_CHANNEL, 0, AP_MAX_CONNECTIONS);
+    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    apIpAddress = WiFi.softAPIP().toString();
+    wifiApActive = true;
+    Serial.printf("Hotspot ON: %s / %s, http://%s\n", ssid, WIFI_PASSWORD, apIpAddress.c_str());
+  }
+  hubHotspotUntil = millis() + HUB_HOTSPOT_MS;
+  if (hubHotspotUntil == 0) hubHotspotUntil = 1;
+}
+
+void hubHotspotOff() {
+  if (currentRole == ROLE_GATEWAY_OFFSHORE || !wifiApActive) return;
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  wifiApActive = false;
+  hubHotspotUntil = 0;
+  Serial.println(F("Hotspot OFF"));
+}
+
+static void loopHubHotspot() {
+  if (currentRole == ROLE_GATEWAY_OFFSHORE || !wifiApActive || hubHotspotUntil == 0) return;
+  if (static_cast<int32_t>(millis() - hubHotspotUntil) < 0) return;
+  if (WiFi.softAPgetStationNum() > 0) { hubHotspotUntil = millis() + 5UL * 60UL * 1000UL; return; }   // phone still on it
+  hubHotspotOff();
+}
+
+void resetNetworkSettings() {
+  settings.transportMode = MESH_TR_AUTO;
+  settings.loraChannel = MESH_CH_AUTO;
+  settings.ebRelay = (currentRole != ROLE_GATEWAY_OFFSHORE);
+  settings.ebChaletLr = false;
+  saveSettings();
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) { meshSetTransport(MESH_TR_AUTO); meshSetLoraChannel(MESH_CH_AUTO); }
+  meshSetEbRelay(settings.ebRelay);
+  Serial.println(F("Network settings reset to defaults (link Auto, LoRa channel Auto, relay default)"));
+}
+
+// Hold bar: 0..10 s, marks at 3 s and 10 s, label of what releasing now does.
+static void drawHoldBar(uint32_t held) {
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x10_tr);
+  const bool hub = currentRole != ROLE_GATEWAY_OFFSHORE;
+  const char* now_lbl = held >= HOLD_RESET_MS ? "Release: RESET network" :
+                        held >= HOLD_CONNECT_MS ? (hub ? (wifiApActive ? "Release: hotspot OFF" : "Release: hotspot ON") : "Release: connect info")
+                                                : "Keep holding...";
+  display.drawStr(0, 12, now_lbl);
+  const int x0 = 4, w = 120, y = 26;
+  display.drawFrame(x0, y, w, 10);
+  const uint32_t h = held > HOLD_RESET_MS ? HOLD_RESET_MS : held;
+  display.drawBox(x0 + 1, y + 1, static_cast<int>((w - 2) * h / HOLD_RESET_MS), 8);
+  const int m3 = x0 + static_cast<int>(w * HOLD_CONNECT_MS / HOLD_RESET_MS);
+  display.drawVLine(m3, y - 3, 16);
+  display.setFont(u8g2_font_5x7_tr);
+  display.drawStr(m3 - 10, y + 22, hub ? "3s hotspot" : "3s connect");
+  display.drawStr(84, y + 22, "10s reset");
+  display.sendBuffer();
+}
+
+// "How to connect" screen (chalet: always; hub: while its hotspot is on)
+static void drawConnectInfo() {
+  display.clearBuffer();
+  display.setFont(u8g2_font_6x10_tr);
+  char ssid[32]; apName(ssid, sizeof(ssid));
+  char line[40];
+  if (currentRole != ROLE_GATEWAY_OFFSHORE && !wifiApActive) {
+    display.drawStr(0, 12, "Hotspot is OFF");
+    display.drawStr(0, 28, "Hold button 3 s");
+    display.drawStr(0, 40, "to turn it on");
+    display.sendBuffer();
+    return;
+  }
+  display.drawStr(0, 10, "Connect your phone:");
+  snprintf(line, sizeof(line), "WiFi %s", wifiApActive ? ssid : "-");
+  display.drawStr(0, 24, line);
+  snprintf(line, sizeof(line), "Pass %s", WIFI_PASSWORD);
+  display.drawStr(0, 36, line);
+  snprintf(line, sizeof(line), "http://%s", wifiStaConnected ? staIpAddress.c_str() : apIpAddress.c_str());
+  display.drawStr(0, 48, line);
+  if (currentRole != ROLE_GATEWAY_OFFSHORE && hubHotspotUntil != 0) {
+    snprintf(line, sizeof(line), "off in %lu min", (unsigned long)((hubHotspotUntil - millis()) / 60000UL + 1));
+    display.setFont(u8g2_font_5x7_tr);
+    display.drawStr(0, 62, line);
+  }
+  display.sendBuffer();
+}
+
 void loopButton() {
   static unsigned long buttonPressStart = 0;
   static uint8_t buttonPressCount = 0;
   static unsigned long lastButtonRelease = 0;
+  static unsigned long lastBarDraw = 0;
 
+  loopHubHotspot();
   bool pressed = (digitalRead(USER_BUTTON) == LOW);
   unsigned long now = millis();
 
   if (pressed && buttonPressStart == 0) {
-    // Button just pressed - record start time
     buttonPressStart = now;
-  }
-  else if (!pressed && buttonPressStart > 0) {
-    // Button just released
-    unsigned long pressDuration = now - buttonPressStart;
-    buttonPressStart = 0;
-
-    if (pressDuration > 2000) {
-      // Long press (2+ seconds) - wake display
-      DEBUG_PRINTLN(F("PRG long press - waking display"));
-      registerActivity();
+  } else if (pressed) {
+    const uint32_t held = now - buttonPressStart;
+    if (held >= 1000) {                       // show the hold bar from 1 s on
+      if (buttonHeldMs == 0) registerActivity();
+      buttonHeldMs = held;
+      if (now - lastBarDraw >= 100) { lastBarDraw = now; drawHoldBar(held); }
     }
-    else if (pressDuration > BUTTON_DEBOUNCE_MS) {
-      // Short press - count for double-press detection
-      registerActivity();
-      if (now - lastButtonRelease < 500) {
-        buttonPressCount++;
-      } else {
-        buttonPressCount = 1;
-      }
+  } else if (buttonPressStart > 0) {
+    const unsigned long pressDuration = now - buttonPressStart;
+    buttonPressStart = 0;
+    buttonHeldMs = 0;
+    registerActivity();
+    if (pressDuration >= HOLD_RESET_MS) {
+      resetNetworkSettings();
+      showOverlayMessage("Network reset", 1500);
+    } else if (pressDuration >= HOLD_CONNECT_MS) {
+      if (currentRole != ROLE_GATEWAY_OFFSHORE) { if (wifiApActive) hubHotspotOff(); else hubHotspotOn(); }
+      connectInfoUntil = millis() + 30000UL;
+    } else if (pressDuration >= 1000) {
+      // released between 1 and 3 s: nothing (the bar told the user to keep holding)
+    } else if (pressDuration > BUTTON_DEBOUNCE_MS) {
+      connectInfoUntil = 0;
+      if (now - lastButtonRelease < 500) buttonPressCount++;
+      else buttonPressCount = 1;
       lastButtonRelease = now;
     }
   }
@@ -4542,19 +4674,17 @@ void loopButton() {
   // Process button count after settle time (500ms after last release)
   if (buttonPressCount > 0 && (now - lastButtonRelease > 500)) {
     if (buttonPressCount == 1) {
-      // Single press - toggle silence
-      DEBUG_PRINTLN(F("PRG single press - toggling silence"));
-      silenceAlerts();
-      showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 1000);
-    }
-    else if (buttonPressCount >= 2) {
+      if (activeAlerts || alertsSilenced) {   // alert: the button is the silence button
+        DEBUG_PRINTLN(F("PRG single press - toggling silence"));
+        silenceAlerts();
+        showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 1000);
+      }
+      // no alert: the press only woke the display (registerActivity above)
+    } else if (buttonPressCount >= 2) {
       // Double press - cycle page (on live status only)
-      DEBUG_PRINTLN(F("PRG double press - cycling page"));
       if (currentScreen == SCREEN_LIVE_STATUS) {
         int totalPages = (network.node_count + 9) / 10;
-        if (totalPages > 1) {
-          liveStatusPage = (liveStatusPage + 1) % totalPages;
-        }
+        if (totalPages > 1) liveStatusPage = (liveStatusPage + 1) % totalPages;
       }
     }
     buttonPressCount = 0;
