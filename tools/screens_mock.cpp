@@ -22,6 +22,7 @@ static ScreenModel base(bool chalet) {
   m.chalet = chalet; m.self_id = chalet ? 100 : 2; m.lora_ch = 1; m.lora_mhz_x10 = 9150; m.ch_auto = true; m.busy_pct = 4;
   snprintf(m.ssid, sizeof(m.ssid), chalet ? "IceFish-Remote" : "IceFish-Hub2"); snprintf(m.pass, sizeof(m.pass), "fishon123");
   snprintf(m.url, sizeof(m.url), "http://192.168.4.1"); m.uptime_s = 7380; m.master_heard = true; m.beacon_rssi = -94;
+  m.kb = true;
   return m;
 }
 static void pockets3(ScreenModel& m) {
@@ -56,6 +57,15 @@ static void addSonar(ScreenModel& m, uint8_t focus, int pings) {
     if (h.id == focus) m.bait_cm = static_cast<uint16_t>(src.proc.bait_m * 100.0f + 0.5f);
   }
   m.focus_node = focus;
+}
+
+
+// Options page: the rows are decided by the firmware (main.cpp optBuild); these mirror what it fills in
+static void orow(ScreenModel& m, const char* l, const char* v, bool sub = false) {
+  ScrRow& r = m.opt.rows[m.opt.n++]; snprintf(r.label, sizeof(r.label), "%s", l); snprintf(r.value, sizeof(r.value), "%s", v); r.sub = sub;
+}
+static void olist(ScreenModel& m, const char* title, uint8_t sel, const char* hint) {
+  m.opt.mode = SO_LIST; snprintf(m.opt.title, sizeof(m.opt.title), "%s", title); m.opt.sel = sel; snprintf(m.opt.hint, sizeof(m.opt.hint), "%s", hint);
 }
 
 static void dump(u8g2_t* u, const std::string& path) {
@@ -95,6 +105,38 @@ int main(int argc, char** argv) {
   m = base(false); pockets3(m); m.master_heard = false; m.setup_s = 300; shot("hub_waiting", m, PG_HOME, 0, true);
   m = base(false); pockets3(m); m.hotspot = true; m.hotspot_min = 28; shot("hub_connect", m, PG_CONNECT, 0, true);
   m = base(false); pockets3(m); m.master_heard = false; m.on_backup = true; shot("hub_backup", m, PG_NETWORK, 0, true);
+  // ---- bench: chalet alone, no hub yet, cabin Wi-Fi not joined ----
+  m = base(true); m.setup_s = 290; snprintf(m.sta_ssid, sizeof(m.sta_ssid), "BELL494"); snprintf(m.sta_state, sizeof(m.sta_state), "not found");
+  shot("bench_home_a", m, PG_HOME, 0, true);
+  m.uptime_s = 7383; shot("bench_home_b", m, PG_HOME, 0, true);
+  shot("bench_connect", m, PG_CONNECT, 0, true);
+  m = base(true); m.sta = true; snprintf(m.url, sizeof(m.url), "http://192.168.2.37"); snprintf(m.sta_ssid, sizeof(m.sta_ssid), "BELL494");
+  pockets3(m); shot("home_on_cabin_wifi", m, PG_HOME, 0, true);
+  // ---- options (CardKB) ----
+  m = base(true); olist(m, "Options", 0, "OK: open");
+  orow(m, "Wi-Fi", "not conn.", true); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "Link", "Auto");
+  orow(m, "LoRa channel", "Auto (1)"); orow(m, "Simulation", "off", true); orow(m, "Network reset", ""); orow(m, "Reboot", ""); orow(m, "Built", "Oct  6 15:40");
+  shot("options_main", m, PG_OPTIONS, 0, true);
+  m.opt.sel = 4; snprintf(m.opt.hint, sizeof(m.opt.hint), "OK: change"); shot("options_main_scrolled", m, PG_OPTIONS, 0, true);
+  m = base(true); olist(m, "Wi-Fi", 0, "Esc: back");
+  orow(m, "Status", "not found"); orow(m, "Network", "BELL494"); orow(m, "Choose network", "", true); orow(m, "Type name", "", true);
+  orow(m, "Address", "-"); orow(m, "Retry now", ""); orow(m, "Channel", "1 OK"); orow(m, "AP", "IceFish-Remote"); orow(m, "AP pass", "fishon123"); orow(m, "Forget network", "");
+  shot("options_wifi", m, PG_OPTIONS, 0, true);
+  m = base(true); olist(m, "Choose Wi-Fi", 0, "OK: join");
+  orow(m, "BELL494", "-58"); orow(m, "BELL494-5G?", "-61"); orow(m, "Voisin_2G", "-80"); orow(m, "Chalet guest", "-85 open"); orow(m, "Scan again", "");
+  shot("options_scan", m, PG_OPTIONS, 0, true);
+  m = base(true); m.opt.mode = SO_TEXT; snprintf(m.opt.title, sizeof(m.opt.title), "Wi-Fi password"); snprintf(m.opt.line, sizeof(m.opt.line), "for BELL494");
+  snprintf(m.opt.text, sizeof(m.opt.text), "mot2passe-du-chalet"); snprintf(m.opt.hint, sizeof(m.opt.hint), "Enter: connect");
+  shot("options_password", m, PG_OPTIONS, 0, true);
+  m = base(true); m.opt.mode = SO_CONFIRM; snprintf(m.opt.title, sizeof(m.opt.title), "Reboot?"); snprintf(m.opt.line, sizeof(m.opt.line), "Back in about 10 s");
+  shot("options_confirm", m, PG_OPTIONS, 0, true);
+  m = base(true); olist(m, "Simulation", 3, "OK: next mode");
+  orow(m, "All holes", "OFF"); orow(m, "Test holes", "OFF"); orow(m, "Fake fish rate", "6 /h"); orow(m, "Pointe", "both");
+  orow(m, "Baie", "sonar~"); orow(m, "Roche", "off"); orow(m, "Drop-off", "off");
+  shot("options_sim", m, PG_OPTIONS, 0, true);
+  m = base(false); olist(m, "Options", 0, "OK: change");
+  orow(m, "Hotspot", "OFF"); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "ESP-NOW relay", "ON"); orow(m, "Reed polarity", "HIGH");
+  shot("hub_options", m, PG_OPTIONS, 0, true);
   printf("%d screens\n", k);
   return 0;
 }

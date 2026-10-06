@@ -2,7 +2,7 @@
 
 Mockups: `docs/screens/v2_proposal.png`, rendered on the PC by the **same drawing code** that runs on the board
 (`src/lora_node/screens.cpp`, real U8g2 library, `tools/screens_mock.cpp` + `tools/screens_sheet.py`).
-Status: approved by Frank and **wired** in the firmware (2026-10-06); not yet seen on a real screen.
+Status: approved by Frank and **wired** in the firmware (2026-10-06); first seen on the board 2026-10-06 → navigation/Options rework below.
 
 ## Why rework (current v1 screen)
 | Problem | Detail |
@@ -34,4 +34,30 @@ Screen sleeps after 5 min, wakes on alert and on the button (as v1).
 | Sonar | one depth column per sonar hole (common scale): dithered bottom, bars = fish (wider = stronger), tick = bait; 9 per page |
 | Focus | mono fish finder of the FOCUS hole (≈30 s, newest right), bottom, fish trails, dotted bait depth; double press = next hole |
 | Test | holes running fake sonar / fake trips, radio test; double press = everything on / off |
-CardKB (kept as extra keys): → ↓ Tab Space = next page, ← ↑ = previous, Enter = page action, S = silence, Esc = home.
+CardKB (first version, replaced below): → ↓ Tab Space = next page, ← ↑ = previous, Enter = page action, S = silence, Esc = home.
+
+## Navigation + Options (after the first bench test, 2026-10-06)
+Mockups: `docs/screens/v2_options_nav.png` (same drawing code as the board). Frank's feedback on the board:
+arrows not used as expected, not intuitive, settings missing, no address shown.
+
+| CardKB key | Pages | Options page |
+|---|---|---|
+| ← / → | previous / next page | ← = back (inside Wi-Fi / Simulation); on the main list it changes page |
+| ↑ / ↓ | inside the page: Holes / Sonar = more holes, Focus = previous / next hole | move in the list |
+| Enter (OK) | the action written in the footer ("OK: ...") | change the value / open / join |
+| Esc | Home | back, then Home |
+| S | silence on/off | (types an S while typing a password) |
+| any key during FISH ON | silence (like the button) | |
+Without CardKB the footers say "2x:" (double press) as before; the Options page then only shows values.
+
+Options page (last page, values change at once and are saved like the web page does):
+| Chalet | Hub |
+|---|---|
+| Wi-Fi > (status, network, **choose network** = scan list, type name, address, retry now, channel, hotspot name/pass, forget) | Hotspot ON/OFF |
+| Buzzer, Alert hold (10/30/60/120/300 s) | Buzzer, Alert hold |
+| Link Auto / LoRa only / ESP-NOW, LoRa channel Auto / 1-8 | ESP-NOW relay, Reed polarity |
+| Simulation > (all holes, test holes, fake fish rate, **each hole: off / sonar / fish / both**, ~ = not confirmed yet) | |
+| Network reset, Reboot (both ask OK = yes / Esc = no), Built (firmware date) | same |
+
+Cabin Wi-Fi made visible: home footer shows the address when joined, else alternates "No cabin Wi-Fi" / hotspot name;
+Connect page shows "<network>: not found / bad password? / connecting..." (reason from the Wi-Fi driver, D36).

@@ -1,6 +1,7 @@
 // v2 OLED screens (128x64, Heltec V3) — chalet and hubs. Pure drawing from a ScreenModel, with the U8g2
 // C API, so the exact same code renders on the PC (tools/screens_mock.cpp → PNG mockups) and on the board.
 // Design: docs/SCREENS.md. One button: short press = next page (silence during an alert).
+// CardKB: left/right = page, up/down = inside the page, Enter = OK, Esc = back / home.
 #pragma once
 #include <stdint.h>
 #ifdef ARDUINO
@@ -10,7 +11,7 @@
 #endif
 
 enum ScrHoleState : uint8_t { SH_OK = 0, SH_FISH = 1, SH_OFFLINE = 2, SH_FAULT = 3, SH_LOWBAT = 4 };
-enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, PG_TEST, PG_CONNECT, PG_COUNT };
+enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, PG_TEST, PG_CONNECT, PG_OPTIONS, PG_COUNT };
 
 // Sonar at a glance (from the BASE block of every hole): bottom + every target, not just the nearest
 struct ScrTarget { uint16_t depth_cm; uint8_t level; bool bait; };   // level 1-3
@@ -31,6 +32,19 @@ struct ScrHole {
 
 struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; };
 
+// Options page: the list (and its text entry / yes-no) is decided by the firmware, drawn here.
+struct ScrRow { char label[20]; char value[18]; bool sub; };   // sub = opens a list (">")
+enum ScrOptMode : uint8_t { SO_LIST = 0, SO_TEXT, SO_CONFIRM };
+struct ScrOptions {
+  uint8_t mode;              // ScrOptMode
+  char title[22];
+  uint8_t n, sel; ScrRow rows[56];
+  char hint[30];             // bottom line
+  // SO_TEXT: e.g. title "Wi-Fi password", line "for BELL494", text being typed
+  // SO_CONFIRM: title = question, line = detail
+  char line[34]; char text[66];
+};
+
 struct ScreenModel {
   bool chalet;               // false = hub
   uint8_t self_id;
@@ -48,6 +62,8 @@ struct ScreenModel {
   bool hotspot; uint32_t hotspot_min;
   // connect
   char ssid[28]; char pass[20]; char url[32]; bool sta;   // sta = on the cabin Wi-Fi
+  char sta_ssid[33]; char sta_state[20];                  // cabin Wi-Fi name ("" = none set), "not found", ...
+  bool kb;                   // CardKB present: footers say "OK:" (Enter) instead of "2x:" (double press)
   uint32_t uptime_s;
   bool feet;                 // depth units
   // FOCUS
@@ -55,6 +71,7 @@ struct ScreenModel {
   // test
   uint8_t radio_test;        // 0 off, else a test mode
   const char* radio_test_name;
+  ScrOptions opt;            // PG_OPTIONS
 };
 
 // Draws one frame. `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).
@@ -62,5 +79,5 @@ struct ScreenModel {
 void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool blink);
 uint8_t screenHolesPages(const ScreenModel& m);
 uint8_t screenSonarPages(const ScreenModel& m);
-// what a double press does on this page ("" = nothing): shown in the footer
+// what OK (Enter / double press) does on this page ("" = nothing): shown in the footer
 const char* screenPageAction(const ScreenModel& m, uint8_t page);

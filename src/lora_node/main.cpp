@@ -346,7 +346,9 @@ static void scrDraw();
 static void apName(char* out, size_t n);
 void drawRadioTest();
 static void scrStep(int dir);
-static void scrAction();
+static void scrAction(bool kb = false);
+void loopOptions();
+static void optBuild(ScrOptions* o);
 void loopWebServer();
 void loopBuzzer();
 void loopNodeTimeout();
@@ -645,6 +647,7 @@ void loop() {
   // Handle keyboard input
   loopCardKB();
   loopButton();  // Handle PRG button for silencing
+  loopOptions(); // v2: Wi-Fi scan started from Options > Wi-Fi
 
   // ESP-NOW frames queued by the Wi-Fi task callback (C9)
   if (espNowReady) loopEspNowRx();
@@ -1815,7 +1818,7 @@ void setupEbChalet() {
   esp_now_register_recv_cb(onEspNowRecv);
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, ESPNOW_BROADCAST, 6);
-  peer.channel = ESPNOW_CHANNEL;
+  peer.channel = 0;   // v2: 0 = the current Wi-Fi channel (the router's when the chalet joined one)
   peer.ifidx = ebIf;
   peer.encrypt = false;
   if (esp_now_add_peer(&peer) != ESP_OK) { Serial.println(F("Backbone: broadcast peer failed")); return; }
@@ -2653,10 +2656,11 @@ void loadWifiCredentials() {
   
   String ssid = preferences.getString("ssid", "");
   String pass = preferences.getString("pass", "");
+  const bool saved = preferences.isKey("ssid");   // v2: saved empty = "Forget network" (do not fall back to config.h)
   
   preferences.end();
   
-  if (ssid.length() > 0) {
+  if (ssid.length() > 0 || saved) {
     strncpy(storedSsid, ssid.c_str(), sizeof(storedSsid) - 1);
     strncpy(storedPassword, pass.c_str(), sizeof(storedPassword) - 1);
     DEBUG_PRINTF("Loaded WiFi credentials: %s\n", storedSsid);
@@ -2866,6 +2870,83 @@ void checkSerialWifiConfig() {
   }
 }
 
+// =============================================================================================
+// v2 CABIN WI-FI (chalet): why it is not connected, retry, join from the OLED (Options > Wi-Fi)
+//   - the reason of the last drop/failure is kept (ESP-IDF wifi_err_reason_t) and shown as words
+//   - if the router was not there at boot, retry after 2 min, then 4, 8 ... 30 min. Each try scans
+//     the channels for ~1-2 s (phones on the hotspot and ESP-NOW may miss that moment), hence the back-off
+//   - joining a network from the OLED saves it (same NVS keys as the web page / serial WIFI:) and
+//     connects without a reboot
+// =============================================================================================
+static const uint32_t STA_RETRY_FIRST_MS = 2UL * 60UL * 1000UL, STA_RETRY_MAX_MS = 30UL * 60UL * 1000UL;
+static volatile uint8_t staReason = 0;        // last disconnect reason, 0 = none yet
+static uint32_t staTryAt = 0;                 // millis() of the last WiFi.begin from here
+static uint32_t staNextTry = 0, staBackoffMs = STA_RETRY_FIRST_MS;
+static bool wifiScanBusy = false;
+
+static void onStaDisconnected(arduino_event_id_t, arduino_event_info_t info) {
+  const uint8_t r = info.wifi_sta_disconnected.reason;
+  if (r != 8) staReason = r;   // 8 = ASSOC_LEAVE: our own WiFi.disconnect(), keeps the real reason
+}
+
+static bool staWanted() {
+  return currentRole == ROLE_GATEWAY_OFFSHORE && storedSsid[0] && settings.wifiModeSetting != 0;
+}
+
+static void staBegin() {
+  staReason = 0;
+  staTryAt = millis(); if (staTryAt == 0) staTryAt = 1;
+  WiFi.begin(storedSsid, storedPassword);
+  Serial.printf("Wi-Fi: trying %s\n", storedSsid);
+}
+
+// called every 5 s while not connected (checkWiFiStatus)
+static void staRetryTick() {
+  if (!staWanted() || wifiScanBusy) return;
+  const uint32_t now = millis();
+  if (staNextTry == 0 || static_cast<int32_t>(now - staNextTry) < 0) return;
+  staBegin();
+  staNextTry = now + staBackoffMs;
+  staBackoffMs = staBackoffMs * 2 > STA_RETRY_MAX_MS ? STA_RETRY_MAX_MS : staBackoffMs * 2;
+}
+
+void wifiRetryNow() {
+  if (!staWanted()) return;
+  staBackoffMs = STA_RETRY_FIRST_MS;
+  staNextTry = millis() + staBackoffMs;
+  staBegin();
+}
+
+void wifiJoin(const char* ssid, const char* pass) {
+  saveWifiCredentials(ssid, pass);
+  storedSsid[sizeof(storedSsid) - 1] = 0; storedPassword[sizeof(storedPassword) - 1] = 0;
+  if (settings.wifiModeSetting == 0) { settings.wifiModeSetting = 2; saveSettings(); }   // AP only would never join
+  if (WiFi.getMode() == WIFI_MODE_AP) WiFi.mode(WIFI_AP_STA);
+  wifiStaConnected = false; staIpAddress = "";
+  WiFi.disconnect(false);
+  wifiRetryNow();
+}
+
+void wifiForget() {
+  saveWifiCredentials("", "");
+  WiFi.disconnect(false);
+  wifiStaConnected = false; staIpAddress = ""; staReason = 0; staTryAt = 0;
+  Serial.println(F("Wi-Fi: cabin network forgotten (hotspot only)"));
+}
+
+// short words for the OLED
+void wifiStateText(char* out, size_t n) {
+  const uint8_t r = staReason;
+  if (!storedSsid[0]) snprintf(out, n, "none set");
+  else if (wifiStaConnected) snprintf(out, n, "connected");
+  else if (settings.wifiModeSetting == 0) snprintf(out, n, "off (AP only)");
+  else if (staTryAt && millis() - staTryAt < 15000 && r == 0) snprintf(out, n, "connecting...");
+  else if (r == 201) snprintf(out, n, "not found");                                         // NO_AP_FOUND
+  else if (r == 2 || r == 15 || r == 202 || r == 204) snprintf(out, n, "bad password?");  // AUTH_EXPIRE, 4WAY/HANDSHAKE timeout, AUTH_FAIL
+  else if (r == 0) snprintf(out, n, "not connected");
+  else snprintf(out, n, "failed (%u)", r);
+}
+
 void setupWiFiAP() {
   DEBUG_PRINTLN(F("Setting up WiFi..."));
 
@@ -2887,6 +2968,8 @@ void setupWiFiAP() {
 
   // Load credentials from NVS (or use defaults)
   loadWifiCredentials();
+  // v2: keep why the cabin Wi-Fi fails or drops (OLED: not found / bad password?) - registered before the first try
+  WiFi.onEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   char apSsid[32];
   snprintf(apSsid, sizeof(apSsid), "%s-%s",
@@ -2976,15 +3059,24 @@ void setupWiFiAP() {
       break;
   }
   
+  staNextTry = millis() + STA_RETRY_FIRST_MS;   // v2: boot try done above, retries after 2 min (staRetryTick)
+
   // Set channel for ESP-NOW compatibility
   // CRITICAL: Wait for AP to stabilize, then force channel and verify
   delay(100);  // Let AP stabilize
+  uint8_t primary;
+  wifi_second_chan_t secondary;
+  if (WiFi.status() == WL_CONNECTED) {
+    // v2: joined the cabin router - its channel wins. Forcing another channel here would fight the
+    // router link (ESP-IDF: do not set the channel while the station is connected). ESP-NOW follows it.
+    esp_wifi_get_channel(&primary, &secondary);
+    Serial.printf("Wi-Fi: on the cabin router, channel %u (hubs use %u for ESP-NOW; LoRa is not affected)\n", primary, ESPNOW_CHANNEL);
+    return;
+  }
   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
   delay(50);
 
   // VERIFY channel alignment
-  uint8_t primary;
-  wifi_second_chan_t secondary;
   esp_wifi_get_channel(&primary, &secondary);
   DEBUG_PRINTF("WiFi channel verified: %d (expected: %d)\n", primary, ESPNOW_CHANNEL);
 
@@ -3015,6 +3107,8 @@ void checkWiFiStatus() {
       staIpAddress = "";
       DEBUG_PRINTLN(F("STA disconnected"));
     }
+    if (wifiStaConnected) staBackoffMs = STA_RETRY_FIRST_MS;
+    else staRetryTick();
   }
 }
 
@@ -3029,6 +3123,13 @@ void verifyWiFiChannel() {
 
   DEBUG_PRINTF("WiFi channel check: current=%d, expected=%d\n", primary, ESPNOW_CHANNEL);
 
+  if (primary != ESPNOW_CHANNEL && currentRole == ROLE_GATEWAY_OFFSHORE) {
+    // v2: the chalet keeps the router's channel (forcing it would fight the router link). LoRa is not
+    // affected; the ESP-NOW backup with the hubs needs the router on channel ESPNOW_CHANNEL.
+    Serial.printf("Wi-Fi: router on channel %u, hubs use %u - ESP-NOW backup with the hubs needs the router on %u\n",
+                  primary, ESPNOW_CHANNEL, ESPNOW_CHANNEL);
+    return;
+  }
   if (primary != ESPNOW_CHANNEL) {
     DEBUG_PRINTLN("WARNING: WiFi channel mismatch detected after STA connection!");
 
@@ -4797,6 +4898,306 @@ static void buildScreenModel() {
   m.sta = wifiStaConnected;
   snprintf(m.url, sizeof(m.url), "http://%s", wifiStaConnected ? staIpAddress.c_str() : apIpAddress.c_str());
   m.radio_test = meshTestMode(); m.radio_test_name = meshTestModeName(m.radio_test);
+  m.kb = cardKbAvailable;
+  snprintf(m.sta_ssid, sizeof(m.sta_ssid), "%s", storedSsid);
+  wifiStateText(m.sta_state, sizeof(m.sta_state));
+  if (scrPage == PG_OPTIONS) optBuild(&m.opt);
+}
+
+// =============================================================================================
+// v2 OPTIONS page (CardKB). One list; Wi-Fi and Simulation open their own list. Up/down = move,
+// Enter = change / open, Esc or left = back. A value changes at once and is saved (same settings
+// as the web page and the serial commands). Text entry for the Wi-Fi name / password, yes/no before
+// network reset, reboot and "forget Wi-Fi". Without a CardKB the page only shows the values.
+// docs/SCREENS.md
+// =============================================================================================
+enum OptMenu : uint8_t { OM_MAIN = 0, OM_WIFI, OM_SCAN, OM_SIM };
+enum OptItem : uint8_t {
+  OI_NONE = 0, OI_WIFI, OI_BUZZER, OI_HOLD, OI_LINK, OI_LORACH, OI_SIM, OI_HOTSPOT, OI_RELAY, OI_REED,
+  OI_NETRESET, OI_REBOOT, OI_BUILT,
+  OI_W_STATUS, OI_W_NAME, OI_W_CHOOSE, OI_W_TYPE, OI_W_ADDR, OI_W_RETRY, OI_W_CH, OI_W_AP, OI_W_APPASS, OI_W_FORGET,
+  OI_SC_NET, OI_SC_AGAIN,
+  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE
+};
+struct OptRow { uint8_t item, idx; };
+static const uint8_t OPT_MAX = 56;
+static OptRow optRows[OPT_MAX];
+static uint8_t optN = 0, optMenu = OM_MAIN, optSel = 0, optMainSel = 0, optWifiSel = 0;
+static uint8_t optMode = SO_LIST, optConfirm = OI_NONE, optTextStep = 0;   // text step: 0 Wi-Fi name, 1 password
+static char optSsid[33] = "", optText[65] = "";
+static const uint8_t SCAN_MAX = 12;
+static int8_t optScanN = -1;                 // -1 not yet, -2 scanning, -3 failed, >= 0 networks found
+static char optScanSsid[SCAN_MAX][33];
+static int8_t optScanRssi[SCAN_MAX];
+static bool optScanLock[SCAN_MAX];
+static const uint16_t HOLD_STEPS[] = {10, 30, 60, 120, 300};
+static const uint8_t RATE_STEPS[] = {2, 6, 12, 30, 60};
+
+static void optRow(ScrOptions* o, uint8_t item, uint8_t idx, const char* label, const char* value, bool sub = false) {
+  if (optN >= OPT_MAX) return;
+  optRows[optN].item = item; optRows[optN].idx = idx;
+  if (o) {
+    ScrRow& r = o->rows[optN];
+    snprintf(r.label, sizeof(r.label), "%s", label); snprintf(r.value, sizeof(r.value), "%s", value); r.sub = sub;
+  }
+  optN++;
+}
+
+static const char* optHint(uint8_t item) {
+  switch (item) {
+    case OI_WIFI: case OI_SIM: case OI_W_CHOOSE: return "OK: open";
+    case OI_W_TYPE: return "OK: type the name";
+    case OI_W_RETRY: return "OK: try now";
+    case OI_SC_NET: return "OK: join";
+    case OI_SC_AGAIN: return "OK: scan again";
+    case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: return "OK: ask to confirm";
+    case OI_S_HOLE: return "OK: next mode";
+    case OI_NONE: case OI_BUILT: case OI_W_STATUS: case OI_W_NAME: case OI_W_ADDR: case OI_W_CH: case OI_W_AP: case OI_W_APPASS:
+      return "Esc: back";
+    default: return "OK: change";
+  }
+}
+
+// Builds the rows of the current list (optRows: what each row does; o: the text, when drawing)
+static void optBuild(ScrOptions* o) {
+  const bool chalet = currentRole == ROLE_GATEWAY_OFFSHORE;
+  char v[24];
+  optN = 0;
+  if (optMenu == OM_MAIN) {
+    if (chalet) {
+      optRow(o, OI_WIFI, 0, "Wi-Fi", wifiStaConnected ? "OK" : (storedSsid[0] ? "not conn." : "not set"), true);
+    } else {
+      if (wifiApActive && hubHotspotUntil) snprintf(v, sizeof(v), "ON %lum", (unsigned long)((hubHotspotUntil - millis()) / 60000UL + 1));
+      else snprintf(v, sizeof(v), "%s", wifiApActive ? "ON" : "OFF");
+      optRow(o, OI_HOTSPOT, 0, "Hotspot", v);
+    }
+    optRow(o, OI_BUZZER, 0, "Buzzer", settings.buzzerEnabled ? "ON" : "OFF");
+    snprintf(v, sizeof(v), "%u s", settings.alertHoldSec); optRow(o, OI_HOLD, 0, "Alert hold", v);
+    if (chalet) {
+      const uint8_t t = settings.transportMode;
+      optRow(o, OI_LINK, 0, "Link", t == 1 ? "LoRa only" : t == 2 ? "ESP-NOW" : "Auto");
+      if (settings.loraChannel == MESH_CH_AUTO) snprintf(v, sizeof(v), "Auto (%u)", meshLoraChannel() + 1);
+      else snprintf(v, sizeof(v), "%u fixed", settings.loraChannel + 1);
+      optRow(o, OI_LORACH, 0, "LoRa channel", v);
+      optRow(o, OI_SIM, 0, "Simulation", simAnyOn() ? "ON" : "off", true);
+    } else {
+      optRow(o, OI_RELAY, 0, "ESP-NOW relay", settings.ebRelay ? "ON" : "OFF");
+      optRow(o, OI_REED, 0, "Reed polarity", settings.reedActiveHigh ? "HIGH" : "LOW");
+    }
+    optRow(o, OI_NETRESET, 0, "Network reset", "");
+    optRow(o, OI_REBOOT, 0, "Reboot", "");
+    // build date of this firmware (__DATE__ "Oct  6 2026", __TIME__ "14:02:33") -> "Oct  6 14:02"
+    snprintf(v, sizeof(v), "%.6s %.5s", __DATE__, __TIME__);
+    optRow(o, OI_BUILT, 0, "Built", v);
+  } else if (optMenu == OM_WIFI) {
+    char st[20]; wifiStateText(st, sizeof(st));
+    optRow(o, OI_W_STATUS, 0, "Status", st);
+    optRow(o, OI_W_NAME, 0, "Network", storedSsid[0] ? storedSsid : "-");
+    optRow(o, OI_W_CHOOSE, 0, "Choose network", "", true);
+    optRow(o, OI_W_TYPE, 0, "Type name", "", true);
+    optRow(o, OI_W_ADDR, 0, "Address", wifiStaConnected ? staIpAddress.c_str() : "-");
+    if (storedSsid[0] && !wifiStaConnected) optRow(o, OI_W_RETRY, 0, "Retry now", "");
+    uint8_t primary = 0; wifi_second_chan_t sec; esp_wifi_get_channel(&primary, &sec);
+    if (primary == ESPNOW_CHANNEL) snprintf(v, sizeof(v), "%u OK", primary);
+    else snprintf(v, sizeof(v), "%u (hubs %u)", primary, ESPNOW_CHANNEL);
+    optRow(o, OI_W_CH, 0, "Channel", v);
+    char ap[32]; apName(ap, sizeof(ap));
+    optRow(o, OI_W_AP, 0, "AP", ap);
+    optRow(o, OI_W_APPASS, 0, "AP pass", WIFI_PASSWORD);
+    if (storedSsid[0]) optRow(o, OI_W_FORGET, 0, "Forget network", "");
+  } else if (optMenu == OM_SCAN) {
+    if (optScanN == -2) optRow(o, OI_NONE, 0, "Scanning...", "");
+    else if (optScanN == -3) optRow(o, OI_NONE, 0, "Scan failed", "");
+    else if (optScanN == 0) optRow(o, OI_NONE, 0, "Nothing found", "");
+    for (int8_t k = 0; k < optScanN; k++) {
+      snprintf(v, sizeof(v), "%d%s", optScanRssi[k], optScanLock[k] ? "" : " open");
+      optRow(o, OI_SC_NET, (uint8_t)k, optScanSsid[k], v);
+    }
+    if (optScanN != -2) optRow(o, OI_SC_AGAIN, 0, "Scan again", "");
+  } else if (optMenu == OM_SIM) {
+    optRow(o, OI_S_ALL, 0, "All holes", simAnyOn() ? "ON" : "OFF");
+    optRow(o, OI_S_VIRTUAL, 0, "Test holes", settings.sonarSim ? "ON" : "OFF");
+    snprintf(v, sizeof(v), "%u /h", simRate); optRow(o, OI_S_RATE, 0, "Fake fish rate", v);
+    static const char* const SIMTXT[] = {"off", "sonar", "fish", "both"};
+    for (int i = 0; i < network.node_count && optN < OPT_MAX; i++) {
+      const NodeState& n = network.nodes[i];
+      if (n.node_id == 0 || n.node_id == NODE_ID || !n.initialized) continue;
+      const uint8_t req = simRequested(n.node_id) & 3;
+      const bool on = HAS_FLAG(n.flags, FLAG_SIM);
+      snprintf(v, sizeof(v), "%s%s", SIMTXT[req], (req != 0) != on ? "~" : "");   // ~ = the hole has not confirmed yet
+      char nm[20]; if (n.name[0]) snprintf(nm, sizeof(nm), "%s", n.name); else snprintf(nm, sizeof(nm), "Hole %u", n.node_id);
+      optRow(o, OI_S_HOLE, (uint8_t)i, nm, v);
+    }
+  }
+  if (optSel >= optN) optSel = optN ? optN - 1 : 0;
+  if (!o) return;
+  o->mode = optMode; o->n = optN; o->sel = optSel;
+  static const char* const TITLES[] = {"Options", "Wi-Fi", "Choose Wi-Fi", "Simulation"};
+  snprintf(o->title, sizeof(o->title), "%s", TITLES[optMenu & 3]);
+  snprintf(o->hint, sizeof(o->hint), "%s", !cardKbAvailable ? "CardKB or web page" : optN ? optHint(optRows[optSel].item) : "Esc: back");
+  o->line[0] = 0; o->text[0] = 0;
+  if (optMode == SO_TEXT) {
+    snprintf(o->title, sizeof(o->title), "%s", optTextStep == 0 ? "Wi-Fi name" : "Wi-Fi password");
+    if (optTextStep == 0) snprintf(o->line, sizeof(o->line), "Type the network name");
+    else snprintf(o->line, sizeof(o->line), "for %s", optSsid);
+    snprintf(o->text, sizeof(o->text), "%s", optText);
+    snprintf(o->hint, sizeof(o->hint), "%s", optTextStep == 0 ? "Enter: next (password)" : "Enter: connect");
+  } else if (optMode == SO_CONFIRM) {
+    if (optConfirm == OI_NETRESET) { snprintf(o->title, sizeof(o->title), "Reset network?"); snprintf(o->line, sizeof(o->line), "Link + channel to Auto"); }
+    else if (optConfirm == OI_REBOOT) { snprintf(o->title, sizeof(o->title), "Reboot?"); snprintf(o->line, sizeof(o->line), "Back in about 10 s"); }
+    else { snprintf(o->title, sizeof(o->title), "Forget Wi-Fi?"); snprintf(o->line, sizeof(o->line), "%s", storedSsid); }
+  }
+}
+
+static void optStartScan() {
+  optScanN = -2; wifiScanBusy = true;
+  if (WiFi.getMode() == WIFI_MODE_AP) WiFi.mode(WIFI_AP_STA);
+  if (WiFi.scanNetworks(true, false) == WIFI_SCAN_FAILED) { optScanN = -3; wifiScanBusy = false; }
+}
+
+// polls the Wi-Fi scan started from Options > Wi-Fi > Choose network (async: the loop keeps running)
+void loopOptions() {
+  if (!wifiScanBusy) return;
+  const int16_t r = WiFi.scanComplete();
+  if (r == WIFI_SCAN_RUNNING) return;
+  wifiScanBusy = false;
+  if (r < 0) { optScanN = -3; return; }
+  optScanN = 0;
+  const size_t own = strlen(NETWORK_NAME);
+  for (int16_t i = 0; i < r; i++) {
+    const String ss = WiFi.SSID(i);
+    if (!ss.length() || (strncmp(ss.c_str(), NETWORK_NAME, own) == 0 && ss[own] == '-')) continue;   // hidden, or our own hotspots
+    const int8_t rs = (int8_t)WiFi.RSSI(i);
+    int k = -1;
+    for (int j = 0; j < optScanN; j++) if (strcmp(optScanSsid[j], ss.c_str()) == 0) k = j;
+    if (k >= 0) { if (rs > optScanRssi[k]) optScanRssi[k] = rs; continue; }   // same name, several access points
+    if (optScanN < (int8_t)SCAN_MAX) k = optScanN++;
+    else {
+      int w = 0; for (int j = 1; j < (int)SCAN_MAX; j++) if (optScanRssi[j] < optScanRssi[w]) w = j;
+      if (rs <= optScanRssi[w]) continue;
+      k = w;
+    }
+    snprintf(optScanSsid[k], sizeof(optScanSsid[k]), "%s", ss.c_str());
+    optScanRssi[k] = rs; optScanLock[k] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  }
+  WiFi.scanDelete();
+  for (int a = 1; a < optScanN; a++)   // strongest first
+    for (int b = a; b > 0 && optScanRssi[b] > optScanRssi[b - 1]; b--) {
+      char t[33]; memcpy(t, optScanSsid[b], 33); memcpy(optScanSsid[b], optScanSsid[b - 1], 33); memcpy(optScanSsid[b - 1], t, 33);
+      const int8_t tr = optScanRssi[b]; optScanRssi[b] = optScanRssi[b - 1]; optScanRssi[b - 1] = tr;
+      const bool tl = optScanLock[b]; optScanLock[b] = optScanLock[b - 1]; optScanLock[b - 1] = tl;
+    }
+}
+
+static void optOpen(uint8_t menu) {
+  if (optMenu == OM_MAIN) optMainSel = optSel;
+  if (optMenu == OM_WIFI) optWifiSel = optSel;
+  optMenu = menu; optSel = 0; optMode = SO_LIST;
+}
+
+static void optBack() {
+  if (optMenu == OM_SCAN) { optMenu = OM_WIFI; optSel = optWifiSel; }
+  else { optMenu = OM_MAIN; optSel = optMainSel; }
+}
+
+static void optAfterJoin() {
+  optMode = SO_LIST; optMenu = OM_WIFI; optSel = 0;   // on "Status": connecting... -> connected / not found / bad password?
+  memset(optText, 0, sizeof(optText));
+}
+
+static void optTextEnter() {
+  if (optTextStep == 0) {
+    if (!optText[0]) return;
+    snprintf(optSsid, sizeof(optSsid), "%s", optText);
+    optTextStep = 1;
+    snprintf(optText, sizeof(optText), "%s", strcmp(optSsid, storedSsid) == 0 ? storedPassword : "");
+  } else {
+    wifiJoin(optSsid, optText);
+    optAfterJoin();
+  }
+}
+
+static void optDo(uint8_t item) {
+  switch (item) {
+    case OI_NETRESET: resetNetworkSettings(); break;
+    case OI_REBOOT: display.clearBuffer(); display.setFont(u8g2_font_6x10_tr); display.drawStr(30, 36, "Rebooting..."); display.sendBuffer(); delay(500); ESP.restart(); break;
+    case OI_W_FORGET: wifiForget(); break;
+    default: break;
+  }
+}
+
+static void optActivate(const OptRow& row) {
+  switch (row.item) {
+    case OI_WIFI: optOpen(OM_WIFI); break;
+    case OI_SIM: optOpen(OM_SIM); break;
+    case OI_BUZZER: settings.buzzerEnabled = !settings.buzzerEnabled; saveSettings(); break;
+    case OI_HOLD: {
+      uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] <= settings.alertHoldSec) k++;
+      settings.alertHoldSec = HOLD_STEPS[k % 5]; saveSettings(); break;
+    }
+    case OI_LINK: {
+      const uint8_t t = (uint8_t)((settings.transportMode + 1) % 3);
+      settings.transportMode = t; saveSettings(); meshSetTransport(t); break;
+    }
+    case OI_LORACH: {
+      const uint8_t c = settings.loraChannel;
+      const uint8_t nx = c == MESH_CH_AUTO ? 0 : (c >= 7 ? MESH_CH_AUTO : (uint8_t)(c + 1));
+      settings.loraChannel = nx; saveSettings(); meshSetLoraChannel(nx); break;
+    }
+    case OI_HOTSPOT: if (wifiApActive) hubHotspotOff(); else hubHotspotOn(); break;
+    case OI_RELAY: settings.ebRelay = !settings.ebRelay; saveSettings(); meshSetEbRelay(settings.ebRelay); break;
+    case OI_REED: settings.reedActiveHigh = !settings.reedActiveHigh; saveSettings(); break;
+    case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: optConfirm = row.item; optMode = SO_CONFIRM; break;
+    case OI_W_CHOOSE: optOpen(OM_SCAN); optStartScan(); break;
+    case OI_W_TYPE: optTextStep = 0; snprintf(optText, sizeof(optText), "%s", storedSsid); optMode = SO_TEXT; break;
+    case OI_W_RETRY: wifiRetryNow(); break;
+    case OI_SC_AGAIN: optSel = 0; optStartScan(); break;
+    case OI_SC_NET:
+      snprintf(optSsid, sizeof(optSsid), "%s", optScanSsid[row.idx]);
+      if (!optScanLock[row.idx]) { wifiJoin(optSsid, ""); optAfterJoin(); }
+      else { optTextStep = 1; snprintf(optText, sizeof(optText), "%s", strcmp(optSsid, storedSsid) == 0 ? storedPassword : ""); optMode = SO_TEXT; }
+      break;
+    case OI_S_ALL: simAll(!simAnyOn()); break;
+    case OI_S_VIRTUAL: settings.sonarSim = !settings.sonarSim; meshSetSonarSim(settings.sonarSim); saveSettings(); break;
+    case OI_S_RATE: {
+      uint8_t k = 0; while (k < 5 && RATE_STEPS[k] <= simRate) k++;
+      simRate = RATE_STEPS[k % 5]; break;
+    }
+    case OI_S_HOLE: {
+      if (row.idx >= network.node_count) break;
+      const uint8_t node = network.nodes[row.idx].node_id;
+      const uint8_t nx = (uint8_t)((simRequested(node) + 1) & 3);   // off -> sonar -> fish -> both -> off
+      simRequest(node, (nx & MESH_SIM_SONAR) != 0, (nx & MESH_SIM_HALL) != 0);
+      break;
+    }
+    default: break;
+  }
+}
+
+// CardKB key on the Options page. true = used here; false = the normal page keys (left/right/Esc on the main list)
+static bool optKey(uint8_t k) {
+  if (optMode == SO_TEXT) {
+    const size_t n = strlen(optText);
+    if (k == KEY_ESC) optMode = SO_LIST;
+    else if (k == KEY_ENTER) optTextEnter();
+    else if (k == KEY_BACKSP || k == 0x7F) { if (n) optText[n - 1] = 0; }
+    else if (k >= 32 && k < 127 && n < (optTextStep == 0 ? 32u : 63u)) { optText[n] = (char)k; optText[n + 1] = 0; }
+    return true;   // arrows are ignored while typing
+  }
+  if (optMode == SO_CONFIRM) {
+    if (k == KEY_ENTER) optDo(optConfirm);
+    optMode = SO_LIST; optConfirm = OI_NONE;
+    return true;
+  }
+  optBuild(nullptr);
+  switch (k) {
+    case KEY_UP: if (optSel > 0) optSel--; return true;
+    case KEY_DOWN: if (optSel + 1 < optN) optSel++; return true;
+    case KEY_ENTER: if (optN) optActivate(optRows[optSel]); return true;
+    case KEY_ESC: case KEY_LEFT: if (optMenu != OM_MAIN) { optBack(); return true; } return false;
+    case KEY_RIGHT: return optMenu != OM_MAIN;   // inside Wi-Fi / Simulation: stay
+    default: return false;
+  }
 }
 
 static bool scrPageAvailable(uint8_t p) {
@@ -4815,33 +5216,48 @@ static void scrStep(int dir) {
   scrLastInput = millis();
 }
 
+// FOCUS: the next / previous hole that has a sonar
+static void focusStep(int dir) {
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
+  int ids[48], n = 0, cur = -1;
+  for (uint8_t i = 0; i < scr.n_holes; i++) {
+    if (!scr.holes[i].son.valid) continue;
+    if (scr.holes[i].id == scr.focus_node) cur = n;
+    ids[n++] = scr.holes[i].id;
+  }
+  if (!n) return;
+  const int pick = cur < 0 ? 0 : (cur + n + dir) % n;
+  meshSetFocusNode((uint8_t)ids[pick]);
+}
+
+// CardKB up/down: move inside the page
+static void scrScroll(int dir) {
+  scrLastInput = millis();
+  switch (scrPage) {
+    case PG_HOLES: { const uint8_t n = screenHolesPages(scr); scrSub = (uint8_t)((scrSub + n + dir) % n); break; }
+    case PG_SONAR: { const uint8_t n = screenSonarPages(scr); scrSub = (uint8_t)((scrSub + n + dir) % n); break; }
+    case PG_FOCUS: focusStep(dir); break;
+    default: break;
+  }
+}
+
 // double press / Enter: the action written at the bottom of the page
-static void scrAction() {
+static void scrAction(bool kb) {
   scrLastInput = millis();
   switch (scrPage) {
     case PG_HOME: if (alertsSilenced) { silenceAlerts(); showOverlayMessage("Unsilenced", 800); } break;
     case PG_HOLES: scrSub = (uint8_t)((scrSub + 1) % screenHolesPages(scr)); break;
     case PG_SONAR: scrSub = (uint8_t)((scrSub + 1) % screenSonarPages(scr)); break;
-    case PG_FOCUS: {
-      if (currentRole != ROLE_GATEWAY_OFFSHORE) break;
-      int cur = -1, first = -1, next = -1;
-      for (uint8_t i = 0; i < scr.n_holes; i++) {
-        if (!scr.holes[i].son.valid) continue;
-        if (first < 0) first = scr.holes[i].id;
-        if (cur >= 0 && next < 0) next = scr.holes[i].id;
-        if (scr.holes[i].id == scr.focus_node) cur = i;
-      }
-      const int pick = next >= 0 ? next : first;
-      if (pick > 0) meshSetFocusNode((uint8_t)pick);
-      break;
-    }
+    case PG_FOCUS: focusStep(+1); break;
     case PG_TEST: if (currentRole == ROLE_GATEWAY_OFFSHORE) { const bool on = !simAnyOn(); simAll(on); showOverlayMessage(on ? "Simulation ON" : "Simulation OFF", 1000); } break;
+    case PG_CONNECT: if (kb && currentRole == ROLE_GATEWAY_OFFSHORE) { scrPage = PG_OPTIONS; optMenu = OM_MAIN; optOpen(OM_WIFI); } break;
     default: break;
   }
 }
 
 static void scrDraw() {
-  if (scrPage != PG_HOME && millis() - scrLastInput > 60000UL) { scrPage = PG_HOME; scrSub = 0; }
+  const uint32_t idle = scrPage == PG_OPTIONS ? 180000UL : 60000UL;   // typing a password takes time
+  if (scrPage != PG_HOME && millis() - scrLastInput > idle) { scrPage = PG_HOME; scrSub = 0; optMode = SO_LIST; }
   buildScreenModel();
   if (!scrPageAvailable(scrPage)) scrPage = PG_HOME;
   if (scrPage == PG_NETWORK && scr.radio_test) { drawRadioTest(); return; }   // radio test: detailed per-hub stats
@@ -5018,15 +5434,25 @@ void loopButton() {
 }
 
 void handleKeyPress(char key) {
-  // v2: the CardKB is a set of extra keys for the new screens (no typing menus any more)
+  // v2 CardKB: left/right = page, up/down = inside the page, Enter = OK (the action in the footer),
+  // Esc = back / home, s = silence. On the Options page the keys go to the list / text entry first.
   const bool wasAsleep = displaySleeping;
   registerActivity();
   if (wasAsleep) return;   // the first key only wakes the screen
-  DEBUG_PRINTF("Key: 0x%02X\n", (uint8_t)key);
-  switch ((uint8_t)key) {
-    case KEY_RIGHT: case KEY_DOWN: case KEY_TAB: case ' ': case 'n': case 'N': scrStep(+1); break;
-    case KEY_LEFT: case KEY_UP: case 'p': case 'P': scrStep(-1); break;
-    case KEY_ENTER: scrAction(); break;
+  const uint8_t k = (uint8_t)key;
+  DEBUG_PRINTF("Key: 0x%02X\n", k);
+  scrLastInput = millis();
+  if (activeAlerts && !alertsSilenced) {   // FISH ON screen: any key silences (like the button)
+    silenceAlerts(); showOverlayMessage("Silenced", 800);
+    return;
+  }
+  if (scrPage == PG_OPTIONS && optKey(k)) return;
+  switch (k) {
+    case KEY_RIGHT: case KEY_TAB: case ' ': case 'n': case 'N': scrStep(+1); break;
+    case KEY_LEFT: case 'p': case 'P': scrStep(-1); break;
+    case KEY_DOWN: scrScroll(+1); break;
+    case KEY_UP: scrScroll(-1); break;
+    case KEY_ENTER: scrAction(true); break;
     case 's': case 'S': silenceAlerts(); showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 800); break;
     case KEY_ESC: scrPage = PG_HOME; scrSub = 0; break;
     default: break;
