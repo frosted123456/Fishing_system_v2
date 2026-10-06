@@ -18,7 +18,7 @@ Fishing_system_v2/
 ├── include/messages.h   single shared copy of the message structs (was duplicated)
 ├── lib/IceMesh/         shared mesh core, pure C++ (header, dedup window, stream filter, TX queue)
 ├── test/                host unit tests: `pio test -e native` or `make -C test` (plain g++)
-├── docs/                architecture, issue review, protocol v2, phase 1 plan, decisions
+├── docs/                protocol_v2 (as built), RADIO_TEST (how to test), decisions, reviews
 ├── tools/               helper scripts
 └── reference/           sonar-display-prototype.html (missing for now)
 ```

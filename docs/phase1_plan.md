@@ -1,5 +1,10 @@
 # Phase 1 — commit plan (APPROVED 2026-10-05, revised with decisions D1-D7)
 
+> **Superseded on 2026-10-05 (evening) by the TDMA design (D8-D12).** C9 was done as planned;
+> C10-C12 (CSMA/CAD driver, per-message header, stream class) were replaced by the TDMA mesh
+> (commits "TDMA mesh core library" and "TDMA radio task"). See protocol_v2.md and RADIO_TEST.md.
+> C13 (docs as built) is protocol_v2.md.
+
 Progress 2026-10-05: C1-C8 committed. 47 host tests green (g++ -std=c++11 -pedantic -Werror, and under ASan/UBSan).
 C2/C3 not compiled for ESP32 yet.
 

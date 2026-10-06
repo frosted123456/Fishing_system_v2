@@ -1,166 +1,88 @@
-# Protocol v2 — LoRa mesh core (DRAFT for review)
+# Protocol v2 — TDMA LoRa mesh (as built, 2026-10-05)
 
-Status: draft, 2026-10-05 (updated with decisions D1-D7, see decisions.md). Scope: what phase 1 implements, plus the rules phase 2 will build on
-(marked **[P2]**). Nothing here is coded yet. Items marked **DECISION** are Frank's to make.
+Decisions: docs/decisions.md (D1-D12). Review that led here: docs/review_protocol_proposal.md.
+Code: `lib/IceMesh/src` (pure C++11, host-tested, 81 tests) + `src/lora_node/mesh_radio.cpp`
+(radio task). **Not yet tested on hardware.** Every value marked (est.) is a starting point
+for the radio test mode.
 
-## 1. Terms
-| Term | Meaning |
+## 1. Roles
+| Role (env) | Board | Does |
+|---|---|---|
+| chalet (`cabin`, GATEWAY_OFFSHORE) | Heltec V3 | beacon master, never relays, web page, merges node states |
+| hub (`hub`, `relay`, `sensor_lora`) | Heltec V3 | ESP-NOW hub for its pocket, sends line states in its slot, relays ONE remote hub when told |
+| node (`sensor_wroom`, `sensor_c3`) | ESP32 WROOM (C3 for existing) | unchanged v1 ESP-NOW tip-up firmware for now |
+
+## 2. Radio modes (lib/IceMesh/src/radio_modes.h)
+All 500 kHz, CR 4/5, preamble 8, explicit header, hardware CRC on, 915 MHz, 20 dBm.
+| Mode | Sensitivity (theory, est.) | 255 B airtime |
+|---|---|---|
+| SF9/500 | −123.5 dBm | ≈ 313 ms |
+| SF8/500 | −121.0 dBm | ≈ 177 ms |
+| SF7/500 | −118.5 dBm | ≈ 100 ms |
+Beacon, echo, join and relay links always use SF9/500. Direct hub slots: SF9/500 unless
+adaptive (off by default) or a test mode says otherwise.
+
+## 3. Superframe (lib/IceMesh/src/tdma_schedule.h)
+```
+REF ─ beacon (SF9/500) ─ 6 ms ─ [ECHO slots] [JOIN slot] [remote hub slots] [direct hub slots] ─ ≥40 ms ─ next REF (+1 s)
+slot = LEAD 3 ms + airtime(allowance, mode) + TAIL 3 ms            (all est.)
+```
+- REF = beacon START, computed as TxDone − airtime (chalet) or RxDone − airtime (hub): exactly
+  periodic, same formula on both sides. Hubs that only hear an ECHO compute REF from its slot.
+- Hubs listen for the next beacon from REF − 25 ms, then in the old plan's echo slots; no beacon
+  → free-run on the last plan (transmit only after ≤ 1 miss, resync search after 3).
+- Unsynced hubs send a JOIN at random every 1.5-4.5 s (est.); synced hubs without a slot use the JOIN slot.
+
+## 4. Packets (lib/IceMesh/src/tdma_proto.h)
+Header 6 B: `network_id, 0xF2, type, src, superframe u16`.
+| Type | Body |
 |---|---|
-| node | battery tip-up (ESP-NOW only, deep sleep). A sonar node is a node with a TUSS4470. |
-| hub | always-on board with ESP-NOW + LoRa (today: Heltec V3, `ROLE_GATEWAY_ONSHORE`) |
-| cabin | LoRa sink with the display / web page (`ROLE_GATEWAY_OFFSHORE`) |
-| origin | the device that **created** a payload. Never changes along the path. Can be a node (a hub injected its frame) or a hub. |
-| sender | the device that transmitted **this copy** (changes every hop) |
-| serving hub **[P2]** | the one hub responsible for forwarding a given node's traffic |
-| parent **[P2]** | the next hub toward the cabin chosen by a hub |
+| BEACON / ECHO | flags (test, adaptive, silenced), cmd + cmd_seq (RESET ALL), silence ×10 s, focus node, frame ×10 ms, test mode, slots n × {kind, owner, mode, allowance, via}, acks n × {hub, node, seq} |
+| HUB | flags (silence on/off request, pending), then sections {type, len, value} |
+| JOIN | firmware version |
 
-## 2. Common LoRa header (every v2 packet, 8 bytes, little-endian)
+Hub sections, in this order, within the slot allowance:
+| Section | Content |
+|---|---|
+| LINE | 3 B per node: node ID, state(3) / event seq(4) / pending(1), quarter turns(5) / flags(3). Pending first. Always first. |
+| RELAY | remote hub's packet re-packed: hub, frame lo, flags, its sections (LINE only if it doesn't fit) |
+| HEALTH | every 8 frames: battery, uptime, fw, beacon RSSI/SNR as heard, beacons lost /64, timing error, neighbour hubs + RSSI |
+| JOINS | hub IDs heard joining (relay duty) |
+| NODEINFO | rotating {node, battery %, flags} |
+| TEST | filler up to the allowance in test mode (counter + pattern) |
+| SONAR | reserved (phase 4/5) |
+Line states: 0 idle, 1 tripped, 2 running, 3 fault, 4 offline (hub lost the node).
 
-| Off | Size | Field | Notes |
-|---|---|---|---|
-| 0 | 1 | `network_id` | same position as v1 → filtered the same way |
-| 1 | 1 | `origin` | 1-254; 0 and 255 reserved |
-| 2 | 1 | `ver` | `0xF0 \| version` → `0xF2`. v1 code dispatches on byte 2 (`processLoRaMessage` L2221-2225) with no `default:` case, so a v1 board should silently ignore v2 packets (**verify on the bench**) |
-| 3 | 1 | `ctl` | bits 7-6 `class` (0 = RELIABLE, 1 = STREAM, 2 = LINK, 3 = reserved) · bits 5-4 `hops` (0-3) · bit 3 `ack_req` · bits 2-0 reserved = 0 |
-| 4 | 2 | `seq` | per (`origin`, `class`), 16-bit, wraps; compared with serial arithmetic `(int16_t)(a - b)` |
-| 6 | 1 | `sender` | rewritten at each hop |
-| 7 | 1 | `type` | payload type (v2 type table, phase 1 reuses v1 payload layouts where possible) |
-| 8 | n | payload | ≤ 247 bytes (SX1262 max 255) |
+## 5. Reliability rules
+- **Events**: a state change gives seq+1 and "pending"; repeated in every hub packet until the
+  beacon carries ack (this hub, node, seq) — an older ack never clears a newer event.
+- **Aggregates**: none. Line state is resent every frame anyway (no ACK on bulk data, D5).
+- **Duplicates**: a node heard by two hubs is reported by both; the chalet keeps one OWNER hub
+  per node and switches when the owner reports it offline or stops reporting it for 10 frames (est.).
+- **Self-healing**: a hub not heard directly for 5 frames is reached through the direct hub
+  that carried its packet / reported it (neighbour list, joins). It returns to direct after 3 direct
+  receptions. Hubs silent for 30 frames are dropped. The chalet never relays.
+- **Adaptive (off by default)**: step to a faster mode after 8/8 packets whose weakest RSSI keeps
+  12 dB (est.) over the faster mode's sensitivity; step back after 2 misses; holds 20/30 frames.
 
-- Max hops = 3 fits the 2-bit field. A relay increments `hops` and drops the packet if it would exceed 3.
-- Integrity: rely on the LoRa PHY CRC (phase 1 sets it explicitly with RadioLib) + `network_id` +
-  `ver`. No XOR byte. See open question Q9.
-- When a hub injects a node's ESP-NOW frame (e.g. an alert), `origin` = node ID and `seq` = the
-  node's own ESP-NOW sequence. **Every hub that heard the same alert produces the same identity**,
-  so all duplicates collapse network-wide (answers issue 6 for alerts without any coordination).
-- Header cost: 8 bytes (v1 headers are 3-7 bytes). Aggregate payload becomes 8 + 1 + 10·n bytes.
+## 6. Radio test setting (chalet decides, hubs follow the beacon)
+| Setting | Effect |
+|---|---|
+| off | normal |
+| rotate | each direct hub's slot cycles SF9/500 → SF8/500 → SF7/500 every frame; hubs fill their slot with TEST bytes (160 B allowance) |
+| fixed SF9 / SF8 / SF7 | all direct hub slots in that mode, TEST filler |
+Set from the chalet web page `/radio`, `POST /api/radio {"test":0-4,"adaptive":bool,"resetStats":true}`,
+or serial on the chalet: `TEST OFF|ROTATE|SF9|SF8|SF7`, `ADAPT ON|OFF`, `RADIO`, `RADIO RESET`.
+Read: `/radio` (per hub per mode: rx/scheduled, CRC, RSSI/SNR avg/min; hub's view of the beacon,
+loss /64, timing error), hub OLED test screen, serial every 5 s.
 
-## 3. Traffic classes
-
-### 3.1 RELIABLE — alerts, alert clears, config, config ACK, silence, reset, aggregates, track born/lost
-- Identity = (`origin`, `seq`) in the RELIABLE sequence space of that origin.
-- **Dedup window per origin** (replaces the 32-entry ring for this class):
-  `highest` (u16) + `bitmap` (u32, bit *i* = `highest - i` seen) + `last_heard` (ms).
-  Let `d = (int16_t)(seq - highest)`:
-
-  | Case | Action |
-  |---|---|
-  | first frame from this origin | create entry, accept |
-  | `d > 0` | shift bitmap left by `d` (clear if `d ≥ 32`), set bit 0, `highest = seq`, accept |
-  | `d == 0` | duplicate → drop |
-  | `-32 < d < 0` | accept once if bit `-d` clear, then set it; else duplicate → drop |
-  | `d ≤ -32` | **origin restart** (reboot reset its counter) → re-init window at `seq`, accept |
-
-  The last row is safe only if a copy can never be older than the window. Guaranteed by two rules:
-  every queue drops RELIABLE packets older than **TTL = 30 s**, and no origin sends more than 32
-  RELIABLE packets per 30 s (hub today: ~5 aggregates + alerts). Sonar track events could break
-  that budget → open question Q6.
-- Table: 32 origins × 12 B ≈ 384 B, LRU eviction, entries idle for 10 min are freed.
-- Same structure is reused on the hub for ESP-NOW frames (per node).
-- ACK / retry (see Q4 for the open part):
-  - `ALERT`, alert clear, `CONFIG`, `TRACK_EVENT`: originator sets `ack_req`. The cabin answers
-    with an `ACK` packet (RELIABLE class, origin = cabin, payload = list of (origin, seq),
-    batched ≤ 8 per packet, flooded back like any reliable packet). Originator retries at
-    ~2 s / 4 s / 8 s (± 25 % jitter) until ACKed or 3 retries, each retry with the **same seq**.
-  - Aggregates: **no ACK, no retry** (D5) — the next one 6 s later supersedes it.
-  - Relays never retry in phase 1. **[P2]** a relay that does not overhear its parent forwarding
-    within one window retries once.
-
-### 3.2 STREAM — sonar focus data (vector frames)
-- Identity = (`origin`, `seq`) in the STREAM sequence space. **No ACK, no dedup cache.**
-- Every hub keeps `last_fwd_seq` per origin (small table, ~16 × 7 B):
-  forward iff `d = (int16_t)(seq - last_fwd_seq) > 0`, then `last_fwd_seq = seq`;
-  `d ≤ 0` → drop (older or duplicate); `d ≤ -16` → origin restart, accept and reset.
-  Safe because STREAM TTL in any queue is 1 s and a stream sends ≤ ~8 packets/s.
-- In the TX queue a newer STREAM packet from the same origin **replaces** the queued one.
-- Phase 1: plumbing + a synthetic test source only; multi-hop streaming is only meaningful after
-  serving hub + parent selection **[P2]**, because flooding a stream through every hub is exactly
-  what issue 2 forbids.
-
-### 3.3 LINK — never relayed (`hops` must be 0)
-- Hello / cost advertisement **[P2]**, cabin beacon (later). No dedup, no ACK.
-
-## 4. Relay rules (phase 1 = still flooding, but fixed)
-1. Drop if `network_id` or `ver` mismatch, or `origin == self`.
-2. Pass the class filter (3.1 dedup window / 3.2 newest-wins). Duplicates are dropped **before** any
-   processing that has side effects (buzzer, alert history).
-3. Process locally (state update, display).
-4. Forward only if `hops < 3` and the role forwards. **The cabin never forwards** (D6).
-5. Forwarded copy: `sender = self`, `hops + 1`, **pushed to the TX queue** with
-   `not_before = now + random(0 … 2 × airtime(packet))` — never `delay()`.
-6. **[P2]** only the serving hub forwards a node's traffic; other hubs that heard it hold the copy
-   and cancel it if they overhear the serving hub (or anyone closer to the cabin) forwarding the
-   same identity before `not_before`; parents chosen by advertised cost (hops + link quality) with
-   hysteresis; loop prevention = strictly decreasing cost, never pick a parent whose parent is
-   you, hop limit 3.
-
-## 5. Non-blocking TX queue
-- Called from `loop()` only. ISRs and the ESP-NOW callback **only copy into an RX ring buffer**;
-  all parsing, state changes and TX decisions happen in `loop()` (fixes the WiFi-task race).
-
-| Prio | Content | Depth | TTL | Supersede key |
-|---|---|---|---|---|
-| P0 | alert, alert clear, ACK | 8 | 30 s | – |
-| P1 | config, config ACK, silence, reset | 8 | 30 s | – |
-| P2 | aggregate, sonar static scene, track born/lost | 4 | 10 s (aggregates) / 30 s | (type, origin) for aggregate & static scene |
-| P3 | stream | 2 | 1 s | (type, origin) |
-
-- Scheduler (each `loop()`): if the radio is idle in RX and `now ≥ next_allowed`, take the
-  highest-priority entry whose `not_before ≤ now`, run CAD; busy → `not_before += random backoff`
-  (exponential per entry, capped), free → `startTransmit()` (non-blocking); TX-done IRQ → back
-  to `startReceive()`. No `delay()` anywhere in the path.
-- LBT always runs (v1 skips it after a recent RX, L1914 — removed).
-- Full level: drop the oldest entry of that level, count it in diagnostics (`tx_dropped[prio]`).
-- Airtime guard: token bucket on STREAM (default ≤ 30 % of airtime, configurable) so the stream
-  can never starve aggregates; diagnostics expose airtime used per class.
-- ESP-NOW sends stay direct (they are already non-blocking) but move out of the callback into `loop()`.
-
-## 6. Airtime reference (SX1262, BW 125 kHz, CR 4/5, preamble 8, CRC on, explicit header)
-
-| Payload | SF7 | SF8 | SF9 (today) | SF10 |
-|---|---|---|---|---|
-| 18 B (v1 alert) | 51 ms | 93 ms | 185 ms | 330 ms |
-| 52 B (8 B hdr + 4 pings batched) | 103 ms | 185 ms | 329 ms | 616 ms |
-| 108 B (v1 aggregate) | 185 ms | 328 ms | 595 ms | 1067 ms |
-
-One focused hole at 50 B/s payload ≈ one 52-byte packet per second ≈ **33 % airtime at SF9,
-10 % at SF7**, doubled per relay hop. This is the data behind DECISION Q2.
-
-## 7. Backward compatibility (D1 = flag day)
-- ESP-NOW frames (`SensorMessage`, `AlertMessage`, `AckMessage`, …) are **unchanged in phase 1**:
-  already-built tip-up nodes keep working without reflashing.
-- LoRa: all Heltec boards are reflashed together. v2 firmware drops the v1 LoRa packet formats;
-  a stray v1 board should ignore v2 packets (byte 2 = `0xF2`), to be confirmed once on the bench.
-
-## 7b. Stream budget at SF9 (D4)
-- Aggregates become variable length in v2 (8 B header + 1 + 10 B per node): 3 nodes = 39 B =
-  **267 ms** instead of the fixed 108 B / 595 ms of v1.
-- Focus stream sized for SF9 with a **20 % airtime cap per focused hole per hop**:
-
-  | Packet every | Payload | Airtime (SF9) | Duty | Payload rate |
-  |---|---|---|---|---|
-  | 1 s | 40 B | 308 ms | 31 % | 40 B/s — over the cap |
-  | 2 s | 60 B | 411 ms | 21 % | 30 B/s |
-  | 4 s | 120 B | 677 ms | 17 % | 30 B/s |
-
-  → at SF9 a focused hole gets **≈ 25-30 B/s**, i.e. the low half of the 10-50 B/s target, with
-  ~8 pings batched per packet (the display at the cabin lags ~2 s). Fallback (D4): SF7 if bench
-  tests show this is not usable.
-
-## 8. Open questions
-| # | Question | Owner | My recommendation / note |
-|---|---|---|---|
-| Q1 | Backward compatibility with LoRa boards already built | **Decided D1** | Flag day |
-| Q2 | Switch the network to SF7 during focus (or permanently)? | **Decided D4**: stay SF9, SF7 as fallback | Numbers in §6. SF7 has ~5 dB less link budget than SF9 (demod SNR limit −7.5 dB vs −12.5 dB) |
-| Q3 | Hub board for sonar hubs: Heltec V3 vs WROOM + LoRa module | **Frank** | Not needed for phase 1 |
-| Q4 | Can every hub reach the cabin directly? | **Frank** | Decides how much phase 2 relaying matters |
-| Q5 | Exact versions | **Decided D3, D7** | core 2.0.17, RadioLib 7.7.1, U8g2 2.36.18, ArduinoJson 6.21.6 |
-| Q6 | Track born/lost as RELIABLE could exceed 32 packets / 30 s per origin. Widen the window to 64 bits, or rate-limit track events? | Frank | 64-bit bitmap costs 4 B per origin; I'd do it |
-| Q7 | Aggregates without ACK/retry | **Decided D5** | |
-| Q8 | Should the cabin relay? | **Decided D6**: no | |
-| Q9 | Integrity: PHY CRC only, or add an app CRC-16 (+2 B/packet)? | Frank | PHY CRC + `ver` + `network_id` is enough; the private sync word 0x34 already filters most other LoRa traffic (not all) |
-| Q10 | Build system | **Decided D2**: PlatformIO | |
-| Q11 | Phase 5 wants a full sonar page on the onshore hub, but in LR mode it has no AP (L3805-3813) | Frank | Revisit in phase 5 (AP on a second radio, or page on the cabin only) |
-| Q12 | ESP-NOW link quality for serving-hub choice: core 2.x gives no RSSI in the receive callback | phase 2 | promiscuous RX callback or core 3.x |
-| Q13 | Node ID plan: are IDs 1-254 unique across all hubs, nodes, sonar nodes and the cabin? Max nodes per network (v1 `MAX_NODES` 16)? | Frank | |
-| Q14 | `sonar-display-prototype.html` is not in the IceFishing folder | Frank | Needed from phase 4 only |
+## 7. Open points
+| # | Point |
+|---|---|
+| O1 | Guard / window values (LEAD, TAIL, gaps, beacon window) are estimates — check timing error and slot loss in test mode. |
+| O2 | Remote configuration over LoRa removed for now (web page returns an error); to add as a beacon command. |
+| O3 | Node firmware still v1 (reed, 2 states). Hall quarter-turn counting, line "running" state and global-ID provisioning come with the WROOM node rewrite. |
+| O4 | Sonar codec (phase 4/5) goes in the SONAR section; budget at SF9/500 ≈ 3× the FOCUS + BASE need (est.). |
+| O5 | 125 kHz modes not offered (would need hopping). |
+| O6 | ESP-NOW RSSI is not available with core 2.x callbacks — node-to-hub link quality is not used yet. |
+| O7 | Capacity (calc., est.): a 96 B slot at SF9/500 reserves ≈ 139 ms → about 6 direct hubs per 1 s frame (beacon ≈ 72 ms, join ≈ 30 ms, margin 40 ms). Allowances are fixed per hub today; for sonar they must follow each hub's need (FOCUS hub large, others small). |

@@ -9,3 +9,8 @@
 | 2026-10-05 | D5 | **Aggregates: no ACK, no retry** (the next one supersedes) | Alerts, config, track events keep ACK + retry |
 | 2026-10-05 | D6 | **The cabin does not relay** | It still originates (silence, config, ACKs) |
 | 2026-10-05 | D7 | Library pins: RadioLib 7.7.1, U8g2 2.36.18, ArduinoJson 6.21.6 | ArduinoJson 6 because the code uses the v6 API (`StaticJsonDocument`); RadioLib 7.8.x was a week old, 7.7.1 is the previous stable |
+| 2026-10-05 | D8 | **Radio access = TDMA superframe** (1 s, chalet beacon, slots), no CSMA; **500 kHz only** (SF9/SF8/SF7) — replaces D4's SF9/125 kHz | 125 kHz single channel would have to hop under RSS-247; v1 did not (my earlier miss) |
+| 2026-10-05 | D9 | **Global 8-bit node IDs**; event ack = (hub, node, seq) in the beacon, repeated 3× | Replaces the proposal's 4-bit pocket index and ack bitmap (both flawed) |
+| 2026-10-05 | D10 | **Hubs ("master LoRa hubs") and chalet = Heltec V3**; tip-up nodes = ESP32 WROOM (C3 env kept for existing nodes) | |
+| 2026-10-05 | D11 | No separate range-test firmware: **radio test setting in the real firmware** (rotate / fixed modes, stats on web, serial, OLED) | Values in the code marked "est." are to be tuned from these tests |
+| 2026-10-05 | D12 | One relay hop max; relay chosen by the chalet from hub neighbour reports; echo slot repeats the beacon for hubs that cannot hear the chalet | |
