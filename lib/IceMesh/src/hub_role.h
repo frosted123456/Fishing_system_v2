@@ -60,6 +60,8 @@ class HubRole {
   bool silenced() const { return have_info && (info_flags & BF_SILENCED) != 0; }
   uint8_t transport() const { return have_info ? netTransport(info_net_cfg) : static_cast<uint8_t>(TR_AUTO); }
   bool espNowLr() const { return have_info && netLr(info_net_cfg); }
+  // Frame clock for this hub: the LoRa plan, else the last backbone beacon (sonar outbox ages, packet frame).
+  uint16_t frameNow() const { return have_plan ? plan.frame : info_frame; }
 
   HubRole() { memset(&plan, 0, sizeof(plan)); resetFrameScratch(); n_joins_ = 0; n_nb_last_ = 0; nodeinfo_idx_ = 0; }
 

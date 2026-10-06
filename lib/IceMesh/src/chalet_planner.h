@@ -66,6 +66,7 @@ class ChaletPlanner {
     HUB_TIMEOUT_FRAMES = 30,
     DIRECT_WINDOW = 5,
     RELAY_CAND_TIMEOUT = 10,
+    RELAY_KEEP_FRAMES = 60,
     ACK_REPEAT = 3,
     MAX_RELAYS = 3,
     MIN_ALLOWANCE = 40,
@@ -73,6 +74,7 @@ class ChaletPlanner {
     DIRECT_HITS_TO_RETURN = 3,// a remote hub needs this many direct receptions in DIRECT_WINDOW to go direct
     JOIN_LEN = 7,
     KEEP_ALLOWANCE = 64,      // a frame "fits" when every hub keeps at least this many bytes (est.)
+    FOCUS_KEEP_MARGIN = 40,   // ... and the FOCUS hub at least focus_allowance - this (sonar stream, sim)
     FRAME_STEP_MS = 500,
     DOWN_FRAMES = 20,         // beacons in a row where the shorter frame fits before stepping down
     UP_MARGIN_DB = 12,        // est.: step to a faster mode when the weakest of 8 packets keeps this margin
@@ -302,8 +304,12 @@ class ChaletPlanner {
                              (h.via == 0 || h.direct_hits >= DIRECT_HITS_TO_RETURN);
       if (direct_ok) { h.via = 0; continue; }
       const HubInfo* r = (h.relay_cand != ID_NONE) ? findMut(h.relay_cand) : nullptr;
+      // a fresh candidate, or an older one (RELAY_KEEP_FRAMES) when the hub is not heard directly at all:
+      // a direct slot nobody hears is worse than a relay that worked a minute ago (sim h10, hub behind a ridge)
+      const int16_t age = seqDiff(frame, h.relay_cand_frame);
       const bool cand_ok = r != nullptr && r->via == 0 && directRecent(*r, frame) &&
-                           seqDiff(frame, h.relay_cand_frame) <= static_cast<int16_t>(RELAY_CAND_TIMEOUT);
+                           (age <= static_cast<int16_t>(RELAY_CAND_TIMEOUT) ||
+                            (!directRecent(h, frame) && age <= static_cast<int16_t>(RELAY_KEEP_FRAMES)));
       h.via = cand_ok ? h.relay_cand : 0;   // no usable relay: keep trying a direct slot
     }
   }
@@ -332,7 +338,14 @@ class ChaletPlanner {
       break;
     }
     if (allow_out) *allow_out = allow;
-    return !dropped && allow >= KEEP_ALLOWANCE;
+    const bool focus_ok = cfg.focus_hub == ID_NONE || cfg.focus_allowance <= allow ||
+                          focus + FOCUS_KEEP_MARGIN >= cfg.focus_allowance || !hubScheduled(bc, cfg.focus_hub);
+    return !dropped && allow >= KEEP_ALLOWANCE && focus_ok;
+  }
+
+  static bool hubScheduled(const Beacon& bc, uint8_t id) {
+    for (uint8_t s = 0; s < bc.n_slots; s++) if (bc.slots[s].kind == SLOT_HUB && bc.slots[s].owner == id) return true;
+    return false;
   }
 
   void fill(uint16_t frame, Beacon& bc, uint8_t allow, uint8_t focus) {
