@@ -28,7 +28,7 @@ inline sreal R(double x) { return static_cast<sreal>(x); }
 namespace sp {
 static const int N = BINS;                   // 488 bins of 2.5 cm, 0-12.2 m
 static const int NFREQ = 3;
-inline sreal BIN() { return R(0.025); }
+inline sreal BIN_M() { return R(0.025); }
 inline sreal DT() { return R(0.25); }
 inline sreal ALPHA() { return R(0.04); }      // absorption dB/m (prototype value)
 inline sreal Q() { return R(95.0 / 255.0); }  // dB per code
@@ -105,7 +105,7 @@ class SonarScene {
     const sreal Pn = db2p(R(-84));
     const sreal Pb = db2p(Rf - R(20) * std::log10(R(2) * bd)), Pb2 = db2p(R(2) * Rf - R(6) - R(20) * std::log10(R(4) * bd));
     const sreal q = Q();
-    const int rEnd = roundi(R(0.95) / BIN());
+    const int rEnd = roundi(R(0.95) / BIN_M());
     sreal* P = scratchP();
     for (int f = 0; f < NFREQ; f++) {
       for (int i = 0; i < N; i++) {
@@ -115,7 +115,7 @@ class SonarScene {
           P[i] += Pn * R(7) * s * s * s * s * expo();
         }
       }
-      for (int i = 0; i < rEnd; i++) P[i] += db2p(R(-8)) * std::exp(-(static_cast<sreal>(i) * BIN()) / R(0.045)) * (R(0.8) + R(0.4) * rng_.next());
+      for (int i = 0; i < rEnd; i++) P[i] += db2p(R(-8)) * std::exp(-(static_cast<sreal>(i) * BIN_M()) / R(0.045)) * (R(0.8) + R(0.4) * rng_.next());
       addBottom(P, bd, Pb, tail, hard ? R(0.3) : R(0.5));
       addBottom(P, R(2) * bd, Pb2, tail * R(1.8), R(0.7));
       for (int k = 0; k < NWEEDS; k++) {
@@ -197,21 +197,21 @@ class SonarScene {
 
   static void addEcho(sreal* P, sreal depth, sreal pw) {
     using namespace sp;
-    const sreal c = depth / BIN();
+    const sreal c = depth / BIN_M();
     const int i0 = static_cast<int>(std::floor(c));
     for (int k = -3; k <= 14; k++) {
       const int i = i0 + k; if (i < 0 || i >= N) continue;
-      const sreal x = (static_cast<sreal>(i) - c) * BIN();
+      const sreal x = (static_cast<sreal>(i) - c) * BIN_M();
       P[i] += pw * (x < R(0) ? std::exp(-(x * x) / (R(2) * R(0.03) * R(0.03))) : std::exp(-x / R(0.07)));
     }
   }
   void addBottom(sreal* P, sreal bd, sreal Pb, sreal tail, sreal spk) {
     using namespace sp;
-    const sreal c = bd / BIN();
+    const sreal c = bd / BIN_M();
     const int i0 = std::max(0, static_cast<int>(std::floor(c)) - 4);
-    const int i1 = std::min(N - 1, static_cast<int>(std::ceil(c + R(1.2) / BIN())));
+    const int i1 = std::min(N - 1, static_cast<int>(std::ceil(c + R(1.2) / BIN_M())));
     for (int i = i0; i <= i1; i++) {
-      const sreal x = (static_cast<sreal>(i) - c) * BIN();
+      const sreal x = (static_cast<sreal>(i) - c) * BIN_M();
       const sreal g = x < R(0) ? std::exp(-(x * x) / (R(2) * R(0.03) * R(0.03)))
                                : std::exp(-x / tail) * std::exp(-(x * x) / (R(2) * R(0.35) * R(0.35)));
       P[i] += Pb * g * rician(spk);

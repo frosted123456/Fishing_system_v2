@@ -65,20 +65,20 @@ class SonarProc {
     }
 
     // Bottom: strongest 8-bin energy window, then walk back to the onset
-    const int b0 = roundi(R(0.6) / BIN());
+    const int b0 = roundi(R(0.6) / BIN_M());
     sreal e = R(0); int best = b0; sreal bestE = R(-1);
     for (int i = b0; i < b0 + 8; i++) e += static_cast<sreal>(lin[i]);
     for (int i = b0; i + 8 < N; i++) { if (e > bestE) { bestE = e; best = i; } e += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }
     int pk = best; for (int i = best; i < std::min(N, best + 8); i++) if (d[i] > d[pk]) pk = i;
     int on = pk; while (on > b0 && static_cast<sreal>(d[on - 1]) > static_cast<sreal>(d[pk]) - R(10)) on--;
-    const sreal bNow = static_cast<sreal>(on) * BIN();
+    const sreal bNow = static_cast<sreal>(on) * BIN_M();
     if (!have_bottom_) { bottom_ = bNow; have_bottom_ = true; }
     else if (std::fabs(bNow - bottom_) < R(0.3)) { bottom_ += R(0.25) * (bNow - bottom_); bj_ = 0; }
     else if (++bj_ > 4) { bottom_ = bNow; bj_ = 0; }
-    const int bI = roundi(bottom_ / BIN());
+    const int bI = roundi(bottom_ / BIN_M());
 
     // Noise floor: median of the quiet water below the bottom
-    int a = bI + roundi(R(0.9) / BIN()), z = std::min(N, 2 * bI - roundi(R(0.4) / BIN()));
+    int a = bI + roundi(R(0.9) / BIN_M()), z = std::min(N, 2 * bI - roundi(R(0.4) / BIN_M()));
     if (z - a < 30) { a = N - 40; z = N; }
     int na = 0;
     for (int i = a; i < z; i++) S.arr[na++] = d[i];
@@ -98,7 +98,7 @@ class SonarProc {
     sm[0] = c[0]; sm[N - 1] = c[N - 1];
     for (int i = 1; i < N - 1; i++) sm[i] = static_cast<float>((static_cast<sreal>(c[i - 1]) + static_cast<sreal>(c[i]) + static_cast<sreal>(c[i + 1])) / R(3));
     Peak* pk_ = S.peaks; int np = 0;
-    const int i0 = roundi(R(0.9) / BIN()), i1 = bI - 5;
+    const int i0 = roundi(R(0.9) / BIN_M()), i1 = bI - 5;
     for (int i = i0; i < i1; i++) {
       if (!(sm[i] >= sm[i - 1] && sm[i] > sm[i + 1])) continue;
       const sreal snr = static_cast<sreal>(d[i]) - nf; if (snr < R(10)) continue;
@@ -111,7 +111,7 @@ class SonarProc {
       int r = i; while (r < N - 1 && static_cast<sreal>(sm[r + 1]) > B - R(3)) r++;
       if (np >= MAX_PEAKS) break;
       Peak& p = pk_[np++];
-      p.depth = (static_cast<sreal>(i) + dl) * BIN(); p.bin = i; p.s = B; p.width = static_cast<sreal>(r - l + 1) * BIN();
+      p.depth = (static_cast<sreal>(i) + dl) * BIN_M(); p.bin = i; p.s = B; p.width = static_cast<sreal>(r - l + 1) * BIN_M();
       p.f0 = S.D[0][i]; p.f2 = S.D[2][i]; p.v = R(0);
     }
     for (int i = 1; i < np; i++) {   // stable sort, strongest first (Array.prototype.sort is stable)
@@ -166,7 +166,7 @@ class SonarProc {
     for (int k = 0; k < n_tracks_; k++) {
       const Track& T = tracks_[k];
       if (T.age < 2 || T.label == LBL_COVER) continue;
-      const int b = roundi(T.depth / BIN());
+      const int b = roundi(T.depth / BIN_M());
       for (int q = -5; q <= 8; q++) { const int j = b + q; if (j >= 0 && j < N) mask[j] = 1; }
     }
     for (int i = 0; i < N; i++) {
@@ -199,7 +199,7 @@ class SonarProc {
     }
     int bp = bI; for (int i = bI; i < std::min(N, bI + 6); i++) if (d[i] > d[bp]) bp = i;
     int j = bp; while (j < N - 1 && static_cast<sreal>(d[j + 1]) > static_cast<sreal>(d[bp]) - R(10)) j++;
-    const sreal tl = static_cast<sreal>(j - bI) * BIN();
+    const sreal tl = static_cast<sreal>(j - bI) * BIN_M();
     if (!have_tail_) { tail_ = tl; have_tail_ = true; } else tail_ = tail_ + R(0.1) * (tl - tail_);
     uint8_t hard;
     if (have_ratio_) hard = ratio_ > R(-25) ? HARD_HARD : (ratio_ < R(-27.5) ? HARD_SOFT : HARD_MEDIUM);
@@ -251,7 +251,7 @@ class SonarProc {
     if (s == nullptr) {
       s = new Scratch();
       for (int i = 0; i < BINS; i++) {
-        const sreal r = std::max(static_cast<sreal>(i) * sp::BIN(), R(0.3));
+        const sreal r = std::max(static_cast<sreal>(i) * sp::BIN_M(), R(0.3));
         s->tvg[i] = static_cast<float>(R(40) * std::log10(r) + R(2) * sp::ALPHA() * r);
       }
     }

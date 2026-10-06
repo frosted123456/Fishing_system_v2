@@ -107,13 +107,17 @@ struct NodeSonar {
   uint16_t last_ping;
   uint8_t bg_ver;
   uint8_t bg_mask;          // segments received for bg_ver
-  uint8_t gain;
+  uint8_t nf_neg;            // noise floor -dB, from the last DATA block
   uint16_t act_bits;         // fish present in the last 16 DATA pings (activity when streaming)
   uint8_t old_run;           // consecutive 'old' pings/summaries: a run means the node restarted
   uint8_t bg[BINS];
 };
 
-struct StoredPing { uint32_t seq; uint8_t node; Ping p; };
+struct StoredPing {
+  uint32_t seq; uint8_t node; Ping p;
+  uint8_t nf_neg, hard;                 // from the DATA block header
+  uint8_t n_info; TrackInfo info[MAX_TARGETS];   // echo character, on the last ping of a block that carried it
+};
 
 template <uint8_t MAXN = 16, uint16_t RING = 128>
 class SonarStore : public SonarSink {
@@ -138,19 +142,20 @@ class SonarStore : public SonarSink {
         break;
       }
       case BT_DATA: {
-        DataBlock d;
+        static DataBlock d;   // ~1.2 KB: static, the store is only used under the caller's lock
         if (!decodeData(blk, len, d)) { blocks_bad++; return; }
-        ns->gain = d.gain;
+        ns->nf_neg = d.nf_neg;
         for (uint8_t i = 0; i < d.n; i++) {
           const Ping& p = d.pings[i];
           if (ns->has_ping && isOld(p.index, ns->last_ping) && ++ns->old_run < RESTART_RUN) { old_pings++; continue; }   // duplicate (relay) or late
           ns->old_run = 0;
           ns->last_ping = p.index; ns->has_ping = true;
           StoredPing& sp = ring_[head_];
-          sp.seq = ++seq_; sp.node = node; sp.p = p;
+          sp.seq = ++seq_; sp.node = node; sp.p = p; sp.nf_neg = d.nf_neg; sp.hard = d.hard; sp.n_info = 0;
+          if (i + 1 == d.n && d.n_info > 0) { sp.n_info = d.n_info; memcpy(sp.info, d.info, sizeof(TrackInfo) * d.n_info); }
           head_ = static_cast<uint16_t>((head_ + 1) % RING);
           if (count_ < RING) count_++;
-          deriveSummary(*ns, p, d.bg_ver);
+          deriveSummary(*ns, p, d.bg_ver, d.hard);
         }
         break;
       }
@@ -211,7 +216,7 @@ class SonarStore : public SonarSink {
     return &ns;
   }
 
-  static void deriveSummary(NodeSonar& ns, const Ping& p, uint8_t bg_ver) {
+  static void deriveSummary(NodeSonar& ns, const Ping& p, uint8_t bg_ver, uint8_t hard) {
     Summary& s = ns.sum;
     bool fish = false;
     for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track != 0) fish = true;
@@ -219,7 +224,7 @@ class SonarStore : public SonarSink {
     uint8_t act = 0;
     for (uint16_t b = ns.act_bits; b; b >>= 1) act = static_cast<uint8_t>(act + (b & 1u));
     memset(&s, 0, sizeof(s));
-    s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.activity = act > 15 ? 15 : act;
+    s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.hard = hard; s.activity = act > 15 ? 15 : act;
     s.nearest_cm = DEPTH_NONE;
     uint16_t bait = DEPTH_NONE;
     for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track == 0) bait = p.t[i].depth_cm;

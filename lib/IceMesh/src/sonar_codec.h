@@ -7,9 +7,10 @@
 //
 // Block types (byte 0 = node, byte 1 = type<<4 | x):
 //   BT_BASE  summary every few seconds (x = activity 0-15)          ~7-8 B
-//   BT_DATA  N = 1..15 processed pings (x = N-1)                    ~3-6 B/ping (est.)
-//   BT_BG    1/8 of the 2-bit background profile (x = bg version)   ~2-10 B (est.)
-// Depths in cm (11 bit, 2047 = none). Levels 0-3 (display levels: none/weak/medium/strong).
+//   BT_DATA  N = 1..15 processed pings (x = N-1), + optional track info (echo character)
+//   BT_BG    1/8 of the 2-bit static-scene profile (x = bg version)
+// Depths in cm (11 bit, 2047 = none). Target strength 0-31 = the display value of the prototype
+// (0..1 colour scale x 31); levels 0-3 (none/weak/medium/strong) are derived from it.
 #ifndef ICEMESH_SONAR_CODEC_H
 #define ICEMESH_SONAR_CODEC_H
 #include <stdint.h>
@@ -23,7 +24,7 @@ static const uint16_t BINS = 488;           // 2.5 cm bins, 0-12.2 m
 static const uint16_t BIN_MM = 25;
 static const uint16_t DEPTH_NONE = 2047;    // no bottom lock / no target
 static const uint16_t DEPTH_MAX = 2046;
-static const uint8_t MAX_TARGETS = 3;
+static const uint8_t MAX_TARGETS = 5;       // per ping (3-bit count)
 static const uint8_t MAX_RESID = 7;
 static const uint8_t MAX_PINGS = 15;        // per DATA block
 static const uint8_t BG_SEGMENTS = 8;
@@ -34,7 +35,18 @@ static const uint8_t BG_RICE_K = 3;
 
 enum BlockType : uint8_t { BT_NONE = 0, BT_BASE = 1, BT_DATA = 2, BT_BG = 3 };
 
-struct Target { uint8_t track; uint16_t depth_cm; uint8_t level; uint8_t width; };   // width in bins 1-8
+// track: 0 = the bait (lure), 1-7 = other tracks (IDs reused). width in bins 1-8 (first appearance in a block).
+struct Target { uint8_t track; uint16_t depth_cm; uint8_t strength; uint8_t width; uint8_t level; };
+inline uint8_t strengthToLevel(uint8_t s) { return s == 0 ? 0 : (s < 11 ? 1 : (s < 21 ? 2 : 3)); }
+// Echo character of a track (prototype "Echo character" card), sent with every 2nd DATA block.
+struct TrackInfo {
+  uint8_t track;
+  uint8_t flick_q;     // flicker, 0.25 dB steps (0-15)
+  uint8_t spread_q;    // |210 - 190 kHz|, 0.5 dB steps (0-15)
+  uint8_t elen;        // echo length, bins 1-16 (2.5 cm)
+  bool mature;         // >= 8 detections (else "collecting pings")
+};
+enum BottomHard : uint8_t { BH_HARD = 0, BH_MEDIUM = 1, BH_SOFT = 2, BH_UNKNOWN = 3 };
 struct Resid { uint16_t bin; uint8_t level; };
 struct Ping {
   uint16_t index;           // ping counter (wraps)
@@ -50,18 +62,31 @@ struct Summary {
   uint8_t activity;         // 0-15: pings with a fish target over the last window (saturating)
   uint16_t ping;
   uint16_t bottom_cm;
-  uint8_t n_targets;
+  uint8_t hard;             // BottomHard
+  uint8_t n_targets;        // fish (not the bait), 0-7
   uint16_t nearest_cm;      // valid when n_targets > 0
   uint8_t nearest_level;
   uint8_t bg_ver;
 };
 
+struct DataHeader {
+  uint8_t node;
+  uint8_t nf_neg;           // noise floor, -dB (84 = -84 dB)
+  uint8_t bg_ver;
+  uint8_t hard;             // BottomHard
+  const TrackInfo* info;    // optional echo character of the tracks
+  uint8_t n_info;
+};
+
 struct DataBlock {
   uint8_t node;
-  uint8_t gain;
+  uint8_t nf_neg;
   uint8_t bg_ver;
+  uint8_t hard;
   uint8_t n;
   Ping pings[MAX_PINGS];
+  uint8_t n_info;
+  TrackInfo info[MAX_TARGETS];
 };
 
 inline uint16_t clampDepth(int32_t cm) { return static_cast<uint16_t>(cm < 0 ? 0 : (cm > DEPTH_MAX ? DEPTH_MAX : cm)); }
@@ -81,8 +106,9 @@ inline size_t encodeSummary(const Summary& s, uint8_t* out, size_t cap) {
   w.put(s.node, 8); w.put(BT_BASE, 4); w.put(s.activity > 15 ? 15 : s.activity, 4);
   w.put(s.ping, 16);
   w.put(s.bottom_cm > DEPTH_NONE ? DEPTH_NONE : s.bottom_cm, 11);
-  const uint8_t nt = s.n_targets > MAX_TARGETS ? MAX_TARGETS : s.n_targets;
-  w.put(nt, 2);
+  w.put(s.hard & 3u, 2);
+  const uint8_t nt = s.n_targets > 7 ? 7 : s.n_targets;
+  w.put(nt, 3);
   if (nt > 0) { w.put(s.nearest_cm > DEPTH_MAX ? DEPTH_MAX : s.nearest_cm, 11); w.put(s.nearest_level & 3u, 2); }
   w.put(s.bg_ver & 15u, 4);
   return w.overflow() ? 0 : w.bytes();
@@ -96,7 +122,8 @@ inline bool decodeSummary(const uint8_t* in, size_t len, Summary& s) {
   s.activity = static_cast<uint8_t>(r.get(4));
   s.ping = static_cast<uint16_t>(r.get(16));
   s.bottom_cm = static_cast<uint16_t>(r.get(11));
-  s.n_targets = static_cast<uint8_t>(r.get(2));
+  s.hard = static_cast<uint8_t>(r.get(2));
+  s.n_targets = static_cast<uint8_t>(r.get(3));
   if (s.n_targets > 0) { s.nearest_cm = static_cast<uint16_t>(r.get(11)); s.nearest_level = static_cast<uint8_t>(r.get(2)); }
   else s.nearest_cm = DEPTH_NONE;
   s.bg_ver = static_cast<uint8_t>(r.get(4));
@@ -119,20 +146,21 @@ inline void putPing(BitWriter& w, const Ping& p, bool first, uint16_t& prev_bott
   prev_bottom = b;
   const uint8_t nt = p.n_targets > MAX_TARGETS ? MAX_TARGETS : p.n_targets;
   const uint8_t nr = p.n_resid > MAX_RESID ? MAX_RESID : p.n_resid;
-  w.put(nt, 2); w.put(nr, 3);
+  w.put(nt, 3); w.put(nr, 3);
   for (uint8_t i = 0; i < nt; i++) {
     const Target& t = p.t[i];
     const uint8_t id = t.track & 7u;
     const uint16_t dep = t.depth_cm > DEPTH_MAX ? DEPTH_MAX : t.depth_cm;
+    const uint8_t st = t.strength > 31 ? 31 : t.strength;
     w.put(id, 3);
     if (!tm.seen[id]) {
-      w.put(dep, 11); w.put(t.level & 3u, 2);
+      w.put(dep, 11); w.put(st, 5);
       w.put(static_cast<uint32_t>((t.width < 1 ? 1 : (t.width > 8 ? 8 : t.width)) - 1), 3);
       tm.seen[id] = true;
     } else {
       const int32_t d = static_cast<int32_t>(dep) - static_cast<int32_t>(tm.depth[id]);
       if (d >= -31 && d <= 31) w.putSigned(d, 6); else { w.putSigned(-32, 6); w.put(dep, 11); }
-      w.put(t.level & 3u, 2);
+      w.put(st, 5);
     }
     tm.depth[id] = dep;
   }
@@ -148,17 +176,19 @@ inline void putPing(BitWriter& w, const Ping& p, bool first, uint16_t& prev_bott
 }  // namespace detail
 
 // Encodes as many of the n pings as fit in `cap` (and MAX_PINGS). Pings must have consecutive
-// indices starting at pings[0].index. Returns the length (0 = not even one ping fits); n_used = pings encoded.
-inline size_t encodeData(uint8_t node, uint8_t gain, uint8_t bg_ver, const Ping* pings, uint8_t n,
-                         uint8_t* out, size_t cap, uint8_t* n_used = nullptr) {
+// indices starting at pings[0].index. Track info is added after the pings when it fits (else dropped).
+// Returns the length (0 = not even one ping fits); n_used = pings encoded.
+inline size_t encodeData(const DataHeader& h, const Ping* pings, uint8_t n, uint8_t* out, size_t cap, uint8_t* n_used = nullptr) {
   if (n_used) *n_used = 0;
   if (n == 0) return 0;
   if (n > MAX_PINGS) n = MAX_PINGS;
   BitWriter w(out, cap);
-  w.put(node, 8); w.put(BT_DATA, 4);
+  w.put(h.node, 8); w.put(BT_DATA, 4);
   const size_t n_at = w.bits();
   w.put(0, 4);
-  w.put(pings[0].index, 16); w.put(gain, 8); w.put(bg_ver & 15u, 4); w.put(0, 4);
+  w.put(pings[0].index, 16); w.put(h.nf_neg, 8); w.put(h.bg_ver & 15u, 4); w.put(h.hard & 3u, 2);
+  const size_t info_flag_at = w.bits();
+  w.put(0, 1); w.put(0, 1);
   if (w.overflow()) return 0;
   detail::TrackMemo tm;
   memset(&tm, 0, sizeof(tm));
@@ -174,6 +204,17 @@ inline size_t encodeData(uint8_t node, uint8_t gain, uint8_t bg_ver, const Ping*
   }
   if (done == 0) return 0;
   w.patch(n_at, static_cast<uint32_t>(done - 1), 4);
+  if (h.info != nullptr && h.n_info > 0) {
+    const size_t mark = w.bits();
+    const uint8_t ni = h.n_info > MAX_TARGETS ? MAX_TARGETS : h.n_info;
+    w.put(ni, 3);
+    for (uint8_t i = 0; i < ni; i++) {
+      const TrackInfo& t = h.info[i];
+      w.put(t.track & 7u, 3); w.put(t.flick_q > 15 ? 15 : t.flick_q, 4); w.put(t.spread_q > 15 ? 15 : t.spread_q, 4);
+      w.put(static_cast<uint32_t>((t.elen < 1 ? 1 : (t.elen > 16 ? 16 : t.elen)) - 1), 4); w.put(t.mature ? 1 : 0, 1);
+    }
+    if (w.overflow()) w.rewind(mark); else w.patch(info_flag_at, 1, 1);
+  }
   if (n_used) *n_used = done;
   return w.bytes();
 }
@@ -185,9 +226,11 @@ inline bool decodeData(const uint8_t* in, size_t len, DataBlock& d) {
   if (r.get(4) != BT_DATA) return false;
   d.n = static_cast<uint8_t>(r.get(4) + 1);
   const uint16_t ping0 = static_cast<uint16_t>(r.get(16));
-  d.gain = static_cast<uint8_t>(r.get(8));
+  d.nf_neg = static_cast<uint8_t>(r.get(8));
   d.bg_ver = static_cast<uint8_t>(r.get(4));
-  r.get(4);
+  d.hard = static_cast<uint8_t>(r.get(2));
+  const bool has_info = r.get(1) != 0;
+  r.get(1);
   if (d.n > MAX_PINGS) return false;
   detail::TrackMemo tm;
   memset(&tm, 0, sizeof(tm));
@@ -206,14 +249,14 @@ inline bool decodeData(const uint8_t* in, size_t len, DataBlock& d) {
       }
     }
     prev_bottom = p.bottom_cm;
-    p.n_targets = static_cast<uint8_t>(r.get(2));
+    p.n_targets = static_cast<uint8_t>(r.get(3));
     p.n_resid = static_cast<uint8_t>(r.get(3));
     if (p.n_targets > MAX_TARGETS) return false;
     for (uint8_t k = 0; k < p.n_targets; k++) {
       Target& t = p.t[k];
       t.track = static_cast<uint8_t>(r.get(3));
       if (!tm.seen[t.track]) {
-        t.depth_cm = static_cast<uint16_t>(r.get(11)); t.level = static_cast<uint8_t>(r.get(2));
+        t.depth_cm = static_cast<uint16_t>(r.get(11)); t.strength = static_cast<uint8_t>(r.get(5));
         t.width = static_cast<uint8_t>(r.get(3) + 1);
         tm.seen[t.track] = true;
       } else {
@@ -224,9 +267,10 @@ inline bool decodeData(const uint8_t* in, size_t len, DataBlock& d) {
           if (v < 0) return false;
           t.depth_cm = static_cast<uint16_t>(v);
         }
-        t.level = static_cast<uint8_t>(r.get(2));
+        t.strength = static_cast<uint8_t>(r.get(5));
         t.width = 0;   // filled below from the first appearance
       }
+      t.level = strengthToLevel(t.strength);
       if (t.depth_cm > DEPTH_MAX) return false;
       tm.depth[t.track] = t.depth_cm;
     }
@@ -240,6 +284,15 @@ inline bool decodeData(const uint8_t* in, size_t len, DataBlock& d) {
       prev = bin;
     }
     if (r.bad()) return false;
+  }
+  if (has_info) {
+    d.n_info = static_cast<uint8_t>(r.get(3));
+    if (d.n_info > MAX_TARGETS) return false;
+    for (uint8_t i = 0; i < d.n_info; i++) {
+      TrackInfo& t = d.info[i];
+      t.track = static_cast<uint8_t>(r.get(3)); t.flick_q = static_cast<uint8_t>(r.get(4)); t.spread_q = static_cast<uint8_t>(r.get(4));
+      t.elen = static_cast<uint8_t>(r.get(4) + 1); t.mature = r.get(1) != 0;
+    }
   }
   // width is sent once per track per block: copy it to the later pings
   uint8_t width[8];

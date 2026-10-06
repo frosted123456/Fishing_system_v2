@@ -5,7 +5,7 @@
     .preview/sonar_trace 300 > .preview/trace.json
     python3 tools/sonar_preview.py            # then open http://localhost:8000/sonar
 
-The page HTML is taken from src/lora_node/main.cpp (handleWebSonar), the data from the trace
+The page HTML is taken from src/lora_node/main.cpp (SONAR_PAGE), the data from the trace
 recorded with the real codec and store (one entry per second, replayed in real time, looped).
 """
 import json, os, sys, time
@@ -17,8 +17,10 @@ TRACE = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, ".preview", "tr
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
 
 def page_html():
+    if os.environ.get("SONAR_PAGE"):            # work on a page file directly
+        return open(os.environ["SONAR_PAGE"], encoding="utf-8").read()
     src = open(os.path.join(ROOT, "src", "lora_node", "main.cpp"), encoding="utf-8").read()
-    i = src.index("void handleWebSonar() {")
+    i = src.index("SONAR_PAGE[] PROGMEM")
     a = src.index('R"rawliteral(', i) + len('R"rawliteral(')
     return src[a:src.index(')rawliteral"', a)]
 

@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
   const uint8_t hubs[4] = {1, 1, 2, 3};
   const uint8_t focus = 144;
   SonarSource src[4];
-  for (int i = 0; i < 4; i++) src[i].begin(ids[i], ids[i] * 7919u + hubs[i]);
+  for (int i = 0; i < 4; i++) src[i].begin(ids[i], ids[i] == 144 ? 0u : ids[i] * 7919u + hubs[i]);   // FOCUS hole = the prototype's hole
   static SonarStore<16, 4096> st;
   uint32_t last_seq = 0;
   printf("[\n");
@@ -30,8 +30,8 @@ int main(int argc, char** argv) {
     for (uint8_t i = 0; i < st.capacity(); i++) {
       const NodeSonar* ns = st.at(i);
       if (!ns) continue;
-      printf("%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s}",
-             first ? "" : ",", ns->node, ns->hub, s - ns->frame, ns->sum.ping, ns->sum.bottom_cm, ns->sum.n_targets, ns->sum.nearest_cm,
+      printf("%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"hard\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s}",
+             first ? "" : ",", ns->node, ns->hub, s - ns->frame, ns->sum.ping, ns->sum.bottom_cm, ns->sum.hard, ns->sum.n_targets, ns->sum.nearest_cm,
              ns->sum.nearest_level, ns->sum.activity, ns->bg_ver, ns->bg_mask, ns->has_sum ? "true" : "false");
       first = 0;
     }
@@ -41,9 +41,11 @@ int main(int argc, char** argv) {
     for (uint16_t k = 0; k < n; k++) {
       const Ping& p = out[k]->p;
       printf("%s[%u,%u,%u,[", k ? "," : "", static_cast<unsigned>(out[k]->seq), p.index, p.bottom_cm);
-      for (uint8_t j = 0; j < p.n_targets; j++) printf("%s[%u,%u,%u,%u]", j ? "," : "", p.t[j].track, p.t[j].depth_cm, p.t[j].level, p.t[j].width);
+      for (uint8_t j = 0; j < p.n_targets; j++) printf("%s[%u,%u,%u,%u]", j ? "," : "", p.t[j].track, p.t[j].depth_cm, p.t[j].strength, p.t[j].width);
       printf("],[");
       for (uint8_t j = 0; j < p.n_resid; j++) printf("%s[%u,%u]", j ? "," : "", p.r[j].bin, p.r[j].level);
+      printf("],%u,%u,[", out[k]->hard, out[k]->nf_neg);
+      for (uint8_t j = 0; j < out[k]->n_info; j++) { const TrackInfo& x = out[k]->info[j]; printf("%s[%u,%u,%u,%u,%u]", j ? "," : "", x.track, x.flick_q, x.spread_q, x.elen, x.mature ? 1 : 0); }
       printf("]]");
       last_seq = out[k]->seq;
     }

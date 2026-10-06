@@ -23,7 +23,8 @@ static size_t makeData(uint8_t node, uint16_t ping0, uint8_t n, uint8_t* b, uint
     p[i].n_resid = fill_resid;
     for (uint8_t r = 0; r < fill_resid; r++) { p[i].r[r].bin = static_cast<uint16_t>(r * 60 + i); p[i].r[r].level = 1; }
   }
-  return encodeData(node, 0, 0, p, n, b, MAX_BLOCK);
+  DataHeader h; memset(&h, 0, sizeof h); h.node = node;
+  return encodeData(h, p, n, b, MAX_BLOCK);
 }
 static size_t makeBg(uint8_t node, uint8_t seg, uint8_t ver, uint8_t* b) {
   uint8_t lv[BINS]; for (uint16_t i = 0; i < BINS; i++) lv[i] = static_cast<uint8_t>((i / 7) & 3u);

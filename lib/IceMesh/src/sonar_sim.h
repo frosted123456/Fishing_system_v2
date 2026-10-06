@@ -1,228 +1,76 @@
-// Fake sonar for test mode: a seeded scene (bottom, weeds, jigging bait, fish that come and go,
-// noise cells) that outputs what the real node processing would output: processed pings
-// (bottom, targets with track IDs, residual cells) and a 2-bit background profile.
-// SonarSource adds the node-side block cadence (BASE summaries, or FOCUS = DATA + BG blocks)
-// so the simulated data goes through the real codec and transport.
-// Everything here is invented test data: NOT a model of real fish behaviour or of TUSS4470 output.
+// Sonar source for the test mode: fake raw pings (sonar_scene.h, Frank's prototype scene) ->
+// node processing v0 (sonar_proc.h, port of the prototype's Proc) -> sonar blocks (sonar_codec.h),
+// with the node-side block cadence: BASE summaries, or FOCUS = DATA + track info + BG blocks.
+// On a real sonar node only the first stage changes (TUSS4470 instead of SonarScene).
 #ifndef ICEMESH_SONAR_SIM_H
 #define ICEMESH_SONAR_SIM_H
 #include <stdint.h>
 #include <string.h>
-#include <math.h>
 #include "sonar_codec.h"
+#include "sonar_scene.h"
+#include "sonar_proc.h"
 
 namespace icemesh {
 namespace sonar {
 
-class SonarSim {
- public:
-  enum { PINGS_PER_S = 4, MAX_FISH = 2 };
-
-  // start_index: first ping index (use a random value on hardware so a restart does not look like old pings)
-  void begin(uint32_t seed, uint16_t start_index = 0) {
-    rng_ = seed ? seed * 2654435761u : 0x9E3779B9u;
-    if (rng_ == 0) rng_ = 1;
-    t_ = start_index;
-    bottom0_mm_ = static_cast<int32_t>(range(2500, 9500));    // 2.5-9.5 m
-    bait_off_mm_ = static_cast<int32_t>(range(300, 1200));    // bait 30-120 cm above bottom
-    weed_mm_ = static_cast<int32_t>(range(0, 450));
-    jig_wait_ = static_cast<uint16_t>(range(20, 40));
-    jig_t_ = 255;
-    next_track_ = 1;
-    memset(fish_, 0, sizeof(fish_));
-    for (uint8_t i = 0; i < sizeof(weed_pat_); i++) weed_pat_[i] = static_cast<uint8_t>(rnd() & 0xFF);
-    bg_ver_ = 0;
-    bg_bottom_bin_ = 0xFFFF;
-    bottom_mm_ = bottom0_mm_;
-    rebuildBackground();
-  }
-
-  // Advances one ping (1/4 s) and returns it.
-  void step(Ping& p) {
-    memset(&p, 0, sizeof(p));
-    p.index = static_cast<uint16_t>(t_);
-    // bottom: slow +-4 cm swell over 90 s; rare loss of bottom lock
-    const float ph = static_cast<float>(t_ % 360u) * (6.2831853f / 360.0f);   // phase only, index offset is harmless
-    bottom_mm_ = bottom0_mm_ + static_cast<int32_t>(40.0f * sinf(ph));
-    const bool lost = (rnd() % 400u) == 0;
-    p.bottom_cm = lost ? DEPTH_NONE : clampDepth(bottom_mm_ / 10);
-    if (abs32(static_cast<int32_t>(depthToBin(clampDepth(bottom_mm_ / 10))) - static_cast<int32_t>(bg_bottom_bin_)) >= 2)
-      rebuildBackground();
-
-    // bait: jig every 5-10 s (lift 25 cm in 2 pings, fall back in 8)
-    const int32_t rest = bottom_mm_ - bait_off_mm_;
-    int32_t bait = rest;
-    if (jig_t_ == 255) { if (jig_wait_ > 0) jig_wait_--; else jig_t_ = 0; }
-    if (jig_t_ != 255) {
-      if (jig_t_ < 2) bait = rest - 125 * (jig_t_ + 1);
-      else bait = rest - 250 + 250 * (jig_t_ - 1) / 8;
-      if (++jig_t_ >= 10) { jig_t_ = 255; jig_wait_ = static_cast<uint16_t>(range(20, 40)); }
-    }
-    bait += static_cast<int32_t>(range(0, 20)) - 10;
-    bait_mm_ = bait;
-    addTarget(p, 0, bait, 2, 1);
-
-    // fish
-    for (uint8_t i = 0; i < MAX_FISH; i++) {
-      Fish& f = fish_[i];
-      if (!f.active) { if ((rnd() % 120u) == 0) spawn(f); continue; }   // ~every 30 s per free slot
-      moveFish(f);
-      if (f.active) addTarget(p, f.track, f.depth_mm, f.level, f.width);
-    }
-
-    // residual cells: noise + fish arc tails
-    uint16_t bins[MAX_RESID]; uint8_t lv[MAX_RESID]; uint8_t n = 0;
-    if ((rnd() % 4u) == 0 && n < MAX_RESID) { bins[n] = static_cast<uint16_t>(range(8, depthToBin(clampDepth(bottom_mm_ / 10)))); lv[n++] = 1; }
-    for (uint8_t i = 0; i < MAX_FISH && n < MAX_RESID; i++) {
-      const Fish& f = fish_[i];
-      if (!f.active || (rnd() & 1u)) continue;
-      const int32_t b = static_cast<int32_t>(depthToBin(clampDepth(f.depth_mm / 10))) + ((rnd() & 1u) ? -1 : 1) * (f.width / 2 + 1);
-      if (b > 0 && b < BINS) { bins[n] = static_cast<uint16_t>(b); lv[n++] = 1; }
-    }
-    // sort + unique
-    for (uint8_t a = 0; a < n; a++)
-      for (uint8_t b = static_cast<uint8_t>(a + 1); b < n; b++)
-        if (bins[b] < bins[a]) { uint16_t tb = bins[a]; bins[a] = bins[b]; bins[b] = tb; uint8_t tl = lv[a]; lv[a] = lv[b]; lv[b] = tl; }
-    for (uint8_t a = 0; a < n; a++) {
-      if (p.n_resid > 0 && p.r[p.n_resid - 1].bin == bins[a]) continue;
-      p.r[p.n_resid].bin = bins[a]; p.r[p.n_resid].level = lv[a]; p.n_resid++;
-    }
-    t_++;
-  }
-
-  const uint8_t* background() const { return bg_; }
-  uint8_t bgVersion() const { return bg_ver_; }
-  uint16_t nextIndex() const { return static_cast<uint16_t>(t_); }
-  int32_t baitMm() const { return bait_mm_; }
-  uint8_t fishCount() const { uint8_t n = 0; for (uint8_t i = 0; i < MAX_FISH; i++) n += fish_[i].active ? 1 : 0; return n; }
-
- private:
-  struct Fish { bool active; uint8_t track, level, width, phase; int32_t depth_mm, goal_mm; int16_t speed; uint16_t stay; };
-
-  uint32_t rnd() { rng_ ^= rng_ << 13; rng_ ^= rng_ >> 17; rng_ ^= rng_ << 5; return rng_; }
-  uint32_t range(uint32_t lo, uint32_t hi) { return hi <= lo ? lo : lo + rnd() % (hi - lo); }
-  static int32_t abs32(int32_t v) { return v < 0 ? -v : v; }
-
-  static void addTarget(Ping& p, uint8_t track, int32_t depth_mm, uint8_t level, uint8_t width) {
-    if (p.n_targets >= MAX_TARGETS || level == 0) return;
-    Target& t = p.t[p.n_targets++];
-    t.track = track; t.depth_cm = clampDepth(depth_mm / 10); t.level = level; t.width = width;
-  }
-
-  void spawn(Fish& f) {
-    f.active = true;
-    f.track = next_track_;
-    next_track_ = static_cast<uint8_t>(next_track_ >= 7 ? 1 : next_track_ + 1);
-    f.level = (rnd() % 10u) < 6 ? 3 : 2;
-    f.width = static_cast<uint8_t>(range(2, 6));
-    f.phase = 0;
-    const bool from_below = (rnd() & 1u) != 0;
-    f.depth_mm = from_below ? bottom_mm_ - static_cast<int32_t>(range(100, 400)) : bait_mm_ - static_cast<int32_t>(range(600, 1500));
-    if (f.depth_mm < 300) f.depth_mm = 300;
-    f.goal_mm = bait_mm_ + static_cast<int32_t>(range(0, 200)) - 100;
-    f.speed = static_cast<int16_t>(range(10, 30));     // mm per ping (4-12 cm/s)
-    f.stay = static_cast<uint16_t>(range(40, 160));    // 10-40 s near the bait
-  }
-
-  void moveFish(Fish& f) {
-    switch (f.phase) {
-      case 0: {   // approach
-        const int32_t d = f.goal_mm - f.depth_mm;
-        if (abs32(d) <= f.speed) { f.depth_mm = f.goal_mm; f.phase = 1; }
-        else f.depth_mm += d > 0 ? f.speed : -f.speed;
-        break;
-      }
-      case 1: {   // hover near the bait, follows a jig, sometimes strikes
-        f.goal_mm = bait_mm_ + 80;
-        const int32_t d = f.goal_mm - f.depth_mm;
-        f.depth_mm += d / 3 + static_cast<int32_t>(range(0, 30)) - 15;
-        if (f.stay > 0) f.stay--; else { f.phase = 2; f.goal_mm = (rnd() & 1u) ? bottom_mm_ - 100 : f.depth_mm - 1500; }
-        break;
-      }
-      default: {  // leave, fade out
-        const int32_t d = f.goal_mm - f.depth_mm;
-        f.depth_mm += d > 0 ? 40 : -40;
-        if (abs32(d) < 200) f.level = f.level > 1 ? static_cast<uint8_t>(f.level - 1) : 0;
-        if (abs32(d) <= 40 || f.level == 0) f.active = false;
-        break;
-      }
-    }
-    if (f.depth_mm < 200) f.depth_mm = 200;
-    if (f.depth_mm > bottom_mm_ - 50) f.depth_mm = bottom_mm_ - 50;
-  }
-
-  void rebuildBackground() {
-    const uint16_t b = depthToBin(clampDepth(bottom_mm_ / 10));
-    memset(bg_, 0, sizeof(bg_));
-    for (uint16_t i = 0; i < 4; i++) bg_[i] = 2;            // transducer ring-down
-    for (uint16_t i = 4; i < 8; i++) bg_[i] = 1;
-    const uint16_t weed_bins = static_cast<uint16_t>(weed_mm_ / static_cast<int32_t>(BIN_MM));
-    for (uint16_t k = 1; k <= weed_bins && k < b; k++) {
-      const uint8_t r = weed_pat_[k % sizeof(weed_pat_)];
-      bg_[b - k] = (k < weed_bins / 2 && (r & 3u) == 0) ? 2 : ((r & 1u) ? 1 : 0);
-    }
-    for (uint16_t i = b; i < BINS; i++) {
-      const uint16_t k = static_cast<uint16_t>(i - b);
-      bg_[i] = k < 4 ? 3 : (k < 15 ? 2 : (k < 40 ? 1 : 0));
-    }
-    if (bg_bottom_bin_ != 0xFFFF) bg_ver_ = static_cast<uint8_t>((bg_ver_ + 1) & 15u);
-    bg_bottom_bin_ = b;
-  }
-
-  uint32_t rng_ = 1;
-  uint32_t t_ = 0;
-  int32_t bottom0_mm_ = 5000, bottom_mm_ = 5000, bait_off_mm_ = 600, bait_mm_ = 4400, weed_mm_ = 0;
-  uint16_t jig_wait_ = 30;
-  uint8_t jig_t_ = 255;
-  uint8_t next_track_ = 1;
-  Fish fish_[MAX_FISH];
-  uint8_t weed_pat_[32];
-  uint8_t bg_[BINS];
-  uint8_t bg_ver_ = 0;
-  uint16_t bg_bottom_bin_ = 0xFFFF;
-};
-
 struct Block { uint8_t len; uint8_t data[MAX_BLOCK]; };
 
-// Node-side cadence. Call tick() at 4 Hz (one ping each).
+// Display value (0..1) -> 2-bit level: residual cells and the grey static scene.
+inline uint8_t residLevel(float v) { return v < 0.30f ? 1 : (v < 0.50f ? 2 : 3); }
+inline uint8_t staticLevel(float v) { return v < 0.06f ? 0 : (v < 0.20f ? 1 : (v < 0.40f ? 2 : 3)); }
+
+// Call tick() at 4 Hz (one ping each).
 //   BASE  (not focus): a summary every BASE_EVERY pings, and at once when a fish shows up.
-//   FOCUS: a DATA block every FOCUS_N pings + one BG segment every BG_EVERY pings (full profile in 16 s).
+//   FOCUS: a DATA block every FOCUS_N pings (track info in every INFO_EVERY-th one) + one BG segment
+//          every BG_EVERY pings; a new BG version when the static scene changed in > BG_CHANGE bins.
 class SonarSource {
  public:
-  enum { BASE_EVERY = 16, FOCUS_N = 4, BG_EVERY = 8, GAIN_SIM = 0x80 };
-  SonarSim sim;
+  enum { BASE_EVERY = 16, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12 };
+  SonarScene scene;
+  SonarProc proc;
   uint32_t blocks_out = 0, pings_dropped = 0;
 
+  // seed 0 = exactly the prototype's hole; otherwise a per-hole variant
   void begin(uint8_t node, uint32_t seed, uint16_t start_index = 0) {
-    node_ = node; sim.begin(seed, start_index);
-    n_pend_ = 0; since_base_ = BASE_EVERY; since_bg_ = BG_EVERY; bg_seg_ = 0; act_bits_ = 0;
-    was_focus_ = false; last_bg_ver_ = sim.bgVersion(); last_fish_ = 0;
-    memset(&last_, 0, sizeof(last_));
+    begin(node, seed ? SceneConfig::forHole(seed) : SceneConfig::prototype(), start_index);
+  }
+  void begin(uint8_t node, const SceneConfig& cfg, uint16_t start_index) {
+    node_ = node; scene.begin(cfg); proc.reset(); proc.bait_m = cfg.bait_m;
+    index_ = start_index; n_pend_ = 0; since_base_ = BASE_EVERY; since_bg_ = BG_EVERY; bg_seg_ = 0;
+    bg_ver_ = 0; bg_valid_ = false; data_blocks_ = 0; act_bits_ = 0; was_focus_ = false; last_fish_ = 0;
+    memset(slot_id_, 0, sizeof(slot_id_)); memset(slot_used_, 0, sizeof(slot_used_));
+    memset(&last_, 0, sizeof(last_)); memset(&out_, 0, sizeof(out_)); memset(bg_, 0, sizeof(bg_));
   }
 
   // One ping. Writes up to `max_out` blocks; returns how many.
   uint8_t tick(bool focus, Block* out, uint8_t max_out) {
-    uint8_t n_out = 0;
-    Ping p;
-    sim.step(p);
-    last_ = p;
+    static uint8_t codes[sp::NFREQ][BINS];   // shared scratch (one source runs at a time)
+    scene.ping(codes);
+    proc.step(codes, sp::NFREQ, out_);
+    buildPing(last_);
     uint8_t fish = 0;
-    for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track != 0) fish++;
+    for (uint8_t i = 0; i < last_.n_targets; i++) if (last_.t[i].track != 0) fish++;
     act_bits_ = static_cast<uint16_t>((act_bits_ << 1) | (fish ? 1u : 0u));
-    if (focus != was_focus_) { n_pend_ = 0; bg_seg_ = 0; since_bg_ = BG_EVERY; was_focus_ = focus; }
-    if (sim.bgVersion() != last_bg_ver_) { last_bg_ver_ = sim.bgVersion(); bg_seg_ = 0; since_bg_ = BG_EVERY; }
+    if (focus != was_focus_) { n_pend_ = 0; bg_seg_ = 0; since_bg_ = BG_EVERY; data_blocks_ = 0; was_focus_ = focus; }
 
+    uint8_t n_out = 0;
     if (focus) {
-      pend_[n_pend_++] = p;
+      pend_[n_pend_++] = last_;
       if (n_pend_ >= FOCUS_N && n_out < max_out) {
+        TrackInfo info[MAX_TARGETS];
+        DataHeader h;
+        h.node = node_; h.nf_neg = nfNeg(); h.bg_ver = bg_ver_; h.hard = out_.hard;
+        h.n_info = (data_blocks_ % INFO_EVERY) == 0 ? trackInfo(info) : 0;
+        h.info = h.n_info ? info : nullptr;
         uint8_t used = 0;
-        const size_t len = encodeData(node_, GAIN_SIM, sim.bgVersion(), pend_, n_pend_, out[n_out].data, MAX_BLOCK, &used);
-        if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
+        const size_t len = encodeData(h, pend_, n_pend_, out[n_out].data, MAX_BLOCK, &used);
+        if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; data_blocks_++; }
         pings_dropped += static_cast<uint32_t>(n_pend_ - used);
         n_pend_ = 0;
       }
       if (++since_bg_ >= BG_EVERY && n_out < max_out) {
-        const size_t len = encodeBgSegment(node_, sim.bgVersion(), bg_seg_, sim.background(), out[n_out].data, MAX_BLOCK);
+        updateBackground();
+        const size_t len = encodeBgSegment(node_, bg_ver_, bg_seg_, bg_, out[n_out].data, MAX_BLOCK);
         if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
         bg_seg_ = static_cast<uint8_t>((bg_seg_ + 1) % BG_SEGMENTS);
         since_bg_ = 0;
@@ -241,17 +89,17 @@ class SonarSource {
     return n_out;
   }
 
-  // Summary of the latest ping (nearest fish to the bait; the bait itself is track 0).
+  // Summary of the latest ping: fish (not the bait), nearest one to the bait line.
   Summary summary() const {
     Summary s;
     memset(&s, 0, sizeof(s));
-    s.node = node_; s.ping = last_.index; s.bottom_cm = last_.bottom_cm; s.bg_ver = sim.bgVersion();
-    uint16_t bits = act_bits_; uint8_t a = 0;
-    while (bits) { a = static_cast<uint8_t>(a + (bits & 1u)); bits >>= 1; }
+    s.node = node_; s.ping = last_.index; s.bottom_cm = last_.bottom_cm; s.bg_ver = bg_ver_; s.hard = out_.hard;
+    uint8_t a = 0;
+    for (uint16_t b = act_bits_; b; b >>= 1) a = static_cast<uint8_t>(a + (b & 1u));
     s.activity = a > 15 ? 15 : a;
     s.nearest_cm = DEPTH_NONE;
     int32_t best = 1 << 30;
-    const int32_t bait_cm = sim.baitMm() / 10;
+    const int32_t bait_cm = static_cast<int32_t>(proc.bait_m * 100.0f + 0.5f);
     for (uint8_t i = 0; i < last_.n_targets; i++) {
       const Target& t = last_.t[i];
       if (t.track == 0) continue;
@@ -262,18 +110,143 @@ class SonarSource {
     return s;
   }
   uint8_t node() const { return node_; }
+  const Ping& lastPing() const { return last_; }
+  const SonarProc::Out& lastProc() const { return out_; }
 
  private:
+  uint8_t nfNeg() const { const float n = -static_cast<float>(out_.nf); return static_cast<uint8_t>(n < 0 ? 0 : (n > 255 ? 255 : n + 0.5f)); }
+
+  // Track IDs of the processing (unbounded) -> 3-bit codec slots: 0 = bait, 1-7 reused.
+  int slotFor(uint32_t id, bool bait) {
+    for (int k = 0; k < 8; k++) if (slot_used_[k] && slot_id_[k] == id) {
+      if (bait == (k == 0)) return k;
+      slot_used_[k] = false;                                   // label changed: move it
+    }
+    if (bait) { if (!slot_used_[0]) { slot_used_[0] = true; slot_id_[0] = id; return 0; } }
+    for (int k = 1; k < 8; k++) if (!slot_used_[k]) { slot_used_[k] = true; slot_id_[k] = id; return k; }
+    return -1;
+  }
+
+  void buildPing(Ping& p) {
+    memset(&p, 0, sizeof(p));
+    p.index = index_++;
+    p.bottom_cm = clampDepth(static_cast<int32_t>(out_.bottom * 100.0f + 0.5f));
+    // free slots of tracks the processing dropped
+    for (int k = 0; k < 8; k++) {
+      if (!slot_used_[k]) continue;
+      bool alive = false;
+      for (uint8_t i = 0; i < out_.n && !alive; i++) alive = out_.t[i].id == slot_id_[k];
+      if (!alive) slot_used_[k] = false;
+    }
+    // live targets: seen in this ping, visible, not cover; bait first, then strongest
+    // (near-bottom echoes only while they differ from the static scene: weeds stay grey, like the
+    //  prototype's per-pixel "changed" test)
+    const float* chg = SonarProc::binChanged();
+    int idx[SonarProc::MAX_TRACKS]; int n = 0;
+    for (uint8_t i = 0; i < out_.n; i++) {
+      const TrackOut& t = out_.t[i];
+      if (t.miss != 0 || t.label == LBL_COVER || t.v <= 0.08f) continue;
+      if (t.label == LBL_NEAR_BOTTOM) {
+        const int b = static_cast<int>(static_cast<float>(t.depth) / 0.025f + 0.5f);
+        if (b < 0 || b >= BINS || chg[b] < 0.5f) continue;
+      }
+      idx[n++] = i;
+    }
+    for (int a = 1; a < n; a++) {
+      const int v = idx[a]; int b = a - 1;
+      while (b >= 0 && rank(idx[b]) > rank(v)) { idx[b + 1] = idx[b]; b--; }
+      idx[b + 1] = v;
+    }
+    int16_t bins[MAX_TARGETS];
+    for (int a = 0; a < n && p.n_targets < MAX_TARGETS; a++) {
+      const TrackOut& t = out_.t[idx[a]];
+      const int slot = slotFor(t.id, t.label == LBL_BAIT);
+      if (slot < 0) continue;
+      Target& x = p.t[p.n_targets];
+      x.track = static_cast<uint8_t>(slot);
+      x.depth_cm = clampDepth(static_cast<int32_t>(t.depth * 100.0f + 0.5f));
+      const float v = static_cast<float>(t.v);
+      x.strength = static_cast<uint8_t>(v <= 0.f ? 1 : (v >= 1.f ? 31 : (v * 31.0f + 0.5f < 1.f ? 1 : v * 31.0f + 0.5f)));
+      x.level = strengthToLevel(x.strength);
+      const int wb = static_cast<int>(static_cast<float>(t.width) / 0.025f + 0.5f);
+      x.width = static_cast<uint8_t>(wb < 1 ? 1 : (wb > 8 ? 8 : wb));
+      bins[p.n_targets] = static_cast<int16_t>(depthToBin(x.depth_cm));
+      p.n_targets++;
+    }
+    // residual cells: strongest changed bins in the water column, away from the targets
+    const float* vv = SonarProc::binValue();
+    const float* al = SonarProc::binChanged();
+    const int bI = static_cast<int>(out_.bottom / 0.025f + 0.5f);
+    struct C { int16_t bin; float score; } best[MAX_RESID]; int nb = 0;
+    for (int i = 8; i < bI - 2 && i < BINS; i++) {
+      if (al[i] < 0.5f || vv[i] < 0.2f) continue;
+      bool near = false;
+      for (uint8_t k = 0; k < p.n_targets && !near; k++) near = i >= bins[k] - 3 && i <= bins[k] + 6;
+      if (near) continue;
+      const float sc = al[i] * vv[i];
+      if (nb < MAX_RESID) best[nb++] = C{static_cast<int16_t>(i), sc};
+      else { int w = 0; for (int k = 1; k < nb; k++) if (best[k].score < best[w].score) w = k; if (sc > best[w].score) best[w] = C{static_cast<int16_t>(i), sc}; }
+    }
+    for (int a = 1; a < nb; a++) { const C v = best[a]; int b = a - 1; while (b >= 0 && best[b].bin > v.bin) { best[b + 1] = best[b]; b--; } best[b + 1] = v; }
+    for (int a = 0; a < nb; a++) { p.r[a].bin = static_cast<uint16_t>(best[a].bin); p.r[a].level = residLevel(vv[best[a].bin]); }
+    p.n_resid = static_cast<uint8_t>(nb);
+  }
+  int rank(int i) const {   // bait, fish, near bottom; stronger first inside a group
+    const TrackOut& t = out_.t[i];
+    const int g = t.label == LBL_BAIT ? 0 : (t.label == LBL_FISH ? 1 : 2);
+    return g * 1000 - static_cast<int>(static_cast<float>(t.v) * 999.0f);
+  }
+
+  // Echo character of the targets of the latest ping.
+  uint8_t trackInfo(TrackInfo* info) const {
+    uint8_t n = 0;
+    for (uint8_t k = 0; k < last_.n_targets; k++) {
+      const uint8_t slot = last_.t[k].track;
+      if (!slot_used_[slot]) continue;
+      for (uint8_t i = 0; i < out_.n; i++) {
+        const TrackOut& t = out_.t[i];
+        if (t.id != slot_id_[slot]) continue;
+        TrackInfo& x = info[n++];
+        x.track = slot;
+        const float fq = static_cast<float>(t.flick) / 0.25f + 0.5f, sq = static_cast<float>(t.spread) / 0.5f + 0.5f;
+        x.flick_q = static_cast<uint8_t>(fq > 15 ? 15 : fq); x.spread_q = static_cast<uint8_t>(sq > 15 ? 15 : sq);
+        const int wb = static_cast<int>(static_cast<float>(t.width) / 0.025f + 0.5f);
+        x.elen = static_cast<uint8_t>(wb < 1 ? 1 : (wb > 16 ? 16 : wb));
+        x.mature = t.has_stats && t.hist_n >= 8;
+        break;
+      }
+    }
+    return n;
+  }
+
+  // Static scene -> 2-bit grey levels; new version when it changed enough (restart the segments).
+  void updateBackground() {
+    const float* sv = SonarProc::binStatic();
+    uint8_t cur[BINS]; int changed = 0;
+    for (int i = 0; i < BINS; i++) { cur[i] = staticLevel(sv[i]); if (cur[i] != bg_[i]) changed++; }
+    if (!bg_valid_ || changed > BG_CHANGE) {
+      memcpy(bg_, cur, BINS);
+      if (bg_valid_) bg_ver_ = static_cast<uint8_t>((bg_ver_ + 1) & 15u);
+      bg_valid_ = true; bg_seg_ = 0;
+    }
+  }
+
   uint8_t node_ = 0;
+  uint16_t index_ = 0;
   Ping pend_[MAX_PINGS];
   uint8_t n_pend_ = 0;
   uint16_t since_base_ = 0, since_bg_ = 0;
-  uint8_t bg_seg_ = 0;
+  uint8_t bg_seg_ = 0, bg_ver_ = 0;
+  bool bg_valid_ = false;
+  uint8_t bg_[BINS];
+  uint32_t data_blocks_ = 0;
   uint16_t act_bits_ = 0;
   bool was_focus_ = false;
-  uint8_t last_bg_ver_ = 0;
   uint8_t last_fish_ = 0;
+  uint32_t slot_id_[8];
+  bool slot_used_[8];
   Ping last_;
+  SonarProc::Out out_;
 };
 
 }  // namespace sonar
