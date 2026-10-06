@@ -2,7 +2,7 @@
 
 Mockups: `docs/screens/v2_proposal.png`, rendered on the PC by the **same drawing code** that runs on the board
 (`src/lora_node/screens.cpp`, real U8g2 library, `tools/screens_mock.cpp` + `tools/screens_sheet.py`).
-Status: drawing code done and compiling in the firmware; **not yet wired** (waiting for Frank's review).
+Status: approved by Frank and **wired** in the firmware (2026-10-06); not yet seen on a real screen.
 
 ## Why rework (current v1 screen)
 | Problem | Detail |
@@ -27,3 +27,11 @@ Footer: silenced countdown, else Wi-Fi name / address (chalet) or hotspot state 
 Button (one, same everywhere): short = next page (silence during an alert); hold 3 s = hotspot (hub) /
 connect page (chalet); hold 10 s = network reset; a bar shows what releasing does. Pages return to Home after 60 s.
 Screen sleeps after 5 min, wakes on alert and on the button (as v1).
+
+## Added after review (2026-10-06)
+| Page | Content |
+|---|---|
+| Sonar | one depth column per sonar hole (common scale): dithered bottom, bars = fish (wider = stronger), tick = bait; 9 per page |
+| Focus | mono fish finder of the FOCUS hole (≈30 s, newest right), bottom, fish trails, dotted bait depth; double press = next hole |
+| Test | holes running fake sonar / fake trips, radio test; double press = everything on / off |
+CardKB (kept as extra keys): → ↓ Tab Space = next page, ← ↑ = previous, Enter = page action, S = silence, Esc = home.

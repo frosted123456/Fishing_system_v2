@@ -72,3 +72,14 @@ Reference trace of the prototype: `node tools/proto_reference.js > test/fixtures
 - TUSS4470 capture into the chain (3-frequency compounding needs 3 pulses per ping, or run with 1 frequency).
 - Per-hole bait depth setting (for the Bait label) — today the scene's bait depth is used.
 - ESP-NOW load, CPU and heap on the boards; chalet node list holds 16 nodes (virtual holes count).
+
+## Simulation per hole (2026-10-06, D35)
+Each hole can run **fake sonar** and/or **fake fish** (Hall-sensor trips: flag up 20-90 s at random, about N per hour),
+set one by one or all at once: Settings → Test & simulation, serial `SIM <hole> SONAR|HALL|BOTH|OFF`, `SIM ALL ON|OFF`,
+`SIM RATE n`, or the OLED Test page (double press = everything on/off).
+- The chalet sends `CMD_SET_SIM` in the beacon; the hub applies it to its own hole and its test holes, and passes it to a
+  real tip-up (`MSG_DEV_CMD` / `DEVCMD_SIM`) right after the tip-up's next message. The tip-up keeps it in NVS.
+- Fake trips on a real tip-up go through its normal wake / alert / deep-sleep cycle: the whole alert path is tested.
+- Every hole running a simulation reports it (tip-up `FLAG_SIM` → hub `LF_SIM` → chalet) and is marked **SIM** on the
+  page, the phone alert and the OLED. Test holes (virtual, IDs ≥ 128) are always SIM.
+- "Test holes on the hubs" (the former sonar test mode switch) creates the virtual holes; they run fake sonar by default.

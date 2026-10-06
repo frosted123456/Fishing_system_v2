@@ -34,3 +34,10 @@ GET adds: `transport` ("auto"/"lora"/"espnow"), `channel` (0-7), `channel_mhz`, 
 `eb` {lr, relay, rx, tx, relayed, dup}, `eb_ready`, `eb_chalet_lr`, `relay_req` [{dev, on}].
 POST accepts: `{"transport":0-2}`, `{"channel":"auto"|1-8}`, `{"rescan":true}`, `{"relay":{"dev":id,"on":bool}}`.
 Channels are shown 1-8 to the user (1 = 915.0 MHz) and are 0-7 in the API and code.
+
+## 2026-10-06
+- Holes tab: every tip-up card with a sonar shows the last ~3 min (`GET /api/sonar/glance?since=<frame>`): bottom,
+  every fish at its depth (bigger/darker = stronger echo), bait line; text: fish count and depth range, bottom, hardness.
+  SIM badge on holes running a simulation.
+- Settings → Test & simulation (`GET/POST /api/sim`): everything on/off, test holes on the hubs, fake-fish rate, and per
+  hole fake sonar / fake fish switches with the reported SIM state.

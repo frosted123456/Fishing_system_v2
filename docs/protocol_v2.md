@@ -81,12 +81,12 @@ Every block decodes on its own (review fixes): node ID in each block, length = i
 (or its ESP-NOW frame), first ping index (16 bit), 3-bit track slot on every target (0 = bait).
 | Block | Content | Size (measured on fake data) |
 |---|---|---|
-| BASE (every 4 s, + at once when a fish shows up) | node, activity 0-15, ping index, bottom (cm, 11 b), hardness (2 b), fish count (3 b), nearest fish depth + level, static-scene version | 8-9 B |
+| BASE v3 (every 2 s, + at once when a fish shows up) | node, activity 0-15, ping index, bottom (cm, 11 b), hardness (2 b), fish count (3 b), static-scene version, **every target of the latest ping** (≤ 5: depth 11 b, level 2 b, bait 1 b); nearest fish derived on decode | 7-16 B |
 | DATA (FOCUS, 4 pings/block, 1 block/s) | header 6 B (node, type, N, first ping, noise floor −dB, scene version, hardness, info flag); per ping: bottom (abs 11 b, then ±7 cm / escape), counts (3 + 3 b), targets (slot 3 b; first in block: depth 11 b + strength 5 b + width 3 b; then ±31 cm / escape + strength 5 b), changed cells (Rice gaps k=6 + level 2 b); every 2nd block: echo character per target (slot, flicker 0.25 dB, frequency spread 0.5 dB, echo length bins, mature) | ≈ 7.3 B/ping |
 | BG (FOCUS, 1 of 8 segments every 2 s) | 4-level static scene (prototype's grey layer), RLE + Rice, new version when > 12 bins changed | ≈ 6 B/segment |
 FOCUS total ≈ 35 B/s incl. section headers. Strength = the prototype's display value × 31.
 - Hub: `SonarOutbox` (12 blocks, stale after 4 frames, eviction BG → DATA → BASE). No ACK.
-- Chalet: `SonarStore` (16 nodes, ring of 128 pings, duplicate/late pings dropped, node restart detected).
+- Chalet: `SonarStore` (16 nodes, ring of 128 pings, duplicate/late pings dropped, node restart detected, **~3 min of summaries per hole** for the at-a-glance views: `/api/sonar/glance`).
 - Planner: the hub reporting the FOCUS node gets 180 B (est.) instead of 96 B; a remote FOCUS hub
   gets at most 255 − 96 so its relay can carry it; FOCUS shrinks first when the plan is too long.
 - Node ↔ hub (ESP-NOW): `MSG_SONAR` 0x60 = [net][node][0x60] + one block;
@@ -105,6 +105,7 @@ Commands (one at a time, each in 6 beacons, new `cmd_seq` each; hubs act once pe
 | 1 RESET ALL | – | – |
 | 2 SET CHANNEL | beacons left before the switch (5 → 0) | channel 0-7 |
 | 3 SET RELAY | device ID (hub or tip-up) | 1 on / 0 off |
+| 4 SET SIM | hole ID (255 = every hole) | bit0 fake sonar, bit1 fake Hall trips, bits 2-7 trips/hour (0 = 6) |
 Hub flags (HUB packet byte 6) gain `HF_EB_RELAY` 0x08 (this hub relays the backbone) and `HF_EB_PATH` 0x10
 (this hub also sends on the backbone now) — reports for the Radio tab only.
 
