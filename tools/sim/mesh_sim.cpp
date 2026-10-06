@@ -187,6 +187,7 @@ class World {
   // packet a -> b on channel ch, mode m, airtime us: RSSI or NAN
   double lora(int a, int b, RadioMode m, uint8_t ch, double air_us) {
     if (!alive(a) || !alive(b)) return NAN;
+    if (sc.jam_from >= 0 && now_s >= sc.jam_from && now_s < sc.jam_to) return NAN;   // LoRa unusable (strong jammer / radio fault)
     double r = loraMean(a, b) + rng.gauss() * FADE_SIGMA;
     if (burst[a][b]) r -= BURST_DB;
     const double margin = r - modeInfo(m).sens_dbm_x10 / 10.0;
@@ -580,6 +581,7 @@ static std::vector<Scenario> scenarios() {
   { Scenario s; s.name = "p3_espnow_lr"; s.what = "ESP-NOW only + LR, relays: hub 1 + 1 board"; s.transport = TR_ESPNOW; s.lr = true; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
   { Scenario s; s.name = "p3_espnow_norelay"; s.what = "ESP-NOW only, no relay"; s.transport = TR_ESPNOW; add(s); }
   { Scenario s; s.name = "p3_espnow_pess"; s.what = "ESP-NOW only, relays, pessimistic 2.4 GHz (people, snow)"; s.transport = TR_ESPNOW; s.eb_exp = 3.5; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
+  { Scenario s; s.name = "p3_espnow_pess_lr"; s.what = "ESP-NOW only + LR, relays, pessimistic 2.4 GHz"; s.transport = TR_ESPNOW; s.lr = true; s.eb_exp = 3.5; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
   { Scenario s; s.name = "p3_degraded"; s.what = "+10 dB LoRa loss, bursts x5, tip-up ESP-NOW 50 %"; s.extra_db = 10; s.burst_p = 0.01; s.espnow_p = 0.5; add(s); }
   // ---- scaling: 10 hubs ----
   { Scenario s; s.name = "h10_lora"; s.layout = "hubs10"; s.what = "10 hubs, quiet LoRa (frame length chosen by the chalet)"; add(s); }
