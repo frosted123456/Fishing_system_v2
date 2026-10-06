@@ -71,7 +71,7 @@ Line states: 0 idle, 1 tripped, 2 running, 3 fault, 4 offline (hub lost the node
 | off | normal |
 | rotate | each direct hub's slot cycles SF9/500 → SF8/500 → SF7/500 every frame; hubs fill their slot with TEST bytes (160 B allowance) |
 | fixed SF9 / SF8 / SF7 | all direct hub slots in that mode, TEST filler |
-Set from the chalet web page `/radio`, `POST /api/radio {"test":0-4,"adaptive":bool,"resetStats":true}`,
+Set from the Radio tab of the chalet web suite (`/radio`), `POST /api/radio {"test":0-4,"adaptive":bool,"resetStats":true}`,
 or serial on the chalet: `TEST OFF|ROTATE|SF9|SF8|SF7`, `ADAPT ON|OFF`, `RADIO`, `RADIO RESET`.
 Read: `/radio` (per hub per mode: rx/scheduled, CRC, RSSI/SNR avg/min; hub's view of the beacon,
 loss /64, timing error), hub OLED test screen, serial every 5 s.

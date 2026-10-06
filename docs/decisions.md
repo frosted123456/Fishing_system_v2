@@ -20,3 +20,4 @@
 | 2026-10-06 | D16 | **Frank's display prototype is the reference** (docs/prototype): its simulator and processing are ported to C++ bit-exactly and run on the nodes/hubs in test mode; /sonar uses its layout | Replaces my own fake scene and page (D13) |
 | 2026-10-06 | D17 | Sonar block format v2: ≤ 5 targets with 5-bit strength, hardness, noise floor, echo character every 2nd block; the 3-frequency echo trace stays on the node | Needed by the prototype display; still ≈ 35 B/s per FOCUS hole |
 | 2026-10-06 | D18 | /sonar defaults to feet (ft/m toggle) | Frank |
+| 2026-10-06 | D19 | **One web suite** on the chalet (tabs Holes / Sonar / Radio / Settings, prototype theme); FISH ON bar + sound + silence on every tab | Frank; replaces the 5 separate pages |

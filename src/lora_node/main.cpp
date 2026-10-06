@@ -348,7 +348,6 @@ void meshSyncNodesNow();
 int findNodeIndexForMesh(uint8_t nodeId);
 void sendSilenceSyncEspNow();
 void drawRadioTest();
-void handleWebRadio();
 void handleWebApiRadio();
 void handleWebApiRadioPost();
 
@@ -365,14 +364,12 @@ void updateDisplay();
 void triggerBuzzer(uint8_t pattern);
 void handleWebRoot();
 void handleWebApi();
-void handleWebSonar();
 void handleWebApiSonar();
 void handleWebApiSonarPost();
 void handleWebApiSonarPings();
 void handleWebApiSonarBg();
 void sonarHubLoop();
 void handleWebWifiConfig();
-void handleWebSettings();
 void handleWebApiSettingsGet();
 void handleWebApiSettingsPost();
 
@@ -2828,16 +2825,16 @@ void setupWebServer() {
   server.on("/api/status", HTTP_GET, handleWebApi);
   server.on("/api/silence", HTTP_POST, handleWebApiSilence);
   server.on("/api/node/name", HTTP_POST, handleWebApiNodeName);
-  server.on("/settings", HTTP_GET, handleWebSettings);
+  server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
   server.on("/api/settings", HTTP_GET, handleWebApiSettingsGet);
   server.on("/api/settings", HTTP_POST, handleWebApiSettingsPost);
-  server.on("/remote-config", HTTP_GET, handleWebRemoteConfig);
+  server.on("/remote-config", HTTP_GET, handleWebRemoteConfig);   // not linked from the suite: no remote config over the v2 mesh yet
   server.on("/api/remote-config", HTTP_POST, handleWebApiRemoteConfig);
   server.on("/api/remote-config/status", HTTP_GET, handleWebApiRemoteConfigStatus);
-  server.on("/radio", HTTP_GET, handleWebRadio);              // v2: radio / range test page
+  server.on("/radio", HTTP_GET, handleWebRoot);
   server.on("/api/radio", HTTP_GET, handleWebApiRadio);
   server.on("/api/radio", HTTP_POST, handleWebApiRadioPost);
-  server.on("/sonar", HTTP_GET, handleWebSonar);              // v2: sonar grid + waterfall/flasher
+  server.on("/sonar", HTTP_GET, handleWebRoot);
   server.on("/api/sonar", HTTP_GET, handleWebApiSonar);
   server.on("/api/sonar", HTTP_POST, handleWebApiSonarPost);
   server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
@@ -2851,242 +2848,897 @@ void loopWebServer() {
   server.handleClient();
 }
 
-void handleWebRoot() {
-  String html = F(R"rawliteral(
-<!DOCTYPE html>
+// Chalet web suite: one page, tabs Holes / Sonar / Radio / Settings (theme and sonar views from Frank's
+// prototype, docs/prototype). The FISH ON bar, sound and silence work on every tab. /, /sonar, /radio and
+// /settings all serve it (the path picks the tab). Kept in flash (~58 KB), sent without a RAM copy.
+static const char SUITE_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-  <title>Ice Fishing Monitor</title>
-  <style>
-    :root {
-      --bg-primary: #0f0f1a;
-      --bg-secondary: #1a1a2e;
-      --bg-card: #16213e;
-      --bg-card-hover: #1f2b47;
-      --text-primary: #f0f0f0;
-      --text-secondary: #a0a0a0;
-      --accent-blue: #4fc3f7;
-      --accent-green: #00d26a;
-      --accent-red: #ff5252;
-      --accent-orange: #ffc107;
-      --accent-gray: #555;
-      --border-radius: 12px;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
-      color: var(--text-primary);
-      min-height: 100vh;
-      padding: 16px;
-    }
-    .container { max-width: 800px; margin: 0 auto; }
-    .header { text-align: center; padding: 16px 0; border-bottom: 1px solid rgba(79,195,247,0.2); margin-bottom: 16px; }
-    .header h1 { color: var(--accent-blue); font-size: 24px; font-weight: 600; }
-    .header-info { display: flex; justify-content: center; gap: 20px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
-    .alert-banner {
-      background: linear-gradient(135deg, #d32f2f, #b71c1c);
-      color: white; padding: 20px; border-radius: var(--border-radius);
-      text-align: center; font-size: 26px; font-weight: bold;
-      margin-bottom: 16px; display: none;
-      animation: alertPulse 0.8s ease-in-out infinite;
-      box-shadow: 0 0 30px rgba(255,82,82,0.4);
-    }
-    .alert-banner.active { display: block; }
-    @keyframes alertPulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.02); opacity: 0.9; } }
-    .silence-btn {
-      display: block; width: 100%; padding: 14px; margin-bottom: 16px;
-      background: var(--bg-card); border: 2px solid var(--accent-blue);
-      border-radius: var(--border-radius); color: var(--accent-blue);
-      font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s;
-    }
-    .silence-btn:hover { background: var(--accent-blue); color: var(--bg-primary); }
-    .silence-btn.silenced { background: var(--accent-orange); border-color: var(--accent-orange); color: #000; }
-    .node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin-bottom: 20px; }
-    .node-card {
-      background: var(--bg-card); border-radius: var(--border-radius); padding: 14px;
-      text-align: center; border: 2px solid transparent; transition: all 0.2s; position: relative;
-    }
-    .node-card:hover { background: var(--bg-card-hover); transform: translateY(-2px); }
-    .node-card.online { border-color: var(--accent-green); }
-    .node-card.offline { border-color: var(--accent-gray); opacity: 0.6; }
-    .node-card.fish {
-      border-color: var(--accent-red);
-      background: linear-gradient(135deg, #4a1a1a, #2a0a0a);
-      animation: fishPulse 0.6s ease-in-out infinite;
-    }
-    .node-card.lowbat { border-color: var(--accent-orange); }
-    @keyframes fishPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,82,82,0.4); } 50% { box-shadow: 0 0 20px 4px rgba(255,82,82,0.6); } }
-    .node-id { font-size: 28px; font-weight: bold; color: var(--accent-blue); margin-bottom: 6px; }
-    .node-card.fish .node-id { color: var(--accent-red); }
-    .node-card.offline .node-id { color: var(--accent-gray); }
-    .node-name { font-size: 10px; color: var(--text-secondary); margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .node-role { font-size: 10px; color: var(--text-secondary); margin-top: 2px; font-style: italic; }
-    .node-status { display: inline-block; padding: 3px 10px; border-radius: 16px; font-size: 11px; font-weight: 600; margin-bottom: 6px; }
-    .node-card.online .node-status { background: rgba(0,210,106,0.2); color: var(--accent-green); }
-    .node-card.offline .node-status { background: rgba(85,85,85,0.3); color: var(--accent-gray); }
-    .node-card.fish .node-status { background: rgba(255,82,82,0.3); color: var(--accent-red); }
-    .node-battery { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; justify-content: center; gap: 4px; }
-    .node-battery .bar { width: 36px; height: 7px; background: var(--bg-secondary); border-radius: 4px; overflow: hidden; }
-    .node-battery .bar-fill { height: 100%; background: var(--accent-green); border-radius: 4px; }
-    .node-card.lowbat .bar-fill { background: var(--accent-orange); }
-    .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
-    .stat-card { background: var(--bg-card); border-radius: var(--border-radius); padding: 12px; text-align: center; }
-    .stat-value { font-size: 20px; font-weight: bold; color: var(--accent-blue); }
-    .stat-label { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-    .legend { display: flex; justify-content: center; flex-wrap: wrap; gap: 14px; margin-bottom: 16px; font-size: 11px; }
-    .legend-item { display: flex; align-items: center; gap: 5px; }
-    .legend-dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid; }
-    .legend-dot.ok { background: transparent; border-color: var(--accent-green); }
-    .legend-dot.fish { background: var(--accent-red); border-color: var(--accent-red); }
-    .legend-dot.lowbat { background: transparent; border-color: var(--accent-orange); }
-    .legend-dot.offline { background: transparent; border-color: var(--accent-gray); }
-    .footer { text-align: center; padding: 12px; color: var(--text-secondary); font-size: 11px; border-top: 1px solid rgba(79,195,247,0.1); }
-    @media (max-width: 480px) { .node-grid { grid-template-columns: repeat(2, 1fr); } .stats-grid { grid-template-columns: repeat(3, 1fr); } }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ice Fishing</title>
+<style>
+:root{
+  --bg:#EEF3F4; --surface:#FFFFFF; --ink:#13262D; --muted:#55707A; --line:#D2DEE2; --chip:#E1EAEC;
+  --accent:#1C6C77; --accent-ink:#FFFFFF; --alert:#C2412D; --alert-ink:#FFFFFF;
+  --water:#0A1E26; --water-2:#0F2A33; --water-ink:#D7E6EA; --water-muted:#86A2AB; --water-line:#1C3B46;
+  color-scheme:light; box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
+    --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
+  --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Barlow Semi Condensed","Arial Narrow","Roboto Condensed",system-ui,sans-serif;
+  font-size:16px;line-height:1.4;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+a{color:var(--accent)}
+.top{max-width:1240px;margin:0 auto;padding:14px 14px 6px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;align-items:end}
+.top h1{margin:0;font-size:2rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
+.top .sub{margin:4px 0 0;color:var(--muted);font-size:.98rem}
+.playback{display:flex;gap:6px;align-items:center}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;min-height:40px;min-width:44px;font-weight:600;cursor:pointer}
+.seg{display:inline-flex;background:var(--chip);border-radius:12px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;color:var(--muted);padding:7px 14px;border-radius:9px;min-height:38px;font-weight:600;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.modebar{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+.hint{color:var(--muted);font-size:.92rem}
+.simb{background:#F2C94C;color:#3A2A00;border-radius:6px;padding:2px 8px;font-weight:700;font-size:.85rem;letter-spacing:.02em}
+.tog{display:inline-flex;align-items:center;gap:8px;font-weight:600}
+.grid{max-width:1240px;margin:0 auto;padding:8px 12px 24px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr);
+  grid-template-areas:"holes" "inst" "fall" "tgt" "echo" "ctrl" "note"}
+@media (min-width:920px){
+  .grid{grid-template-columns:350px minmax(0,1fr);grid-template-areas:"holes holes" "inst fall" "tgt fall" "echo ctrl" "note note";align-items:start}
+}
+.grid.nofocus .inst,.grid.nofocus .fall,.grid.nofocus .tgt,.grid.nofocus .echo,.grid.nofocus .ctrl{display:none}
+.water{background:var(--water);color:var(--water-ink);border-radius:18px;padding:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px}
+.card h2,.water h2{margin:0 0 8px;font-size:1.15rem;font-weight:600;letter-spacing:.005em}
+.water h2{color:var(--water-ink)}
+.muted{color:var(--muted)}
+/* Holes */
+.holes{grid-area:holes}
+.hgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+.hole{display:grid;gap:2px;text-align:left;border:1px solid var(--line);background:transparent;border-radius:12px;padding:10px;cursor:pointer;min-height:104px}
+.hole[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.hole.fish{border-color:var(--alert);box-shadow:inset 0 0 0 1px var(--alert)}
+.hole .hd{display:flex;justify-content:space-between;gap:6px;align-items:baseline;font-weight:600}
+.hole .big{font-size:1.3rem;font-weight:700;line-height:1.15}
+.hole .sm{color:var(--muted);font-size:.88rem;line-height:1.25}
+.badge{font-size:.78rem;font-weight:700;padding:1px 7px;border-radius:6px;background:var(--chip);color:var(--muted);white-space:nowrap}
+.badge.on{background:var(--accent);color:var(--accent-ink)}.badge.al{background:var(--alert);color:var(--alert-ink)}
+.act{height:5px;background:var(--chip);border-radius:3px;overflow:hidden;margin-top:4px}.act i{display:block;height:100%;background:var(--accent)}
+.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:baseline}
+/* Instrument */
+.inst{grid-area:inst}
+.flash-wrap{position:relative;width:100%;max-width:330px;margin:0 auto;aspect-ratio:1/1}
+.flash-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
+.readouts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px;border-top:1px solid var(--water-line);padding-top:10px}
+.readouts div{min-width:0}
+.readouts span{display:block;color:var(--water-muted);font-size:.85rem}
+.readouts strong{display:block;font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Waterfall */
+.fall{grid-area:fall}
+.fall-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fall-head p{margin:0;color:var(--water-muted);font-size:.9rem}
+.stack{position:relative;height:clamp(300px,56vh,560px);border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
+.stack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.zoom-head{display:flex;justify-content:space-between;align-items:baseline;margin:12px 0 6px;color:var(--water-muted);font-size:.9rem}
+.zoom-head strong{color:var(--water-ink);font-weight:600}
+.zstack{position:relative;height:108px;border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
+.zstack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:.88rem;color:var(--water-muted)}
+.legend i{display:inline-block;width:18px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}
+/* Targets */
+.tgt{grid-area:tgt}
+.tlist{display:grid;gap:6px}
+.trow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 10px;align-items:center;text-align:left;width:100%;border:1px solid var(--line);background:transparent;border-radius:10px;padding:8px 10px;cursor:pointer}
+.trow[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.trow .dot{width:12px;height:12px;border-radius:50%}
+.trow .nm{font-weight:600}.trow .dp{font-weight:600;justify-self:end}
+.trow .meta{grid-column:2/4;color:var(--muted);font-size:.9rem}
+.empty{margin:0;color:var(--muted)}
+/* Echo */
+.echo{grid-area:echo}
+.echo .who{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.echo .who strong{font-size:1.1rem}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;margin:10px 0 0}
+.metrics div{min-width:0}
+.metrics dt{color:var(--muted);font-weight:500;font-size:.9rem}
+.metrics dd{margin:0;color:var(--muted);font-size:.9rem;line-height:1.25}
+.metrics dd b{display:block;color:var(--ink);font-weight:700;font-size:1.25rem;line-height:1.15}
+.read{margin:12px 0 0;padding:10px 12px;border-radius:10px;background:var(--chip);line-height:1.35}
+.small{font-size:.85rem;color:var(--muted);margin:8px 0 0}
+/* Controls */
+.ctrl{grid-area:ctrl}
+.toggles{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.toggles li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.toggles li:last-child{border-bottom:0}
+.toggles .name{font-weight:600}
+.toggles .desc{grid-column:1;color:var(--muted);font-size:.9rem;line-height:1.3}
+.switch{grid-row:1/3;grid-column:2;width:48px;height:28px;border-radius:14px;border:0;background:var(--line);position:relative;cursor:pointer;flex:none}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s ease}
+.switch[aria-checked="true"]{background:var(--accent)}
+.switch[aria-checked="true"]::after{transform:translateX(20px)}
+.tog .switch{grid-row:auto;grid-column:auto}
+.scene{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.note{grid-area:note;margin:0;color:var(--muted);font-size:.9rem;max-width:78ch}
+@media (prefers-reduced-motion: reduce){ .switch::after{transition:none} }
+/* ---- Suite shell ---- */
+.app{background:var(--bg)}
+.app .bar{max-width:1240px;margin:0 auto;padding:10px 14px 6px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between}
+.app h1{margin:0;font-size:1.6rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
+.app .sub{margin:3px 0 0;color:var(--muted);font-size:.92rem}
+.actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.actions .btn{min-height:38px;padding:5px 11px}
+.btn[aria-pressed="true"].warn{background:#F2C94C;border-color:#F2C94C;color:#3A2A00}
+.alert{position:fixed;left:0;right:0;bottom:0;z-index:20;padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));pointer-events:none}
+.alert>div{pointer-events:auto;max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;background:var(--alert);color:var(--alert-ink);border-radius:14px;padding:10px 14px;font-size:1.05rem;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+body.has-alert{padding-bottom:84px}
+.alert .btn{background:#FFFFFF;color:#13262D;border:0;min-height:40px}
+.alert>div.muted-al{background:var(--chip);color:var(--ink)}
+.alert b{font-size:1.2rem;letter-spacing:.03em;margin-right:6px}
+.alert .btn{min-height:36px}
+.soundhint{max-width:1240px;margin:0 auto 6px;padding:0 14px;color:var(--muted);font-size:.9rem}
+.tabs{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:0 max(10px,calc((100% - 1240px)/2 + 10px));display:flex;gap:2px;overflow-x:auto}
+.tabs button{border:0;background:transparent;color:var(--muted);font-weight:600;font-size:1rem;padding:10px 14px;min-height:44px;border-bottom:3px solid transparent;cursor:pointer;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tabs .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--alert);margin-left:6px;vertical-align:middle}
+.wrap{max-width:1240px;margin:0 auto;padding:12px 12px 24px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr)}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
+.stat span{display:block;color:var(--muted);font-size:.85rem}.stat strong{display:block;font-size:1.35rem;font-weight:700;line-height:1.2}
+.ngrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px}
+.node{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:10px 12px;display:grid;gap:3px;align-content:start}
+.node.fish{border-color:var(--alert);box-shadow:inset 0 0 0 1px var(--alert)}
+.node.off{opacity:.65}
+.node .hd{display:flex;justify-content:space-between;gap:6px;align-items:baseline;font-weight:600;font-size:1.05rem}
+.node .sm{color:var(--muted);font-size:.86rem;line-height:1.3}
+.bat{display:flex;align-items:center;gap:8px;font-size:.88rem;color:var(--muted)}
+.bat .bar{flex:1;height:6px;background:var(--chip);border-radius:3px;overflow:hidden}.bat .bar i{display:block;height:100%;background:var(--accent)}
+.node.low .bat .bar i{background:#E0A43A}
+.son{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid var(--line);font-size:.9rem}
+.linkbtn{border:0;background:transparent;color:var(--accent);font-weight:600;padding:4px 0;cursor:pointer;justify-self:start;min-height:32px}
+.btn.small{min-height:34px;padding:4px 10px}
+.tablewrap{overflow-x:auto}
+table.rt{border-collapse:collapse;width:100%;font-size:.92rem;min-width:720px}
+table.rt th,table.rt td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right;white-space:nowrap}
+table.rt th:first-child,table.rt td:first-child{text-align:left}
+table.rt th{color:var(--muted);font-weight:600}
+.form{display:grid;gap:10px}
+.form label.f{display:grid;gap:4px;font-weight:600}
+.form input[type=number],.form select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-height:42px}
+.form small{color:var(--muted);font-weight:400}
+.msg{min-height:1.4em;color:var(--muted)}
+.sgrid{grid-template-columns:minmax(0,1fr)}
+@media (min-width:920px){.sgrid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}}
+dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt{color:var(--muted)}dl.kv dd{margin:0;font-weight:600}
+</style>
 </head>
 <body>
-  <div class="container">
-    <header class="header">
-      <h1>Ice Fishing Monitor <button id="sound-toggle" onclick="toggleSound()" style="font-size:16px;background:none;border:none;cursor:pointer">🔊</button></h1>
-      <div class="header-info">
-        <span id="uptime">Uptime: --</span>
-        <span id="node-count">Nodes: --</span>
-        <span id="update-time">Updated: --</span>
-      </div>
-    </header>
-    <div id="alert-banner" class="alert-banner">FISH ON!</div>
-    <button id="silence-btn" class="silence-btn" onclick="toggleSilence()">Silence Alerts</button>
-    <div id="node-grid" class="node-grid"></div>
-    <div class="legend">
-      <div class="legend-item"><div class="legend-dot ok"></div> Online</div>
-      <div class="legend-item"><div class="legend-dot fish"></div> FISH ON!</div>
-      <div class="legend-item"><div class="legend-dot lowbat"></div> Low Batt</div>
-      <div class="legend-item"><div class="legend-dot offline"></div> Offline</div>
+<header class="app">
+  <div class="bar">
+    <div><h1>Ice Fishing</h1><p class="sub" id="sysline">Connecting to the chalet…</p></div>
+    <div class="actions">
+      <span class="simb" id="testb" hidden>TEST MODE</span>
+      <button class="btn" id="soundBtn" type="button" aria-pressed="true">Sound on</button>
+      <button class="btn" id="silenceBtn" type="button" aria-pressed="false">Silence alerts</button>
     </div>
-    <div class="stats-grid">
-      <div class="stat-card"><div class="stat-value" id="lora-rx">--</div><div class="stat-label">LoRa RX</div></div>
-      <div class="stat-card"><div class="stat-value" id="lora-tx">--</div><div class="stat-label">LoRa TX</div></div>
-      <div class="stat-card"><div class="stat-value" id="wifi-mode">--</div><div class="stat-label">WiFi</div></div>
-    </div>
-    <footer class="footer">Ice Fishing Mesh Monitor v2.0 | <a href="/settings" style="color:#4fc3f7">Settings</a> | <a href="/remote-config" style="color:#4fc3f7">Remote Config</a> | <a href="/sonar" style="color:#4fc3f7">Sonar</a> | <a href="/radio" style="color:#4fc3f7">Radio</a></footer>
   </div>
-  <script>
-    let silenced = false;
-    let alertSoundEnabled = localStorage.getItem('alertSound') !== 'false';
-    let lastAlertState = {};
-    let audioContext = null;
+  <div class="alert" id="alert" role="alert" hidden><div id="alertBox"><span><b>FISH ON</b><span id="alertWho"></span></span><button class="btn" id="alertSilence" type="button">Silence</button></div></div>
+  <div class="soundhint" id="soundHint" hidden>Tap anywhere on the page to allow the alert sound on this phone.</div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button type="button" role="tab" data-tab="holes" aria-selected="true">Holes<span class="dot" id="holesDot" hidden></span></button>
+    <button type="button" role="tab" data-tab="sonar" aria-selected="false">Sonar</button>
+    <button type="button" role="tab" data-tab="radio" aria-selected="false">Radio</button>
+    <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+  </nav>
+</header>
 
-    function formatUptime(s) { const h = Math.floor(s/3600), m = Math.floor((s%3600)/60); return h > 0 ? h+'h '+m+'m' : m+'m'; }
+<div class="panel" id="tab-holes" role="tabpanel">
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><span>Holes online</span><strong id="sOnline">–</strong></div>
+      <div class="stat"><span>Fish on</span><strong id="sFish">–</strong></div>
+      <div class="stat"><span>LoRa mesh</span><strong id="sLora">–</strong></div>
+      <div class="stat"><span>Wi-Fi</span><strong id="sWifi">–</strong></div>
+    </div>
+    <div class="ngrid" id="ngrid"></div>
+    <p class="hint" style="margin:0">Rename a hole with its Rename link. Holes with a sonar show their last summary; Watch opens the live sonar.</p>
+  </div>
+</div>
 
-    // Web Audio API alert beep
-    function playAlertBeep() {
-      if (!alertSoundEnabled) return;
-      try {
-        if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioContext.state === 'suspended') audioContext.resume();
-        const oscillator = audioContext.createOscillator();
-        const gainNode = audioContext.createGain();
-        oscillator.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        oscillator.frequency.value = 800;
-        oscillator.type = 'square';
-        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
-        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-        oscillator.start(audioContext.currentTime);
-        oscillator.stop(audioContext.currentTime + 0.5);
-      } catch(e) { console.log('Audio error:', e); }
+<div class="panel" id="tab-sonar" role="tabpanel" hidden>
+<div class="top">
+  <div>
+    <h1 id="ttl">Sonar</h1>
+    <p class="sub" id="sub">Pick a hole to stream it</p>
+  </div>
+  <div class="playback">
+    <button class="btn" id="play" type="button" aria-pressed="true">Pause</button>
+    <span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span>
+  </div>
+  <div class="modebar">
+    <span class="simb" id="simb" hidden>FAKE DATA</span>
+    <span class="tog"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
+    <span class="hint" id="st"></span>
+  </div>
+</div>
+
+<main class="grid nofocus" id="main">
+  <section class="card holes" aria-label="Holes">
+    <h2>Holes</h2>
+    <div class="hgrid" id="holes"></div>
+    <p class="hint" style="margin:8px 0 0">Tap a hole to stream it (about 1 s behind). The others send a summary every few seconds.</p>
+  </section>
+
+  <section class="water inst" aria-label="Flasher">
+    <div class="flash-wrap"><canvas id="flash" aria-label="Flasher dial showing the latest ping"></canvas></div>
+    <div class="readouts">
+      <div><span>Bait line</span><strong id="roBait">–</strong></div>
+      <div><span>Bottom type</span><strong id="roBottom">–</strong></div>
+      <div><span>Noise floor</span><strong id="roNoise">–</strong></div>
+    </div>
+  </section>
+
+  <section class="water fall" aria-label="Waterfall">
+    <div class="fall-head"><h2>Last 60 seconds</h2><p>4 pings per second, newest on the right</p></div>
+    <div class="stack"><canvas id="fall" aria-label="Waterfall of the last 240 pings"></canvas><canvas id="fallOv" aria-hidden="true"></canvas></div>
+    <div class="zoom-head"><strong>Bottom lock</strong><span id="zoomSpan">last 5 ft above bottom, stretched</span></div>
+    <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
+    <div class="legend">
+      <span><i style="background:#8FA9B2"></i>Unchanged scene: bottom, weeds</span>
+      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong</span>
+      <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
+    </div>
+  </section>
+
+  <section class="card tgt" aria-label="Targets under the hole">
+    <h2>Under the hole now</h2>
+    <div class="tlist" id="tlist"></div>
+  </section>
+
+  <section class="card echo" aria-label="Echo character">
+    <h2>Echo character</h2>
+    <div class="who"><strong id="echoWho">–</strong><span class="muted" id="echoDepth"></span></div>
+    <dl class="metrics">
+      <div><dt>Flicker</dt><dd><b id="mFlick">–</b>change in strength ping to ping</dd></div>
+      <div><dt>Frequency change</dt><dd><b id="mSpread">–</b>how differently 190 and 210 kHz see it</dd></div>
+      <div><dt>Echo length</dt><dd><b id="mWidth">–</b><span id="mWidthNote">the pulse alone is about 4 in</span></dd></div>
+      <div><dt>Versus bait</dt><dd><b id="mRel">–</b>strength relative to your lure</dd></div>
+    </dl>
+    <p class="read" id="echoRead">Pick a target to see its echo.</p>
+    <p class="small">The echo shape at 190/200/210 kHz stays on the hole: too big for the radio. These numbers are computed there, every 2 s.</p>
+  </section>
+
+  <section class="card ctrl" aria-label="Display">
+    <h2>Display</h2>
+    <ul class="toggles" id="toggles"></ul>
+    <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
+  </section>
+
+  <p class="note" id="note">Processing runs on each hole (bottom lock, noise floor, targets, static scene); the radio carries targets, changed cells and a 4-level static scene, so the picture is coarser than raw sonar.</p>
+</main>
+</div>
+
+<div class="panel" id="tab-radio" role="tabpanel" hidden>
+  <div class="wrap">
+    <section class="card">
+      <h2>Radio / range test</h2>
+      <div class="form">
+        <label class="f">Test mode
+          <select id="rTest"><option value="0">Off (normal)</option><option value="1">Rotate SF9 / SF8 / SF7</option><option value="2">Fixed SF9/500</option><option value="3">Fixed SF8/500</option><option value="4">Fixed SF7/500</option></select>
+        </label>
+        <span class="tog"><span id="lblAd">Adaptive SF (per hub)</span><button type="button" class="switch" role="switch" id="rAdapt" aria-labelledby="lblAd" aria-checked="false"></button></span>
+        <div><button class="btn" id="rReset" type="button">Reset stats</button></div>
+      </div>
+      <p class="hint" id="rStatus" style="margin:10px 0 0"></p>
+    </section>
+    <section class="card">
+      <h2>Hubs</h2>
+      <div class="tablewrap"><table class="rt" id="rTable"></table></div>
+      <p class="hint" style="margin:10px 0 0">Per hub and per mode: packets received / slots scheduled at the chalet, RSSI/SNR at the chalet. Beacon columns: the chalet beacon as heard by the hub, beacons lost in the last 64, timing error. Sensitivity (theory, not measured): SF9/500 −123.5, SF8/500 −121, SF7/500 −118.5 dBm.</p>
+    </section>
+  </div>
+</div>
+
+<div class="panel" id="tab-settings" role="tabpanel" hidden>
+  <div class="wrap sgrid">
+    <section class="card">
+      <h2>Alerts</h2>
+      <form class="form" id="setForm">
+        <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
+        <label class="f">Alert hold time (s)<input type="number" id="fHold" min="5" max="300"><small>Minimum time an alert stays on (5-300)</small></label>
+        <label class="f">Heartbeat interval (s)<input type="number" id="fHeart" min="10" max="600"><small>Status broadcast interval (10-600)</small></label>
+        <span class="tog"><span id="lblReed">Flag switch triggers on HIGH</span><button type="button" class="switch" role="switch" id="fReed" aria-labelledby="lblReed" aria-checked="false"></button></span>
+        <div><button class="btn" type="submit" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)">Save</button> <span class="msg" id="setMsg"></span></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>This phone</h2>
+      <div class="form">
+        <span class="tog"><span id="lblSnd">Alert sound</span><button type="button" class="switch" role="switch" id="fSound" aria-labelledby="lblSnd" aria-checked="true"></button></span>
+        <div><span class="hint">Depth units</span><br><span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span></div>
+        <div><button class="btn" id="testSound" type="button">Test the sound</button></div>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Sonar</h2>
+      <div class="form">
+        <span class="tog"><span id="lblSim2">Sonar test mode (fake data on every hub and node)</span><button type="button" class="switch" role="switch" id="fSim" aria-labelledby="lblSim2" aria-checked="false"></button></span>
+        <p class="hint" style="margin:0">Nodes stay awake while it is on (battery). The setting is kept after a reboot: turn it off after testing.</p>
+      </div>
+    </section>
+    <section class="card">
+      <h2>About</h2>
+      <dl class="kv" id="about"></dl>
+      <p class="hint" style="margin:10px 0 0">Remote configuration of hubs is not available in firmware v2 yet.</p>
+    </section>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+
+/* ---------- Palettes (prototype) ---------- */
+function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+function lut(stops) {
+  const L = new Uint8ClampedArray(256 * 3);
+  for (let k = 0; k < 256; k++) {
+    const x = k / 255; let j = 0;
+    while (j < stops.length - 2 && x > stops[j + 1][0]) j++;
+    const [x0, c0] = stops[j], [x1, c1] = stops[j + 1], u = clamp((x - x0) / (x1 - x0), 0, 1), a = hex(c0), b = hex(c1);
+    for (let ch = 0; ch < 3; ch++) L[k * 3 + ch] = a[ch] + (b[ch] - a[ch]) * u;
+  }
+  return L;
+}
+const PAL = lut([[0, '#0A1E26'], [0.16, '#11414C'], [0.32, '#1B7778'], [0.48, '#58AE7C'], [0.62, '#D3C04A'], [0.76, '#EE8B2F'], [0.9, '#D8432F'], [1, '#FFE6D2']]);
+const GREY = lut([[0, '#0A1E26'], [1, '#8FA9B2']]);
+const palCss = v => { const k = Math.round(clamp(v, 0, 1) * 255) * 3; return `rgb(${PAL[k]},${PAL[k + 1]},${PAL[k + 2]})`; };
+const BGV = [0, 0.13, 0.30, 0.55];      // static scene level -> grey value (dimmed like the prototype)
+const RV = [0, 0.35, 0.55, 0.75];       // changed-cell level -> colour value
+const HARD = [{ c: '#C9A25C', t: 'Hard' }, { c: '#A89A6A', t: 'Medium' }, { c: '#7E8A5A', t: 'Soft' }, { c: '#86A2AB', t: '–' }];
+const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
+
+/* ---------- State ---------- */
+let units = 'ft';
+try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
+const opts = { overlays: true, bgsep: true };
+let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
+let selSlot = null, userPicked = false, playing = true;
+
+const fmtD = m => units === 'ft' ? (m * 3.28084).toFixed(1) + ' ft' : m.toFixed(2) + ' m';
+const fmtNum = m => units === 'ft' ? (m * 3.28084).toFixed(1) : m.toFixed(2);
+const nameOf = n => names[n] || ('Hole ' + n);
+function labelOf(t, bottom) { return t.slot === 0 ? 'Bait' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
+function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of the prototype colour scale (46 dB span)
+
+/* ---------- Server ---------- */
+function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+function loadList() { fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }   // called by the suite with /api/status
+function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
+function loadPings() {
+  if (!focus) return; const n = focus;
+  fetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
+    if (n !== focus) return;
+    (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
+  }).catch(() => {});
+}
+
+/* ---------- Holes ---------- */
+function renderHoles() {
+  $('sim').setAttribute('aria-checked', String(!!L.sim)); $('simb').hidden = !L.sim;
+  $('st').textContent = 'frame ' + (L.frame || 0) + ' | blocks ' + (L.blocks_ok || 0) + ' ok, ' + (L.blocks_bad || 0) + ' bad';
+  const nodes = (L.nodes || []).slice().sort((a, b) => a.node - b.node);
+  let h = '';
+  nodes.forEach(n => {
+    const ln = lines[n.node] || {}, fish = !!ln.fish, off = ln.online === false || n.age > 30, foc = n.node === L.focus;
+    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : '';
+    h += `<button type="button" class="hole${fish ? ' fish' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
+      `<span class="hd"><span>${nameOf(n.node)}</span>${badge}</span>` +
+      `<span class="big">${n.fish ? `<i class="sw" style="background:${palCss(RV[n.lvl] || 0.5)}"></i>${n.fish} fish` : 'No fish'}</span>` +
+      `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
+      `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
+      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span></button>`;
+  });
+  if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
+  $('holes').innerHTML = h;
+  if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
+  const f = nodes.find(n => n.node === focus);
+  if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
+}
+$('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
+$('sim').addEventListener('click', () => post({ sim: !L.sim }));
+$('stop').addEventListener('click', () => post({ focus: 0 }));
+
+function setFocus(n) {
+  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
+  $('main').classList.toggle('nofocus', !n);
+  $('ttl').textContent = n ? nameOf(n) : 'Sonar';
+  $('sub').textContent = n ? 'Live sonar, about 1 s behind' + (L.sim ? ' · simulated pings' : '') : 'Pick a hole to stream it';
+  if (n) { loadPings(); render(); }
+}
+
+/* ---------- Pings -> display records ---------- */
+// p = [seq, index, bottom_cm, [[slot, depth_cm, strength, width]], [[bin, level]], hard, nf_neg, [[slot, flick, spread, elen, mature]]]
+function addPing(p) {
+  const prev = recs.length ? recs[recs.length - 1] : null;
+  const b = p[2] < 2047 ? p[2] / 100 : (prev ? prev.b : null);
+  const rec = { i: p[1], b, hard: p[5], nf: -p[6], t: p[3].map(x => ({ slot: x[0], d: x[1] / 100, s: x[2] / 31, w: x[3] })), r: p[4], px: null };
+  rec.t.forEach(t => t.label = labelOf(t, b));
+  (p[7] || []).forEach(x => { info[x[0]] = { flick: x[1] * 0.25, spread: x[2] * 0.5, elen: x[3] * BIN, mature: !!x[4], i: rec.i }; });
+  recs.push(rec); if (recs.length > HIST) recs.shift();
+}
+function pixels(rec) {
+  if (rec.px) return rec.px;
+  const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
+  const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
+  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? GREY : PAL, BGV[l]); } }
+  for (const r of rec.r) put(r[0], PAL, RV[r[1]]);
+  for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
+    const j0 = Math.round(t.d / BIN);
+    for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
+    const v = clamp(Math.max(t.s, 0.5) * 1.12, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
+  }
+  return rec.px = px;
+}
+function baitLine() {
+  const ds = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) for (const t of recs[k].t) if (t.slot === 0) ds.push(t.d);
+  if (!ds.length) return null; ds.sort((a, b) => a - b); return ds[ds.length >> 1];
+}
+function velOf(slot) {
+  const n = recs.length; if (!n) return 0;
+  const cur = recs[n - 1].t.find(t => t.slot === slot); if (!cur) return 0;
+  for (let k = n - 5; k >= Math.max(0, n - 9); k--) { const o = recs[k].t.find(t => t.slot === slot); if (o) return (cur.d - o.d) / ((n - 1 - k) * 0.25); }
+  return 0;
+}
+function trendOf(vel) { return vel < -0.04 ? 'rising' : vel > 0.04 ? 'sinking' : 'holding'; }
+const ARROW = { rising: '↑', sinking: '↓', holding: '' };
+
+/* ---------- Canvases ---------- */
+const fallC = $('fall'), fallX = fallC.getContext('2d'); fallC.width = HIST; fallC.height = N; const fallImg = fallX.createImageData(HIST, N);
+const zoomC = $('zoom'), zoomX = zoomC.getContext('2d'); zoomC.width = HIST; zoomC.height = ZR; const zoomImg = zoomX.createImageData(HIST, ZR);
+const ovC = $('fallOv'), ovX = ovC.getContext('2d'), zovC = $('zoomOv'), zovX = zovC.getContext('2d');
+const flC = $('flash'), flX = flC.getContext('2d');
+function fit(cv) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  return { w, h, dpr };
+}
+function drawFall() {
+  const data = fallImg.data, off = HIST - recs.length;
+  for (let x = 0; x < HIST; x++) {
+    const p = x >= off ? pixels(recs[x - off]) : null;
+    for (let i = 0; i < N; i++) {
+      const o = (i * HIST + x) * 4;
+      if (p) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
+      data[o + 3] = 255;
     }
-
-    function checkForNewAlerts(nodes) {
-      nodes.forEach(n => {
-        const wasAlert = lastAlertState[n.id] || false;
-        const isAlert = n.fish;
-        if (isAlert && !wasAlert) playAlertBeep();
-        lastAlertState[n.id] = isAlert;
-      });
+  }
+  fallX.putImageData(fallImg, 0, 0);
+}
+function drawZoom() {
+  const data = zoomImg.data, off = HIST - recs.length;
+  for (let x = 0; x < HIST; x++) {
+    const rec = x >= off ? recs[x - off] : null, p = rec ? pixels(rec) : null;
+    const start = rec && rec.b != null ? Math.round(rec.b / BIN) - (ZR - 6) : 0;
+    for (let r = 0; r < ZR; r++) {
+      const o = (r * HIST + x) * 4, i = start + r;
+      if (p && rec.b != null && i >= 0 && i < N) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
+      data[o + 3] = 255;
     }
-
-    function toggleSound() {
-      alertSoundEnabled = !alertSoundEnabled;
-      localStorage.setItem('alertSound', alertSoundEnabled);
-      document.getElementById('sound-toggle').textContent = alertSoundEnabled ? '🔊' : '🔇';
-      if (alertSoundEnabled && audioContext && audioContext.state === 'suspended') audioContext.resume();
+  }
+  zoomX.putImageData(zoomImg, 0, 0);
+  const { w, h, dpr } = fit(zovC); zovX.clearRect(0, 0, w, h);
+  if (opts.overlays && recs.length) {
+    const y = ((ZR - 6) / ZR) * h;
+    zovX.strokeStyle = HARD[recs[recs.length - 1].hard].c; zovX.lineWidth = 1.5 * dpr;
+    zovX.setLineDash([4 * dpr, 4 * dpr]); zovX.beginPath(); zovX.moveTo(0, y); zovX.lineTo(w, y); zovX.stroke(); zovX.setLineDash([]);
+    zovX.font = `${11 * dpr}px ${FONT}`; zovX.fillStyle = 'rgba(215,230,234,0.75)'; zovX.textBaseline = 'bottom';
+    zovX.fillText('bottom', 6 * dpr, y - 3 * dpr);
+  }
+}
+function pill(g, text, x, y, dpr, color) {
+  g.font = `600 ${12 * dpr}px ${FONT}`;
+  const tw = g.measureText(text).width, ph = 18 * dpr, pw = tw + 14 * dpr;
+  const px = Math.max(2 * dpr, x - pw), py = y - ph / 2;
+  g.fillStyle = 'rgba(10,30,38,0.82)'; g.beginPath();
+  if (g.roundRect) g.roundRect(px, py, pw, ph, 9 * dpr); else g.rect(px, py, pw, ph);
+  g.fill(); g.fillStyle = color; g.fillRect(px + 6 * dpr, py + ph / 2 - 3 * dpr, 3 * dpr, 6 * dpr);
+  g.fillStyle = '#E6F0F2'; g.textBaseline = 'middle'; g.fillText(text, px + 12 * dpr, y + 0.5 * dpr);
+}
+function drawOverlay() {
+  const { w, h, dpr } = fit(ovC), g = ovX; g.clearRect(0, 0, w, h);
+  const yOf = dm => dm / MAXD * h, off = HIST - recs.length, xOf = k => ((k + off) + 0.5) / HIST * w;
+  const step = units === 'ft' ? 5 / 3.28084 : 1;
+  g.font = `${11 * dpr}px ${FONT}`; g.textBaseline = 'bottom';
+  for (let dm = step; dm < MAXD - 0.05; dm += step) {
+    const y = Math.round(yOf(dm)) + 0.5;
+    g.strokeStyle = 'rgba(215,230,234,0.09)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+    g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), 6 * dpr, y - 2 * dpr);
+  }
+  g.fillStyle = 'rgba(215,230,234,0.5)';
+  g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
+  const nw = g.measureText('now').width; g.fillText('now', w - nw - 6 * dpr, h - 5 * dpr);
+  if (!opts.overlays || !recs.length) return;
+  const bait = baitLine();
+  if (bait != null) {
+    const yb = yOf(bait);
+    g.strokeStyle = 'rgba(230,240,242,0.35)'; g.lineWidth = 1 * dpr; g.setLineDash([6 * dpr, 6 * dpr]);
+    g.beginPath(); g.moveTo(0, yb); g.lineTo(w, yb); g.stroke(); g.setLineDash([]);
+    g.fillStyle = 'rgba(230,240,242,0.6)'; g.fillText('bait line', 26 * dpr, yb - 3 * dpr);
+  }
+  g.beginPath(); let started = false;
+  recs.forEach((r, k) => { if (r.b == null) return; const x = xOf(k), y = yOf(r.b); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true; });
+  g.strokeStyle = HARD[recs[recs.length - 1].hard].c; g.lineWidth = 2 * dpr; g.stroke();
+  const tl = new Map();
+  recs.forEach((r, k) => { for (const t of r.t) { if (t.label === 'Near bottom') continue; if (!tl.has(t.slot)) tl.set(t.slot, []); tl.get(t.slot).push({ x: xOf(k), y: yOf(t.d), v: t.s, k }); } });
+  for (const [slot, pts] of tl) {
+    g.beginPath(); let pk = -9;
+    for (const p of pts) { if (p.k - pk > 1) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); pk = p.k; }
+    const last = pts[pts.length - 1];
+    g.strokeStyle = palCss(clamp(Math.max(0.5, last.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
+  }
+  const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'Bait') && t.s > 0.08).sort((a, b) => a.d - b.d);
+  let lastY = -1e9;
+  for (const t of cur) {
+    let y = yOf(t.d) - 12 * dpr; if (y - lastY < 20 * dpr) y = lastY + 20 * dpr; lastY = y;
+    const a = ARROW[trendOf(velOf(t.slot))];
+    pill(g, `${t.label} ${fmtD(t.d)}${a ? ' ' + a : ''}`, w - 8 * dpr, y, dpr, palCss(Math.max(0.5, t.s)));
+  }
+}
+function drawFlash() {
+  const { w, h, dpr } = fit(flC), g = flX; g.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 4 * dpr, r1 = R * 0.95, r0 = R * 0.75;
+  const SPAN = Math.PI * 2 * 0.92, A0 = -Math.PI / 2, ang = i => A0 + (i / N) * SPAN;
+  g.beginPath(); g.arc(cx, cy, r1, A0, A0 + SPAN); g.arc(cx, cy, r0, A0 + SPAN, A0, true); g.closePath(); g.fillStyle = '#0F2A33'; g.fill();
+  const n = recs.length;
+  for (const [k, alpha] of [[n - 3, 0.22], [n - 2, 0.42], [n - 1, 1]]) {
+    if (k < 0) continue; const p = pixels(recs[k]); g.globalAlpha = alpha;
+    for (let i = 0; i < N; i++) {
+      const Rr = p[i * 4], Gg = p[i * 4 + 1], Bb = p[i * 4 + 2]; if (Rr + Gg + Bb < 95) continue;
+      g.beginPath(); g.arc(cx, cy, r1, ang(i), ang(i + 1) + 0.003); g.arc(cx, cy, r0, ang(i + 1) + 0.003, ang(i), true); g.closePath();
+      g.fillStyle = `rgb(${Rr},${Gg},${Bb})`; g.fill();
     }
+  }
+  g.globalAlpha = 1;
+  if (n) for (const t of recs[n - 1].t) {
+    if (t.s <= 0.08) continue; const i = t.d / BIN;
+    g.beginPath(); g.arc(cx, cy, r1 + 1 * dpr, ang(i - 2), ang(i + 2)); g.arc(cx, cy, r0 - 1 * dpr, ang(i + 2), ang(i - 2), true); g.closePath();
+    g.fillStyle = palCss(clamp(Math.max(0.5, t.s) * 1.12, 0, 1)); g.fill();
+  }
+  const step = units === 'ft' ? 5 / 3.28084 : 1;
+  g.font = `${11 * dpr}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let dm = 0; dm < MAXD - 0.05; dm += step) {
+    const a = A0 + (dm / MAXD) * SPAN, ca = Math.cos(a), sa = Math.sin(a);
+    g.strokeStyle = 'rgba(215,230,234,0.5)'; g.lineWidth = 1 * dpr;
+    g.beginPath(); g.moveTo(cx + ca * (r0 - 2 * dpr), cy + sa * (r0 - 2 * dpr)); g.lineTo(cx + ca * (r0 - 7 * dpr), cy + sa * (r0 - 7 * dpr)); g.stroke();
+    g.fillStyle = 'rgba(215,230,234,0.6)';
+    g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), cx + ca * (r0 - 16 * dpr), cy + sa * (r0 - 16 * dpr));
+  }
+  const bait = baitLine();
+  if (opts.overlays && bait != null) {
+    const a = A0 + (bait / MAXD) * SPAN;
+    g.strokeStyle = 'rgba(230,240,242,0.8)'; g.lineWidth = 2 * dpr; g.beginPath();
+    g.moveTo(cx + Math.cos(a) * (r1 + 1 * dpr), cy + Math.sin(a) * (r1 + 1 * dpr)); g.lineTo(cx + Math.cos(a) * (r1 - 6 * dpr), cy + Math.sin(a) * (r1 - 6 * dpr)); g.stroke();
+  }
+  const cur = n ? recs[n - 1] : null;
+  g.fillStyle = '#E8F1F3'; g.font = `700 ${R * 0.36}px ${FONT}`; g.textBaseline = 'alphabetic';
+  g.fillText(cur && cur.b != null ? fmtNum(cur.b) : '–', cx, cy + R * 0.08);
+  g.fillStyle = 'rgba(215,230,234,0.7)'; g.font = `500 ${R * 0.11}px ${FONT}`;
+  g.fillText(units === 'ft' ? 'ft to bottom' : 'm to bottom', cx, cy + R * 0.25);
+  g.textAlign = 'left';
+}
 
-    function editNodeName(nodeId, currentName) {
-      const newName = prompt('Enter name for Node ' + nodeId + ' (max 15 chars):', currentName || '');
-      if (newName !== null && newName.length <= 15) {
-        fetch('/api/node/name', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nodeId: nodeId, name: newName })
-        }).then(r => r.json()).then(data => {
-          if (data.success) updateStatus();
-        }).catch(e => console.error(e));
-      }
+/* ---------- Cards ---------- */
+function liveTargets() {
+  if (!recs.length) return [];
+  return recs[recs.length - 1].t.filter(t => t.s > 0.08).slice().sort((a, b) => a.d - b.d).slice(0, 5);
+}
+function updTargets() {
+  const el = $('tlist'), list = liveTargets();
+  if (!list.length) { el.innerHTML = '<p class="empty">' + (recs.length ? 'Nothing moving under the hole right now.' : 'Waiting for pings…') + '</p>'; return; }
+  const bait = list.find(t => t.slot === 0);
+  el.innerHTML = list.map(t => {
+    const rel = bait && t.slot !== 0 ? toDb(t.s) - toDb(bait.s) : null, tr = trendOf(velOf(t.slot));
+    const meta = [tr === 'holding' ? 'holding depth' : tr, rel == null ? '' : `${rel > 0 ? '+' : ''}${rel.toFixed(0)} dB vs bait`].filter(Boolean).join(', ');
+    return `<button type="button" class="trow" data-slot="${t.slot}" aria-pressed="${t.slot === selSlot}"><span class="dot" style="background:${palCss(Math.max(0.5, t.s))}"></span><span class="nm">${t.label}</span><span class="dp">${fmtD(t.d)}</span><span class="meta">${meta}</span></button>`;
+  }).join('');
+}
+function pickDefault() {
+  const rank = t => t.label === 'Fish' ? 0 : t.label === 'Near bottom' ? 1 : 2;
+  const ts = liveTargets().slice().sort((a, b) => rank(a) - rank(b) || b.s - a.s);
+  return ts[0] || null;
+}
+function updEcho() {
+  const list = liveTargets();
+  let T = userPicked && selSlot != null ? list.find(t => t.slot === selSlot) : null;
+  if (!T) { userPicked = false; T = pickDefault(); selSlot = T ? T.slot : null; }
+  const set = (id, v) => { $(id).textContent = v; };
+  set('mWidthNote', units === 'ft' ? 'the pulse alone is about 4 in' : 'the pulse alone is about 10 cm');
+  if (!T) { set('echoWho', 'No target'); set('echoDepth', ''); ['mFlick', 'mSpread', 'mWidth', 'mRel'].forEach(i => set(i, '–')); set('echoRead', 'Pick a target to see its echo.'); return; }
+  const I = info[T.slot], bait = list.find(t => t.slot === 0 && t !== T);
+  const rel = bait ? toDb(T.s) - toDb(bait.s) : null;
+  set('echoWho', T.label); set('echoDepth', fmtD(T.d));
+  set('mFlick', I ? I.flick.toFixed(1) + ' dB' : '–');
+  set('mSpread', I ? I.spread.toFixed(1) + ' dB' : '–');
+  set('mWidth', I ? (units === 'ft' ? (I.elen * 39.37).toFixed(1) + ' in' : (I.elen * 100).toFixed(0) + ' cm') : '–');
+  set('mRel', rel == null ? '–' : `${rel > 0 ? '+' : ''}${rel.toFixed(1)} dB`);
+  let read;
+  if (!I || !I.mature) read = 'Collecting pings for this target.';
+  else if (I.spread >= 3.5 && I.flick >= 1.6) read = 'Flickers, and looks different at each frequency. That is typical of a swim bladder, so likely a fish.';
+  else if (I.spread < 2.5 && I.flick < 1.2) read = 'Steady, and the same at every frequency. That is typical of metal or a hard lure.';
+  else read = 'Mixed signature. Needs a few more pings to call.';
+  set('echoRead', read);
+}
+function updReadouts() {
+  const cur = recs.length ? recs[recs.length - 1] : null, bait = baitLine();
+  $('roBait').textContent = bait == null ? '–' : fmtD(bait);
+  $('roBottom').textContent = cur ? HARD[cur.hard].t : '–';
+  $('roNoise').textContent = cur ? cur.nf.toFixed(0) + ' dB' : '–';
+  $('zoomSpan').textContent = units === 'ft' ? 'last 5 ft above bottom, stretched' : 'last 1.5 m above bottom, stretched';
+}
+function render() { if (!focus || !visible()) return; drawFall(); drawZoom(); drawOverlay(); drawFlash(); updTargets(); updEcho(); updReadouts(); }
+const pickRow = e => { const b = e.target.closest('.trow'); if (!b) return; selSlot = Number(b.dataset.slot); userPicked = true; updTargets(); updEcho(); drawOverlay(); };
+$('tlist').addEventListener('click', pickRow);
+
+/* ---------- Controls ---------- */
+const TOGGLES = [
+  ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
+  ['bgsep', 'Static scene in grey', 'Bottom and weeds fade back. Anything that moves stays in colour.']
+];
+const tUl = $('toggles');
+tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
+function syncControls() {
+  tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
+  document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
+  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
+}
+tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
+document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
+$('play').addEventListener('click', () => { playing = !playing; syncControls(); });
+
+// playback: 4 pings/s; the radio delivers about one block per second, so catch up when the queue grows
+const visible = () => window.suiteTab === 'sonar';
+setInterval(() => {
+  if (!focus || !playing || !queue.length || !visible()) return;
+  if (queue.length > 40) queue.splice(0, queue.length - 12);
+  let n = 1 + Math.floor(queue.length / 8);
+  while (n-- && queue.length) addPing(queue.shift());
+  render();
+}, 250);
+setInterval(() => { if (visible()) loadPings(); }, 700); setInterval(loadList, 2000);
+let rz = null;
+new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length && visible()) render(); }); }).observe(document.body);
+window.sonarApi = {
+  list: () => L, fmtD: m => fmtD(m), onStatus,
+  focus: n => post({ focus: n }), setSim: on => post({ sim: on }),
+  show: () => { loadList(); requestAnimationFrame(() => { if (focus) { loadPings(); render(); } }); }
+};
+syncControls(); loadList();
+})();
+</script>
+<script>(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const api = (url, body) => fetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+const SON = () => window.sonarApi;
+let st = null, tab = 'holes', soundOn = true, actx = null, lastFish = {}, radio = null;
+try { soundOn = localStorage.getItem('alertSound') !== 'false'; } catch (e) { /* private mode */ }
+
+/* ---------- Tabs ---------- */
+function showTab(t) {
+  tab = t;
+  document.querySelectorAll('.tabs [role=tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
+  ['holes', 'sonar', 'radio', 'settings'].forEach(k => { $('tab-' + k).hidden = k !== t; });
+  try { history.replaceState(null, '', '#' + t); } catch (e) { /* file:// */ }
+  window.suiteTab = t;
+  if (t === 'sonar' && SON()) SON().show();
+  if (t === 'radio') loadRadio();
+  if (t === 'settings') { loadSettings(); renderAbout(); }
+  if (t === 'holes') renderNodes();
+}
+document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
+function initialTab() {
+  const h = (location.hash || '').slice(1), p = location.pathname.replace(/^\/+/, '');
+  for (const k of ['holes', 'sonar', 'radio', 'settings']) if (h === k || p === k) return k;
+  return 'holes';
+}
+
+/* ---------- Sound ---------- */
+function audio() {
+  try { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) { actx = null; }
+  return actx;
+}
+function beep() {
+  const c = audio(); if (!c) return;
+  try {
+    for (let k = 0; k < 3; k++) {
+      const o = c.createOscillator(), g = c.createGain(), t0 = c.currentTime + k * 0.35;
+      o.connect(g); g.connect(c.destination); o.frequency.value = 800; o.type = 'square';
+      g.gain.setValueAtTime(0.3, t0); g.gain.exponentialRampToValueAtTime(0.01, t0 + 0.25);
+      o.start(t0); o.stop(t0 + 0.26);
     }
+  } catch (e) { /* no audio */ }
+}
+function syncSound() {
+  $('soundBtn').textContent = soundOn ? 'Sound on' : 'Sound off'; $('soundBtn').setAttribute('aria-pressed', String(soundOn));
+  $('fSound').setAttribute('aria-checked', String(soundOn));
+  $('soundHint').hidden = !(soundOn && (!actx || actx.state !== 'running'));
+}
+function setSound(on) { soundOn = on; try { localStorage.setItem('alertSound', String(on)); } catch (e) { /* ignore */ } if (on) audio(); syncSound(); }
+$('soundBtn').addEventListener('click', () => setSound(!soundOn));
+$('fSound').addEventListener('click', () => setSound(!soundOn));
+$('testSound').addEventListener('click', () => beep());
+document.addEventListener('pointerdown', () => { if (soundOn) { audio(); setTimeout(syncSound, 200); } }, { capture: true });
 
-    function updateStatus() {
-      fetch('/api/status').then(r => r.json()).then(data => {
-        document.getElementById('uptime').textContent = 'Uptime: ' + formatUptime(data.uptime);
-        document.getElementById('node-count').textContent = 'Nodes: ' + data.node_count;
-        document.getElementById('update-time').textContent = 'Updated: ' + new Date().toLocaleTimeString();
-        if (data.lora) { document.getElementById('lora-rx').textContent = data.lora.rx_count || 0; document.getElementById('lora-tx').textContent = data.lora.tx_count || 0; }
-        document.getElementById('wifi-mode').textContent = data.wifi.sta_connected ? 'STA' : (data.wifi.ap_active ? 'AP' : '--');
-        const grid = document.getElementById('node-grid');
-        const banner = document.getElementById('alert-banner');
-        grid.innerHTML = '';
-        let hasAlert = false;
-        checkForNewAlerts(data.nodes);
-        data.nodes.forEach(n => {
-          const card = document.createElement('div');
-          card.className = 'node-card';
-          if (!n.online) card.classList.add('offline'); else card.classList.add('online');
-          if (n.fish) { card.classList.add('fish'); hasAlert = true; }
-          if (n.lowbat) card.classList.add('lowbat');
-          const pct = Math.min(100, Math.max(0, Math.round((n.battery - 3200) / 13)));
-          const status = !n.online ? 'OFFLINE' : (n.fish ? 'FISH ON!' : 'OK');
-          card.innerHTML = '<div class="node-id">' + n.id + '</div>' +
-            '<div class="node-name">' + (n.name || 'Node ' + n.id) + '</div>' +
-            '<div class="node-role">' + (n.role || '') + '</div>' +
-            '<div class="node-status">' + status + '</div>' +
-            '<div class="node-battery"><div class="bar"><div class="bar-fill" style="width:' + pct + '%"></div></div><span>' + pct + '%</span></div>';
-          card.onclick = () => editNodeName(n.id, n.name);
-          card.style.cursor = 'pointer';
-          grid.appendChild(card);
-        });
-        banner.classList.toggle('active', hasAlert && !silenced);
-        const btn = document.getElementById('silence-btn');
-        btn.classList.toggle('silenced', silenced);
-        btn.textContent = silenced ? 'Alerts Silenced - Tap to Enable' : 'Silence Alerts';
-      }).catch(e => console.error(e));
-    }
+/* ---------- Status + alerts (every tab) ---------- */
+const fmtUp = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; };
+const nodeName = n => n.name || ('Hole ' + n.id);
+function loadStatus() {
+  api('/api/status').then(d => { st = d; onStatus(); }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+}
+function onStatus() {
+  const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
+  const lora = st.lora || {}, wifi = st.wifi || {};
+  $('sysline').textContent = `${online}/${nodes.length} holes online · LoRa ${lora.ready ? 'OK' : 'FAIL'} · Wi-Fi ${wifi.sta_connected ? 'STA' : (wifi.ap_active ? 'AP' : '–')} · up ${fmtUp(st.uptime || 0)}`;
+  $('testb').hidden = !(st.sonar_sim || (st.radio_test && st.radio_test !== 'off'));
+  $('testb').textContent = st.sonar_sim ? 'TEST MODE: FAKE SONAR' : 'RADIO TEST';
+  const sil = !!st.silenced;
+  $('silenceBtn').textContent = sil ? `Silenced${st.silence_left_sec ? ' · ' + Math.ceil(st.silence_left_sec / 60) + ' min' : ''} - tap to undo` : 'Silence alerts';
+  $('silenceBtn').setAttribute('aria-pressed', String(sil)); $('silenceBtn').classList.toggle('warn', sil);
+  // alert banner: every tab
+  $('alert').hidden = !fish.length;
+  document.body.classList.toggle('has-alert', fish.length > 0);
+  $('alertBox').classList.toggle('muted-al', sil);
+  $('alertWho').textContent = fish.map(nodeName).join(', ') + (sil ? ' (silenced)' : '');
+  $('alertSilence').textContent = sil ? 'Undo silence' : 'Silence';
+  $('holesDot').hidden = !fish.length;
+  // sound on new FISH ON (not while silenced)
+  let fresh = false;
+  nodes.forEach(n => { const now = !!n.fish && n.online !== false; if (now && !lastFish[n.id]) fresh = true; lastFish[n.id] = now; });
+  if (fresh && soundOn && !sil) beep();
+  if (SON()) SON().onStatus(st);
+  if (tab === 'holes') renderNodes();
+  if (tab === 'settings') renderAbout();
+}
+function toggleSilence() { fetch('/api/silence', { method: 'POST' }).then(() => loadStatus()).catch(() => {}); }
+$('silenceBtn').addEventListener('click', toggleSilence);
+$('alertSilence').addEventListener('click', toggleSilence);
 
-    function toggleSilence() {
-      fetch('/api/silence', { method: 'POST' }).then(r => r.json()).then(data => { silenced = data.silenced; updateStatus(); }).catch(e => console.error(e));
-    }
+/* ---------- Holes tab ---------- */
+function renderNodes() {
+  if (!st) return;
+  const nodes = (st.nodes || []).slice().sort((a, b) => (b.fish - a.fish) || (a.id - b.id));
+  const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {};
+  (L.nodes || []).forEach(x => { sonar[x.node] = x; });
+  const fishN = nodes.filter(n => n.fish && n.online !== false).length;
+  $('sOnline').textContent = nodes.filter(n => n.online).length + ' / ' + nodes.length;
+  $('sFish').textContent = fishN; $('sFish').style.color = fishN ? 'var(--alert)' : '';
+  $('sLora').textContent = (st.lora && st.lora.ready) ? 'OK' : 'FAIL';
+  $('sWifi').textContent = st.wifi ? (st.wifi.sta_connected ? 'Network' : (st.wifi.ap_active ? 'Hotspot' : '–')) : '–';
+  let h = '';
+  nodes.forEach(n => {
+    const off = n.online === false, low = !!n.lowbat, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
+    const badge = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : low ? '<span class="badge">LOW BATT</span>' : '<span class="badge on">OK</span>';
+    const via = n.via_lora ? 'via LoRa' : (n.via_espnow ? 'ESP-NOW' : '');
+    const s = sonar[n.id];
+    const sonarLine = s ? `<div class="son"><span>${s.fish ? s.fish + ' fish · nearest ' + son.fmtD(s.near / 100) : 'Sonar: no fish'}</span><button class="btn small" type="button" data-watch="${n.id}">Watch</button></div>` : '';
+    h += `<div class="node${n.fish && !off ? ' fish' : ''}${off ? ' off' : ''}${low ? ' low' : ''}">` +
+      `<div class="hd"><span>${esc(nodeName(n))}</span>${badge}</div>` +
+      `<div class="sm">#${n.id}${n.role ? ' · ' + esc(n.role) : ''}${via ? ' · ' + via : ''}</div>` +
+      `<div class="bat"><span class="bar"><i style="width:${pct}%"></i></span>${pct}%</div>` +
+      `<div class="sm">${n.last_seen_sec == null ? '' : 'seen ' + (n.last_seen_sec < 60 ? n.last_seen_sec + ' s' : Math.round(n.last_seen_sec / 60) + ' min') + ' ago'}</div>` +
+      sonarLine + `<button class="linkbtn" type="button" data-rename="${n.id}">Rename</button></div>`;
+  });
+  $('ngrid').innerHTML = h || '<p class="empty">No hole heard yet.</p>';
+}
+$('ngrid').addEventListener('click', e => {
+  const w = e.target.closest('[data-watch]');
+  if (w) { if (SON()) SON().focus(+w.dataset.watch); showTab('sonar'); return; }
+  const r = e.target.closest('[data-rename]'); if (!r) return;
+  const id = +r.dataset.rename, n = (st.nodes || []).find(x => x.id === id);
+  const name = prompt('Name for hole ' + id + ' (max 15 characters):', n && n.name ? n.name : '');
+  if (name === null) return;
+  if (name.length > 15) { alert('15 characters max.'); return; }
+  api('/api/node/name', { nodeId: id, name }).then(() => loadStatus()).catch(() => {});
+});
 
-    // Initialize sound toggle button state
-    document.getElementById('sound-toggle').textContent = alertSoundEnabled ? '🔊' : '🔇';
-    updateStatus();
-    setInterval(updateStatus, 2000);
-  </script>
+/* ---------- Radio tab ---------- */
+const TM = { off: 0, rotate: 1, 'SF9/500': 2, 'SF8/500': 3, 'SF7/500': 4 };
+const f1 = (x, d) => x === undefined || x === null ? '–' : (+x).toFixed(d || 0);
+function loadRadio() { api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+function postRadio(o) { api('/api/radio', o).then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+function renderRadio() {
+  const d = radio; if (!d) return;
+  if (document.activeElement !== $('rTest')) $('rTest').value = TM[d.test_mode] || 0;
+  $('rAdapt').setAttribute('aria-checked', String(!!d.adaptive));
+  $('rStatus').textContent = `frame ${d.frame} · rx ${d.rx_ok} · CRC errors ${d.rx_crc} · tx ${d.tx} · allowance ${d.allowance} B · dropped slots ${d.dropped_slots}` + (d.radio_ok === false ? ' · RADIO FAIL' : '');
+  let h = '<tr><th>Hub</th><th>via</th><th>mode</th><th>rx / sched</th><th>loss %</th><th>RSSI avg / min</th><th>SNR avg / min</th><th>beacon RSSI / SNR</th><th>lost /64</th><th>sync err µs</th></tr>';
+  (d.hubs || []).forEach(x => (x.modes || []).forEach((m, i) => {
+    const loss = m.sched ? 100 * (m.sched - m.rx) / m.sched : undefined, hl = x.health || {};
+    h += `<tr><td>${i ? '' : 'Hub ' + x.id}</td><td>${i ? '' : (x.via ? 'hub ' + x.via : 'direct')}</td><td>${m.mode}</td><td>${m.rx} / ${m.sched}</td><td>${f1(loss, 1)}</td>` +
+      `<td>${f1(m.rssi_avg, 1)} / ${f1(m.rssi_min)}</td><td>${f1(m.snr_avg, 1)} / ${f1(m.snr_min, 1)}</td><td>${i ? '' : f1(hl.beacon_rssi) + ' / ' + f1(hl.beacon_snr, 1)}</td>` +
+      `<td>${i ? '' : f1(hl.beacon_lost64)}</td><td>${i ? '' : f1(hl.sync_err_us)}</td></tr>`;
+  }));
+  if (!(d.hubs || []).length) h += '<tr><td colspan="10" style="text-align:left">No hub heard yet.</td></tr>';
+  $('rTable').innerHTML = h;
+}
+$('rTest').addEventListener('change', e => postRadio({ test: +e.target.value }));
+$('rAdapt').addEventListener('click', () => postRadio({ adaptive: !(radio && radio.adaptive) }));
+$('rReset').addEventListener('click', () => postRadio({ resetStats: true }));
+
+/* ---------- Settings tab ---------- */
+function loadSettings() {
+  api('/api/settings').then(d => {
+    $('fBuzzer').setAttribute('aria-checked', String(!!d.buzzerEnabled)); $('fReed').setAttribute('aria-checked', String(!!d.reedActiveHigh));
+    $('fHold').value = d.alertHoldSec; $('fHeart').value = d.heartbeatSec;
+  }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
+  const son = SON(); if (son) $('fSim').setAttribute('aria-checked', String(!!son.list().sim));
+}
+['fBuzzer', 'fReed'].forEach(id => $(id).addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); }));
+$('setForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const body = { buzzerEnabled: $('fBuzzer').getAttribute('aria-checked') === 'true', alertHoldSec: parseInt($('fHold').value, 10) || 30,
+    heartbeatSec: parseInt($('fHeart').value, 10) || 60, reedActiveHigh: $('fReed').getAttribute('aria-checked') === 'true' };
+  api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
+  setTimeout(() => { $('setMsg').textContent = ''; }, 4000);
+});
+$('fSim').addEventListener('click', () => { const son = SON(); if (!son) return; son.setSim(!son.list().sim).then(() => loadSettings()); });
+function renderAbout() {
+  if (!st) return;
+  const w = st.wifi || {}, l = st.lora || {};
+  const rows = [['Role', st.role || 'Chalet'], ['Node ID', st.node_id], ['Network ID', st.network_id], ['Firmware', st.fw || 'v2'], ['Uptime', fmtUp(st.uptime || 0)],
+    ['Wi-Fi', (w.ap_active ? 'Hotspot ' + (w.ap_ip || '') : '') + (w.sta_connected ? ' Network ' + (w.sta_ip || '') : '')], ['LoRa', (l.ready ? 'OK' : 'FAIL') + ' · rx ' + (l.rx_count || 0) + ' · tx ' + (l.tx_count || 0)]];
+  $('about').innerHTML = rows.filter(r => r[1] !== undefined && r[1] !== '').map(r => `<dt>${r[0]}</dt><dd>${esc(r[1])}</dd>`).join('');
+}
+
+/* ---------- Start ---------- */
+syncSound();
+showTab(initialTab());
+loadStatus();
+setInterval(loadStatus, 2000);
+setInterval(() => { if (tab === 'radio') loadRadio(); }, 2000);
+})();
+</script>
 </body>
 </html>
-)rawliteral");
+)rawliteral";
 
-  server.send(200, "text/html", html);
+void handleWebRoot() {
+  server.send_P(200, "text/html", SUITE_PAGE);
 }
 
 void handleWebApi() {
   // BUG FIX #10: Increased from 1024 to 2048 for 16 nodes (~80 bytes each)
-  StaticJsonDocument<2048> doc;
+  StaticJsonDocument<3072> doc;   // 16 nodes + v2 fields
   doc["network_id"] = network.network_id;
   doc["node_count"] = network.node_count;
   doc["uptime"] = millis() / 1000;
+  // v2 suite: state the page needs on every tab
+  doc["node_id"] = NODE_ID;
+  doc["role"] = currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet" : "Hub";
+  doc["fw"] = "v2";
+  doc["silenced"] = alertsSilenced;
+  doc["silence_left_sec"] = (alertsSilenced && silenceExpireTime > millis()) ? (silenceExpireTime - millis()) / 1000 : 0;
+  doc["sonar_sim"] = meshSonarSim();
+  doc["radio_test"] = meshTestModeName(meshTestMode());
 
   // WiFi status
   JsonObject wifi = doc.createNestedObject("wifi");
@@ -3188,136 +3840,6 @@ void handleWebApiSilence() {
   server.send(200, "application/json", json);
 }
 
-void handleWebSettings() {
-  // Get current role name for display
-  const char* myRole;
-  switch (currentRole) {
-    case ROLE_GATEWAY_ONSHORE:  myRole = "Gateway Ice (Onshore)"; break;
-    case ROLE_GATEWAY_OFFSHORE: myRole = "Gateway Remote (Offshore)"; break;
-    case ROLE_SENSOR_LORA:      myRole = "Sensor + LoRa"; break;
-    case ROLE_RELAY_LORA:       myRole = "LoRa Relay"; break;
-    default:                    myRole = "Unknown"; break;
-  }
-
-  String html = F(R"rawliteral(
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Settings - Ice Fishing Monitor</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
-    .container { max-width: 500px; margin: 0 auto; }
-    h1 { color: #4fc3f7; margin-bottom: 5px; }
-    .device-info { color: #888; margin-bottom: 20px; font-size: 14px; }
-    .form-group { margin-bottom: 15px; }
-    label { display: block; margin-bottom: 5px; color: #aaa; }
-    input[type="number"], select { width: 100%; padding: 10px; border: 1px solid #333; background: #252538; color: #fff; border-radius: 4px; font-size: 16px; }
-    .checkbox-group { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
-    input[type="checkbox"] { width: 20px; height: 20px; }
-    .checkbox-group label { margin: 0; }
-    button { background: #4fc3f7; color: #000; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-right: 10px; margin-top: 10px; }
-    button:hover { background: #03a9f4; }
-    .back { background: #555; color: #fff; }
-    .message { padding: 10px; border-radius: 4px; margin-bottom: 15px; display: none; }
-    .message.show { display: block; }
-    .success { background: #2e7d32; }
-    .error { background: #c62828; }
-    .note { color: #888; font-size: 12px; margin-top: 20px; padding: 10px; border-left: 3px solid #4fc3f7; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>Device Settings</h1>
-    <div class="device-info">)rawliteral");
-
-  html += myRole;
-  html += F(" &bull; Node ID: ");
-  html += String(NODE_ID);
-  html += F(R"rawliteral(</div>
-    <div id="message" class="message"></div>
-    <form id="settingsForm">
-      <div class="form-group checkbox-group">
-        <input type="checkbox" id="buzzerEnabled" name="buzzerEnabled">
-        <label for="buzzerEnabled">Buzzer Enabled</label>
-      </div>
-      <div class="form-group">
-        <label for="alertHoldSec">Alert Hold Time (seconds)</label>
-        <input type="number" id="alertHoldSec" name="alertHoldSec" min="5" max="300">
-        <small style="color:#666">Minimum time alert stays active (5-300)</small>
-      </div>
-      <div class="form-group">
-        <label for="heartbeatSec">Heartbeat Interval (seconds)</label>
-        <input type="number" id="heartbeatSec" name="heartbeatSec" min="10" max="600">
-        <small style="color:#666">Status broadcast interval (10-600)</small>
-      </div>
-      <div class="form-group checkbox-group">
-        <input type="checkbox" id="reedActiveHigh" name="reedActiveHigh">
-        <label for="reedActiveHigh">Reed Switch: Trigger on HIGH</label>
-      </div>
-      <div>
-        <button type="submit">Save Settings</button>
-        <button type="button" class="back" onclick="location.href='/'">Back to Status</button>
-      </div>
-    </form>
-    <div class="note">
-      <strong>Note:</strong> Changes take effect immediately. Some settings may require a device reboot.
-    </div>
-  </div>
-  <script>
-    const msgEl = document.getElementById('message');
-
-    function showMessage(text, isError) {
-      msgEl.textContent = text;
-      msgEl.className = 'message show ' + (isError ? 'error' : 'success');
-      setTimeout(() => { msgEl.className = 'message'; }, 4000);
-    }
-
-    async function loadSettings() {
-      try {
-        const resp = await fetch('/api/settings');
-        if (!resp.ok) throw new Error('Failed to load');
-        const data = await resp.json();
-        document.getElementById('buzzerEnabled').checked = data.buzzerEnabled;
-        document.getElementById('alertHoldSec').value = data.alertHoldSec;
-        document.getElementById('heartbeatSec').value = data.heartbeatSec;
-        document.getElementById('reedActiveHigh').checked = data.reedActiveHigh;
-      } catch (e) {
-        showMessage('Failed to load settings: ' + e.message, true);
-      }
-    }
-
-    document.getElementById('settingsForm').addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const data = {
-        buzzerEnabled: document.getElementById('buzzerEnabled').checked,
-        alertHoldSec: parseInt(document.getElementById('alertHoldSec').value) || 30,
-        heartbeatSec: parseInt(document.getElementById('heartbeatSec').value) || 60,
-        reedActiveHigh: document.getElementById('reedActiveHigh').checked
-      };
-      try {
-        const resp = await fetch('/api/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(data)
-        });
-        if (!resp.ok) throw new Error('Save failed');
-        showMessage('Settings saved successfully!', false);
-      } catch (e) {
-        showMessage('Failed to save: ' + e.message, true);
-      }
-    });
-
-    loadSettings();
-  </script>
-</body>
-</html>
-)rawliteral");
-
-  server.send(200, "text/html", html);
-}
 
 void handleWebApiSettingsGet() {
   StaticJsonDocument<256> doc;
@@ -4682,42 +5204,6 @@ void handleWebApiRadioPost() {
   server.send(200, "application/json", meshRadioJson());
 }
 
-void handleWebRadio() {
-  String html = F(R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Radio test</title>
-<style>body{font-family:sans-serif;background:#0f0f1a;color:#eee;margin:12px}table{border-collapse:collapse;width:100%;font-size:13px}
-td,th{border-bottom:1px solid #333;padding:4px;text-align:right}th:first-child,td:first-child{text-align:left}
-select,button,label{font-size:15px;margin:4px 6px 4px 0}.muted{color:#999;font-size:12px}a{color:#4fc3f7}</style></head><body>
-<h3>Radio / range test</h3>
-<div><label>Test mode <select id="t"><option value="0">off</option><option value="1">rotate SF9/8/7</option>
-<option value="2">fixed SF9/500</option><option value="3">fixed SF8/500</option><option value="4">fixed SF7/500</option></select></label>
-<label><input type="checkbox" id="a"> adaptive SF</label><button id="r">Reset stats</button> <a href="/">back</a></div>
-<p class="muted">Per hub and per mode: packets received / slots scheduled at the chalet (uplink), RSSI/SNR at the chalet.
-Hub columns: beacon (downlink) as measured by the hub, beacons lost in the last 64, timing error vs prediction.
-Sensitivity estimates (theory, not measured): SF9/500 -123.5, SF8/500 -121, SF7/500 -118.5 dBm.</p>
-<div id="s" class="muted"></div><table id="h"></table>
-<script>
-function post(o){fetch('/api/radio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(load);}
-document.getElementById('t').onchange=e=>post({test:+e.target.value});
-document.getElementById('a').onchange=e=>post({adaptive:e.target.checked});
-document.getElementById('r').onclick=()=>post({resetStats:true});
-function f(x,d){return x===undefined?'-':(+x).toFixed(d||0);}
-function load(){fetch('/api/radio').then(r=>r.json()).then(d=>{
- const tm={off:0,rotate:1,'SF9/500':2,'SF8/500':3,'SF7/500':4};
- if(document.activeElement.id!=='t')document.getElementById('t').value=tm[d.test_mode]||0;
- document.getElementById('a').checked=!!d.adaptive;
- document.getElementById('s').textContent='frame '+d.frame+' | rx '+d.rx_ok+' | crc '+d.rx_crc+' | tx '+d.tx+' | allowance '+d.allowance+' B | dropped slots '+d.dropped_slots;
- let h='<tr><th>Hub</th><th>via</th><th>mode</th><th>rx/sched</th><th>loss %</th><th>RSSI avg/min</th><th>SNR avg/min</th><th>beacon RSSI/SNR @hub</th><th>lost/64</th><th>sync err us</th></tr>';
- (d.hubs||[]).forEach(x=>{(x.modes||[]).forEach((m,i)=>{
-  const loss=m.sched?(100*(m.sched-m.rx)/m.sched):undefined;const hl=x.health||{};
-  h+='<tr><td>'+(i?'':'H'+x.id)+'</td><td>'+(i?'':(x.via||'direct'))+'</td><td>'+m.mode+'</td><td>'+m.rx+'/'+m.sched+'</td><td>'+f(loss,1)+
-  '</td><td>'+f(m.rssi_avg,1)+' / '+f(m.rssi_min)+'</td><td>'+f(m.snr_avg,1)+' / '+f(m.snr_min,1)+'</td><td>'+(i?'':f(hl.beacon_rssi)+' / '+f(hl.beacon_snr,1))+
-  '</td><td>'+(i?'':f(hl.beacon_lost64))+'</td><td>'+(i?'':f(hl.sync_err_us))+'</td></tr>';});});
- document.getElementById('h').innerHTML=h;}).catch(()=>{});}
-load();setInterval(load,2000);
-</script></body></html>)rawliteral");
-  server.send(200, "text/html", html);
-}
 
 // =============================================================================================
 // v2 SONAR TEST MODE + FOCUS (see docs/SONAR_SIM.md)
@@ -4827,550 +5313,3 @@ void handleWebApiSonarBg() {
   server.send(200, "application/json", meshSonarBgJson((uint8_t)node));
 }
 
-// /sonar page: layout, colours and drawing from Frank's prototype (docs/prototype/sonar_display_prototype.html),
-// fed by /api/sonar*. Kept in flash and sent without a RAM copy (~35 KB). No web fonts: the chalet AP has no internet.
-static const char SONAR_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Sonar</title>
-<style>
-:root{
-  --bg:#EEF3F4; --surface:#FFFFFF; --ink:#13262D; --muted:#55707A; --line:#D2DEE2; --chip:#E1EAEC;
-  --accent:#1C6C77; --accent-ink:#FFFFFF; --alert:#C2412D; --alert-ink:#FFFFFF;
-  --water:#0A1E26; --water-2:#0F2A33; --water-ink:#D7E6EA; --water-muted:#86A2AB; --water-line:#1C3B46;
-  color-scheme:light; box-sizing:border-box;
-  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
-}
-@media (prefers-color-scheme: dark){
-  :root:not([data-theme="light"]){
-    --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
-    --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
-  }
-}
-:root[data-theme="dark"]{
-  --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
-  --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
-}
-*,*::before,*::after{box-sizing:inherit}
-body{margin:0;background:var(--bg);color:var(--ink);
-  font-family:"Barlow Semi Condensed","Arial Narrow","Roboto Condensed",system-ui,sans-serif;
-  font-size:16px;line-height:1.4;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
-button{font:inherit;color:inherit}
-:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
-a{color:var(--accent)}
-.top{max-width:1240px;margin:0 auto;padding:14px 14px 6px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;align-items:end}
-.top h1{margin:0;font-size:2rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
-.top .sub{margin:4px 0 0;color:var(--muted);font-size:.98rem}
-.playback{display:flex;gap:6px;align-items:center}
-.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;min-height:40px;min-width:44px;font-weight:600;cursor:pointer}
-.seg{display:inline-flex;background:var(--chip);border-radius:12px;padding:3px;gap:2px}
-.seg button{border:0;background:transparent;color:var(--muted);padding:7px 14px;border-radius:9px;min-height:38px;font-weight:600;cursor:pointer}
-.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
-.modebar{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
-.hint{color:var(--muted);font-size:.92rem}
-.simb{background:#F2C94C;color:#3A2A00;border-radius:6px;padding:2px 8px;font-weight:700;font-size:.85rem;letter-spacing:.02em}
-.tog{display:inline-flex;align-items:center;gap:8px;font-weight:600}
-.grid{max-width:1240px;margin:0 auto;padding:8px 12px 24px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr);
-  grid-template-areas:"holes" "inst" "fall" "tgt" "echo" "ctrl" "note"}
-@media (min-width:920px){
-  .grid{grid-template-columns:350px minmax(0,1fr);grid-template-areas:"holes holes" "inst fall" "tgt fall" "echo ctrl" "note note";align-items:start}
-}
-.grid.nofocus .inst,.grid.nofocus .fall,.grid.nofocus .tgt,.grid.nofocus .echo,.grid.nofocus .ctrl{display:none}
-.water{background:var(--water);color:var(--water-ink);border-radius:18px;padding:12px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px}
-.card h2,.water h2{margin:0 0 8px;font-size:1.15rem;font-weight:600;letter-spacing:.005em}
-.water h2{color:var(--water-ink)}
-.muted{color:var(--muted)}
-/* Holes */
-.holes{grid-area:holes}
-.hgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
-.hole{display:grid;gap:2px;text-align:left;border:1px solid var(--line);background:transparent;border-radius:12px;padding:10px;cursor:pointer;min-height:104px}
-.hole[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
-.hole.fish{border-color:var(--alert);box-shadow:inset 0 0 0 1px var(--alert)}
-.hole .hd{display:flex;justify-content:space-between;gap:6px;align-items:baseline;font-weight:600}
-.hole .big{font-size:1.3rem;font-weight:700;line-height:1.15}
-.hole .sm{color:var(--muted);font-size:.88rem;line-height:1.25}
-.badge{font-size:.78rem;font-weight:700;padding:1px 7px;border-radius:6px;background:var(--chip);color:var(--muted);white-space:nowrap}
-.badge.on{background:var(--accent);color:var(--accent-ink)}.badge.al{background:var(--alert);color:var(--alert-ink)}
-.act{height:5px;background:var(--chip);border-radius:3px;overflow:hidden;margin-top:4px}.act i{display:block;height:100%;background:var(--accent)}
-.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:baseline}
-/* Instrument */
-.inst{grid-area:inst}
-.flash-wrap{position:relative;width:100%;max-width:330px;margin:0 auto;aspect-ratio:1/1}
-.flash-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
-.readouts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px;border-top:1px solid var(--water-line);padding-top:10px}
-.readouts div{min-width:0}
-.readouts span{display:block;color:var(--water-muted);font-size:.85rem}
-.readouts strong{display:block;font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* Waterfall */
-.fall{grid-area:fall}
-.fall-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
-.fall-head p{margin:0;color:var(--water-muted);font-size:.9rem}
-.stack{position:relative;height:clamp(300px,56vh,560px);border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
-.stack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-.zoom-head{display:flex;justify-content:space-between;align-items:baseline;margin:12px 0 6px;color:var(--water-muted);font-size:.9rem}
-.zoom-head strong{color:var(--water-ink);font-weight:600}
-.zstack{position:relative;height:108px;border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
-.zstack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
-.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:.88rem;color:var(--water-muted)}
-.legend i{display:inline-block;width:18px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}
-/* Targets */
-.tgt{grid-area:tgt}
-.tlist{display:grid;gap:6px}
-.trow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 10px;align-items:center;text-align:left;width:100%;border:1px solid var(--line);background:transparent;border-radius:10px;padding:8px 10px;cursor:pointer}
-.trow[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
-.trow .dot{width:12px;height:12px;border-radius:50%}
-.trow .nm{font-weight:600}.trow .dp{font-weight:600;justify-self:end}
-.trow .meta{grid-column:2/4;color:var(--muted);font-size:.9rem}
-.empty{margin:0;color:var(--muted)}
-/* Echo */
-.echo{grid-area:echo}
-.echo .who{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-.echo .who strong{font-size:1.1rem}
-.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;margin:10px 0 0}
-.metrics div{min-width:0}
-.metrics dt{color:var(--muted);font-weight:500;font-size:.9rem}
-.metrics dd{margin:0;color:var(--muted);font-size:.9rem;line-height:1.25}
-.metrics dd b{display:block;color:var(--ink);font-weight:700;font-size:1.25rem;line-height:1.15}
-.read{margin:12px 0 0;padding:10px 12px;border-radius:10px;background:var(--chip);line-height:1.35}
-.small{font-size:.85rem;color:var(--muted);margin:8px 0 0}
-/* Controls */
-.ctrl{grid-area:ctrl}
-.toggles{list-style:none;margin:0;padding:0;display:grid;gap:2px}
-.toggles li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
-.toggles li:last-child{border-bottom:0}
-.toggles .name{font-weight:600}
-.toggles .desc{grid-column:1;color:var(--muted);font-size:.9rem;line-height:1.3}
-.switch{grid-row:1/3;grid-column:2;width:48px;height:28px;border-radius:14px;border:0;background:var(--line);position:relative;cursor:pointer;flex:none}
-.switch::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s ease}
-.switch[aria-checked="true"]{background:var(--accent)}
-.switch[aria-checked="true"]::after{transform:translateX(20px)}
-.tog .switch{grid-row:auto;grid-column:auto}
-.scene{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
-.note{grid-area:note;margin:0;color:var(--muted);font-size:.9rem;max-width:78ch}
-@media (prefers-reduced-motion: reduce){ .switch::after{transition:none} }
-</style>
-</head>
-<body>
-<header class="top">
-  <div>
-    <h1 id="ttl">Sonar</h1>
-    <p class="sub" id="sub">Pick a hole to stream it</p>
-  </div>
-  <div class="playback">
-    <button class="btn" id="play" type="button" aria-pressed="true">Pause</button>
-    <span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span>
-  </div>
-  <div class="modebar">
-    <span class="simb" id="simb" hidden>TEST MODE: FAKE DATA</span>
-    <span class="tog"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
-    <span class="hint" id="st"></span>
-    <a class="hint" href="/">Back to status</a>
-  </div>
-</header>
-
-<main class="grid nofocus" id="main">
-  <section class="card holes" aria-label="Holes">
-    <h2>Holes</h2>
-    <div class="hgrid" id="holes"></div>
-    <p class="hint" style="margin:8px 0 0">Tap a hole to stream it (about 1 s behind). The others send a summary every few seconds.</p>
-  </section>
-
-  <section class="water inst" aria-label="Flasher">
-    <div class="flash-wrap"><canvas id="flash" aria-label="Flasher dial showing the latest ping"></canvas></div>
-    <div class="readouts">
-      <div><span>Bait line</span><strong id="roBait">–</strong></div>
-      <div><span>Bottom type</span><strong id="roBottom">–</strong></div>
-      <div><span>Noise floor</span><strong id="roNoise">–</strong></div>
-    </div>
-  </section>
-
-  <section class="water fall" aria-label="Waterfall">
-    <div class="fall-head"><h2>Last 60 seconds</h2><p>4 pings per second, newest on the right</p></div>
-    <div class="stack"><canvas id="fall" aria-label="Waterfall of the last 240 pings"></canvas><canvas id="fallOv" aria-hidden="true"></canvas></div>
-    <div class="zoom-head"><strong>Bottom lock</strong><span id="zoomSpan">last 5 ft above bottom, stretched</span></div>
-    <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
-    <div class="legend">
-      <span><i style="background:#8FA9B2"></i>Unchanged scene: bottom, weeds</span>
-      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong</span>
-      <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
-    </div>
-  </section>
-
-  <section class="card tgt" aria-label="Targets under the hole">
-    <h2>Under the hole now</h2>
-    <div class="tlist" id="tlist"></div>
-  </section>
-
-  <section class="card echo" aria-label="Echo character">
-    <h2>Echo character</h2>
-    <div class="who"><strong id="echoWho">–</strong><span class="muted" id="echoDepth"></span></div>
-    <dl class="metrics">
-      <div><dt>Flicker</dt><dd><b id="mFlick">–</b>change in strength ping to ping</dd></div>
-      <div><dt>Frequency change</dt><dd><b id="mSpread">–</b>how differently 190 and 210 kHz see it</dd></div>
-      <div><dt>Echo length</dt><dd><b id="mWidth">–</b><span id="mWidthNote">the pulse alone is about 4 in</span></dd></div>
-      <div><dt>Versus bait</dt><dd><b id="mRel">–</b>strength relative to your lure</dd></div>
-    </dl>
-    <p class="read" id="echoRead">Pick a target to see its echo.</p>
-    <p class="small">The echo shape at 190/200/210 kHz stays on the hole: too big for the radio. These numbers are computed there, every 2 s.</p>
-  </section>
-
-  <section class="card ctrl" aria-label="Display">
-    <h2>Display</h2>
-    <ul class="toggles" id="toggles"></ul>
-    <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
-  </section>
-
-  <p class="note" id="note">Processing runs on each hole (bottom lock, noise floor, targets, static scene); the radio carries targets, changed cells and a 4-level static scene, so the picture is coarser than raw sonar.</p>
-</main>
-
-<script>
-(() => {
-'use strict';
-const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
-const $ = id => document.getElementById(id);
-const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
-
-/* ---------- Palettes (prototype) ---------- */
-function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
-function lut(stops) {
-  const L = new Uint8ClampedArray(256 * 3);
-  for (let k = 0; k < 256; k++) {
-    const x = k / 255; let j = 0;
-    while (j < stops.length - 2 && x > stops[j + 1][0]) j++;
-    const [x0, c0] = stops[j], [x1, c1] = stops[j + 1], u = clamp((x - x0) / (x1 - x0), 0, 1), a = hex(c0), b = hex(c1);
-    for (let ch = 0; ch < 3; ch++) L[k * 3 + ch] = a[ch] + (b[ch] - a[ch]) * u;
-  }
-  return L;
-}
-const PAL = lut([[0, '#0A1E26'], [0.16, '#11414C'], [0.32, '#1B7778'], [0.48, '#58AE7C'], [0.62, '#D3C04A'], [0.76, '#EE8B2F'], [0.9, '#D8432F'], [1, '#FFE6D2']]);
-const GREY = lut([[0, '#0A1E26'], [1, '#8FA9B2']]);
-const palCss = v => { const k = Math.round(clamp(v, 0, 1) * 255) * 3; return `rgb(${PAL[k]},${PAL[k + 1]},${PAL[k + 2]})`; };
-const BGV = [0, 0.13, 0.30, 0.55];      // static scene level -> grey value (dimmed like the prototype)
-const RV = [0, 0.35, 0.55, 0.75];       // changed-cell level -> colour value
-const HARD = [{ c: '#C9A25C', t: 'Hard' }, { c: '#A89A6A', t: 'Medium' }, { c: '#7E8A5A', t: 'Soft' }, { c: '#86A2AB', t: '–' }];
-const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
-
-/* ---------- State ---------- */
-let units = 'ft';
-try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
-const opts = { overlays: true, bgsep: true };
-let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
-let selSlot = null, userPicked = false, playing = true;
-
-const fmtD = m => units === 'ft' ? (m * 3.28084).toFixed(1) + ' ft' : m.toFixed(2) + ' m';
-const fmtNum = m => units === 'ft' ? (m * 3.28084).toFixed(1) : m.toFixed(2);
-const nameOf = n => names[n] || ('Hole ' + n);
-function labelOf(t, bottom) { return t.slot === 0 ? 'Bait' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
-function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of the prototype colour scale (46 dB span)
-
-/* ---------- Server ---------- */
-function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
-function loadList() { fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
-function loadNames() { fetch('/api/status').then(r => r.json()).then(d => { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }).catch(() => {}); }
-function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
-function loadPings() {
-  if (!focus) return; const n = focus;
-  fetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
-    if (n !== focus) return;
-    (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
-  }).catch(() => {});
-}
-
-/* ---------- Holes ---------- */
-function renderHoles() {
-  $('sim').setAttribute('aria-checked', String(!!L.sim)); $('simb').hidden = !L.sim;
-  $('st').textContent = 'frame ' + (L.frame || 0) + ' | blocks ' + (L.blocks_ok || 0) + ' ok, ' + (L.blocks_bad || 0) + ' bad';
-  const nodes = (L.nodes || []).slice().sort((a, b) => a.node - b.node);
-  let h = '';
-  nodes.forEach(n => {
-    const ln = lines[n.node] || {}, fish = !!ln.fish, off = ln.online === false || n.age > 30, foc = n.node === L.focus;
-    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : '';
-    h += `<button type="button" class="hole${fish ? ' fish' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
-      `<span class="hd"><span>${nameOf(n.node)}</span>${badge}</span>` +
-      `<span class="big">${n.fish ? `<i class="sw" style="background:${palCss(RV[n.lvl] || 0.5)}"></i>${n.fish} fish` : 'No fish'}</span>` +
-      `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
-      `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
-      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span></button>`;
-  });
-  if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
-  $('holes').innerHTML = h;
-  if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
-  const f = nodes.find(n => n.node === focus);
-  if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
-}
-$('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
-$('sim').addEventListener('click', () => post({ sim: !L.sim }));
-$('stop').addEventListener('click', () => post({ focus: 0 }));
-
-function setFocus(n) {
-  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
-  $('main').classList.toggle('nofocus', !n);
-  $('ttl').textContent = n ? nameOf(n) : 'Sonar';
-  $('sub').textContent = n ? 'Live sonar, about 1 s behind' + (L.sim ? ' · simulated pings' : '') : 'Pick a hole to stream it';
-  if (n) { loadPings(); render(); }
-}
-
-/* ---------- Pings -> display records ---------- */
-// p = [seq, index, bottom_cm, [[slot, depth_cm, strength, width]], [[bin, level]], hard, nf_neg, [[slot, flick, spread, elen, mature]]]
-function addPing(p) {
-  const prev = recs.length ? recs[recs.length - 1] : null;
-  const b = p[2] < 2047 ? p[2] / 100 : (prev ? prev.b : null);
-  const rec = { i: p[1], b, hard: p[5], nf: -p[6], t: p[3].map(x => ({ slot: x[0], d: x[1] / 100, s: x[2] / 31, w: x[3] })), r: p[4], px: null };
-  rec.t.forEach(t => t.label = labelOf(t, b));
-  (p[7] || []).forEach(x => { info[x[0]] = { flick: x[1] * 0.25, spread: x[2] * 0.5, elen: x[3] * BIN, mature: !!x[4], i: rec.i }; });
-  recs.push(rec); if (recs.length > HIST) recs.shift();
-}
-function pixels(rec) {
-  if (rec.px) return rec.px;
-  const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
-  const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
-  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? GREY : PAL, BGV[l]); } }
-  for (const r of rec.r) put(r[0], PAL, RV[r[1]]);
-  for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
-    const j0 = Math.round(t.d / BIN);
-    for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
-    const v = clamp(Math.max(t.s, 0.5) * 1.12, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
-  }
-  return rec.px = px;
-}
-function baitLine() {
-  const ds = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) for (const t of recs[k].t) if (t.slot === 0) ds.push(t.d);
-  if (!ds.length) return null; ds.sort((a, b) => a - b); return ds[ds.length >> 1];
-}
-function velOf(slot) {
-  const n = recs.length; if (!n) return 0;
-  const cur = recs[n - 1].t.find(t => t.slot === slot); if (!cur) return 0;
-  for (let k = n - 5; k >= Math.max(0, n - 9); k--) { const o = recs[k].t.find(t => t.slot === slot); if (o) return (cur.d - o.d) / ((n - 1 - k) * 0.25); }
-  return 0;
-}
-function trendOf(vel) { return vel < -0.04 ? 'rising' : vel > 0.04 ? 'sinking' : 'holding'; }
-const ARROW = { rising: '↑', sinking: '↓', holding: '' };
-
-/* ---------- Canvases ---------- */
-const fallC = $('fall'), fallX = fallC.getContext('2d'); fallC.width = HIST; fallC.height = N; const fallImg = fallX.createImageData(HIST, N);
-const zoomC = $('zoom'), zoomX = zoomC.getContext('2d'); zoomC.width = HIST; zoomC.height = ZR; const zoomImg = zoomX.createImageData(HIST, ZR);
-const ovC = $('fallOv'), ovX = ovC.getContext('2d'), zovC = $('zoomOv'), zovX = zovC.getContext('2d');
-const flC = $('flash'), flX = flC.getContext('2d');
-function fit(cv) {
-  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
-  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
-  return { w, h, dpr };
-}
-function drawFall() {
-  const data = fallImg.data, off = HIST - recs.length;
-  for (let x = 0; x < HIST; x++) {
-    const p = x >= off ? pixels(recs[x - off]) : null;
-    for (let i = 0; i < N; i++) {
-      const o = (i * HIST + x) * 4;
-      if (p) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
-      data[o + 3] = 255;
-    }
-  }
-  fallX.putImageData(fallImg, 0, 0);
-}
-function drawZoom() {
-  const data = zoomImg.data, off = HIST - recs.length;
-  for (let x = 0; x < HIST; x++) {
-    const rec = x >= off ? recs[x - off] : null, p = rec ? pixels(rec) : null;
-    const start = rec && rec.b != null ? Math.round(rec.b / BIN) - (ZR - 6) : 0;
-    for (let r = 0; r < ZR; r++) {
-      const o = (r * HIST + x) * 4, i = start + r;
-      if (p && rec.b != null && i >= 0 && i < N) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
-      data[o + 3] = 255;
-    }
-  }
-  zoomX.putImageData(zoomImg, 0, 0);
-  const { w, h, dpr } = fit(zovC); zovX.clearRect(0, 0, w, h);
-  if (opts.overlays && recs.length) {
-    const y = ((ZR - 6) / ZR) * h;
-    zovX.strokeStyle = HARD[recs[recs.length - 1].hard].c; zovX.lineWidth = 1.5 * dpr;
-    zovX.setLineDash([4 * dpr, 4 * dpr]); zovX.beginPath(); zovX.moveTo(0, y); zovX.lineTo(w, y); zovX.stroke(); zovX.setLineDash([]);
-    zovX.font = `${11 * dpr}px ${FONT}`; zovX.fillStyle = 'rgba(215,230,234,0.75)'; zovX.textBaseline = 'bottom';
-    zovX.fillText('bottom', 6 * dpr, y - 3 * dpr);
-  }
-}
-function pill(g, text, x, y, dpr, color) {
-  g.font = `600 ${12 * dpr}px ${FONT}`;
-  const tw = g.measureText(text).width, ph = 18 * dpr, pw = tw + 14 * dpr;
-  const px = Math.max(2 * dpr, x - pw), py = y - ph / 2;
-  g.fillStyle = 'rgba(10,30,38,0.82)'; g.beginPath();
-  if (g.roundRect) g.roundRect(px, py, pw, ph, 9 * dpr); else g.rect(px, py, pw, ph);
-  g.fill(); g.fillStyle = color; g.fillRect(px + 6 * dpr, py + ph / 2 - 3 * dpr, 3 * dpr, 6 * dpr);
-  g.fillStyle = '#E6F0F2'; g.textBaseline = 'middle'; g.fillText(text, px + 12 * dpr, y + 0.5 * dpr);
-}
-function drawOverlay() {
-  const { w, h, dpr } = fit(ovC), g = ovX; g.clearRect(0, 0, w, h);
-  const yOf = dm => dm / MAXD * h, off = HIST - recs.length, xOf = k => ((k + off) + 0.5) / HIST * w;
-  const step = units === 'ft' ? 5 / 3.28084 : 1;
-  g.font = `${11 * dpr}px ${FONT}`; g.textBaseline = 'bottom';
-  for (let dm = step; dm < MAXD - 0.05; dm += step) {
-    const y = Math.round(yOf(dm)) + 0.5;
-    g.strokeStyle = 'rgba(215,230,234,0.09)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
-    g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), 6 * dpr, y - 2 * dpr);
-  }
-  g.fillStyle = 'rgba(215,230,234,0.5)';
-  g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
-  const nw = g.measureText('now').width; g.fillText('now', w - nw - 6 * dpr, h - 5 * dpr);
-  if (!opts.overlays || !recs.length) return;
-  const bait = baitLine();
-  if (bait != null) {
-    const yb = yOf(bait);
-    g.strokeStyle = 'rgba(230,240,242,0.35)'; g.lineWidth = 1 * dpr; g.setLineDash([6 * dpr, 6 * dpr]);
-    g.beginPath(); g.moveTo(0, yb); g.lineTo(w, yb); g.stroke(); g.setLineDash([]);
-    g.fillStyle = 'rgba(230,240,242,0.6)'; g.fillText('bait line', 26 * dpr, yb - 3 * dpr);
-  }
-  g.beginPath(); let started = false;
-  recs.forEach((r, k) => { if (r.b == null) return; const x = xOf(k), y = yOf(r.b); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true; });
-  g.strokeStyle = HARD[recs[recs.length - 1].hard].c; g.lineWidth = 2 * dpr; g.stroke();
-  const tl = new Map();
-  recs.forEach((r, k) => { for (const t of r.t) { if (t.label === 'Near bottom') continue; if (!tl.has(t.slot)) tl.set(t.slot, []); tl.get(t.slot).push({ x: xOf(k), y: yOf(t.d), v: t.s, k }); } });
-  for (const [slot, pts] of tl) {
-    g.beginPath(); let pk = -9;
-    for (const p of pts) { if (p.k - pk > 1) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); pk = p.k; }
-    const last = pts[pts.length - 1];
-    g.strokeStyle = palCss(clamp(Math.max(0.5, last.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
-  }
-  const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'Bait') && t.s > 0.08).sort((a, b) => a.d - b.d);
-  let lastY = -1e9;
-  for (const t of cur) {
-    let y = yOf(t.d) - 12 * dpr; if (y - lastY < 20 * dpr) y = lastY + 20 * dpr; lastY = y;
-    const a = ARROW[trendOf(velOf(t.slot))];
-    pill(g, `${t.label} ${fmtD(t.d)}${a ? ' ' + a : ''}`, w - 8 * dpr, y, dpr, palCss(Math.max(0.5, t.s)));
-  }
-}
-function drawFlash() {
-  const { w, h, dpr } = fit(flC), g = flX; g.clearRect(0, 0, w, h);
-  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 4 * dpr, r1 = R * 0.95, r0 = R * 0.75;
-  const SPAN = Math.PI * 2 * 0.92, A0 = -Math.PI / 2, ang = i => A0 + (i / N) * SPAN;
-  g.beginPath(); g.arc(cx, cy, r1, A0, A0 + SPAN); g.arc(cx, cy, r0, A0 + SPAN, A0, true); g.closePath(); g.fillStyle = '#0F2A33'; g.fill();
-  const n = recs.length;
-  for (const [k, alpha] of [[n - 3, 0.22], [n - 2, 0.42], [n - 1, 1]]) {
-    if (k < 0) continue; const p = pixels(recs[k]); g.globalAlpha = alpha;
-    for (let i = 0; i < N; i++) {
-      const Rr = p[i * 4], Gg = p[i * 4 + 1], Bb = p[i * 4 + 2]; if (Rr + Gg + Bb < 95) continue;
-      g.beginPath(); g.arc(cx, cy, r1, ang(i), ang(i + 1) + 0.003); g.arc(cx, cy, r0, ang(i + 1) + 0.003, ang(i), true); g.closePath();
-      g.fillStyle = `rgb(${Rr},${Gg},${Bb})`; g.fill();
-    }
-  }
-  g.globalAlpha = 1;
-  if (n) for (const t of recs[n - 1].t) {
-    if (t.s <= 0.08) continue; const i = t.d / BIN;
-    g.beginPath(); g.arc(cx, cy, r1 + 1 * dpr, ang(i - 2), ang(i + 2)); g.arc(cx, cy, r0 - 1 * dpr, ang(i + 2), ang(i - 2), true); g.closePath();
-    g.fillStyle = palCss(clamp(Math.max(0.5, t.s) * 1.12, 0, 1)); g.fill();
-  }
-  const step = units === 'ft' ? 5 / 3.28084 : 1;
-  g.font = `${11 * dpr}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (let dm = 0; dm < MAXD - 0.05; dm += step) {
-    const a = A0 + (dm / MAXD) * SPAN, ca = Math.cos(a), sa = Math.sin(a);
-    g.strokeStyle = 'rgba(215,230,234,0.5)'; g.lineWidth = 1 * dpr;
-    g.beginPath(); g.moveTo(cx + ca * (r0 - 2 * dpr), cy + sa * (r0 - 2 * dpr)); g.lineTo(cx + ca * (r0 - 7 * dpr), cy + sa * (r0 - 7 * dpr)); g.stroke();
-    g.fillStyle = 'rgba(215,230,234,0.6)';
-    g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), cx + ca * (r0 - 16 * dpr), cy + sa * (r0 - 16 * dpr));
-  }
-  const bait = baitLine();
-  if (opts.overlays && bait != null) {
-    const a = A0 + (bait / MAXD) * SPAN;
-    g.strokeStyle = 'rgba(230,240,242,0.8)'; g.lineWidth = 2 * dpr; g.beginPath();
-    g.moveTo(cx + Math.cos(a) * (r1 + 1 * dpr), cy + Math.sin(a) * (r1 + 1 * dpr)); g.lineTo(cx + Math.cos(a) * (r1 - 6 * dpr), cy + Math.sin(a) * (r1 - 6 * dpr)); g.stroke();
-  }
-  const cur = n ? recs[n - 1] : null;
-  g.fillStyle = '#E8F1F3'; g.font = `700 ${R * 0.36}px ${FONT}`; g.textBaseline = 'alphabetic';
-  g.fillText(cur && cur.b != null ? fmtNum(cur.b) : '–', cx, cy + R * 0.08);
-  g.fillStyle = 'rgba(215,230,234,0.7)'; g.font = `500 ${R * 0.11}px ${FONT}`;
-  g.fillText(units === 'ft' ? 'ft to bottom' : 'm to bottom', cx, cy + R * 0.25);
-  g.textAlign = 'left';
-}
-
-/* ---------- Cards ---------- */
-function liveTargets() {
-  if (!recs.length) return [];
-  return recs[recs.length - 1].t.filter(t => t.s > 0.08).slice().sort((a, b) => a.d - b.d).slice(0, 5);
-}
-function updTargets() {
-  const el = $('tlist'), list = liveTargets();
-  if (!list.length) { el.innerHTML = '<p class="empty">' + (recs.length ? 'Nothing moving under the hole right now.' : 'Waiting for pings…') + '</p>'; return; }
-  const bait = list.find(t => t.slot === 0);
-  el.innerHTML = list.map(t => {
-    const rel = bait && t.slot !== 0 ? toDb(t.s) - toDb(bait.s) : null, tr = trendOf(velOf(t.slot));
-    const meta = [tr === 'holding' ? 'holding depth' : tr, rel == null ? '' : `${rel > 0 ? '+' : ''}${rel.toFixed(0)} dB vs bait`].filter(Boolean).join(', ');
-    return `<button type="button" class="trow" data-slot="${t.slot}" aria-pressed="${t.slot === selSlot}"><span class="dot" style="background:${palCss(Math.max(0.5, t.s))}"></span><span class="nm">${t.label}</span><span class="dp">${fmtD(t.d)}</span><span class="meta">${meta}</span></button>`;
-  }).join('');
-}
-function pickDefault() {
-  const rank = t => t.label === 'Fish' ? 0 : t.label === 'Near bottom' ? 1 : 2;
-  const ts = liveTargets().slice().sort((a, b) => rank(a) - rank(b) || b.s - a.s);
-  return ts[0] || null;
-}
-function updEcho() {
-  const list = liveTargets();
-  let T = userPicked && selSlot != null ? list.find(t => t.slot === selSlot) : null;
-  if (!T) { userPicked = false; T = pickDefault(); selSlot = T ? T.slot : null; }
-  const set = (id, v) => { $(id).textContent = v; };
-  set('mWidthNote', units === 'ft' ? 'the pulse alone is about 4 in' : 'the pulse alone is about 10 cm');
-  if (!T) { set('echoWho', 'No target'); set('echoDepth', ''); ['mFlick', 'mSpread', 'mWidth', 'mRel'].forEach(i => set(i, '–')); set('echoRead', 'Pick a target to see its echo.'); return; }
-  const I = info[T.slot], bait = list.find(t => t.slot === 0 && t !== T);
-  const rel = bait ? toDb(T.s) - toDb(bait.s) : null;
-  set('echoWho', T.label); set('echoDepth', fmtD(T.d));
-  set('mFlick', I ? I.flick.toFixed(1) + ' dB' : '–');
-  set('mSpread', I ? I.spread.toFixed(1) + ' dB' : '–');
-  set('mWidth', I ? (units === 'ft' ? (I.elen * 39.37).toFixed(1) + ' in' : (I.elen * 100).toFixed(0) + ' cm') : '–');
-  set('mRel', rel == null ? '–' : `${rel > 0 ? '+' : ''}${rel.toFixed(1)} dB`);
-  let read;
-  if (!I || !I.mature) read = 'Collecting pings for this target.';
-  else if (I.spread >= 3.5 && I.flick >= 1.6) read = 'Flickers, and looks different at each frequency. That is typical of a swim bladder, so likely a fish.';
-  else if (I.spread < 2.5 && I.flick < 1.2) read = 'Steady, and the same at every frequency. That is typical of metal or a hard lure.';
-  else read = 'Mixed signature. Needs a few more pings to call.';
-  set('echoRead', read);
-}
-function updReadouts() {
-  const cur = recs.length ? recs[recs.length - 1] : null, bait = baitLine();
-  $('roBait').textContent = bait == null ? '–' : fmtD(bait);
-  $('roBottom').textContent = cur ? HARD[cur.hard].t : '–';
-  $('roNoise').textContent = cur ? cur.nf.toFixed(0) + ' dB' : '–';
-  $('zoomSpan').textContent = units === 'ft' ? 'last 5 ft above bottom, stretched' : 'last 1.5 m above bottom, stretched';
-}
-function render() { if (!focus) return; drawFall(); drawZoom(); drawOverlay(); drawFlash(); updTargets(); updEcho(); updReadouts(); }
-const pickRow = e => { const b = e.target.closest('.trow'); if (!b) return; selSlot = Number(b.dataset.slot); userPicked = true; updTargets(); updEcho(); drawOverlay(); };
-$('tlist').addEventListener('click', pickRow);
-
-/* ---------- Controls ---------- */
-const TOGGLES = [
-  ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
-  ['bgsep', 'Static scene in grey', 'Bottom and weeds fade back. Anything that moves stays in colour.']
-];
-const tUl = $('toggles');
-tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
-function syncControls() {
-  tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
-  document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
-  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
-}
-tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
-document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
-$('play').addEventListener('click', () => { playing = !playing; syncControls(); });
-
-// playback: 4 pings/s; the radio delivers about one block per second, so catch up when the queue grows
-setInterval(() => {
-  if (!focus || !playing || !queue.length) return;
-  if (queue.length > 40) queue.splice(0, queue.length - 12);
-  let n = 1 + Math.floor(queue.length / 8);
-  while (n-- && queue.length) addPing(queue.shift());
-  render();
-}, 250);
-setInterval(loadPings, 700); setInterval(loadList, 2000); setInterval(loadNames, 5000);
-let rz = null;
-new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length) render(); }); }).observe(document.body);
-syncControls(); loadNames(); loadList();
-})();
-</script>
-</body>
-</html>
-)rawliteral";
-
-void handleWebSonar() {
-  server.send_P(200, "text/html", SONAR_PAGE);
-}

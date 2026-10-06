@@ -10,3 +10,4 @@ test/bin/
 .DS_Store
 Thumbs.db
 .preview/
+__pycache__/

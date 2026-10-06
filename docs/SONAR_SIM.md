@@ -12,14 +12,14 @@ tune the display, not to trust the numbers."
 | Raw pings | `sonar_scene.h` (port of the prototype `genPing`) | 488 bins × 3 frequencies (190/200/210 kHz), 8-bit log amplitude. Prototype hole: 18.5 ft, lure at 15 ft, weeds, perch, walleye strike, crossing fish, 48 s loop. Other holes: same story mapped to bottom 3.5-6.5 m, bait 0.6-1.6 m above it, sand or mud, own time offset |
 | Processing v0 | `sonar_proc.h` (port of the prototype `Proc`) | bottom lock, noise floor, range compensation, auto contrast, peak fit, tracker + labels (Fish / Bait / Near bottom / Cover), static scene, bottom hardness, flicker / frequency spread / echo length. **Bit-exact with the prototype** in double precision (test_sonar_proc); the float build used on the ESP32 matches at print precision |
 | Blocks | `sonar_sim.h` (SonarSource) + `sonar_codec.h` | targets (≤ 5, slot 0 = bait), changed cells (≤ 7), 4-level static scene, hardness, noise floor, echo character every 2 s |
-| Display | `/sonar` (main.cpp `SONAR_PAGE`) | prototype layout: flasher, 60 s waterfall + overlays, bottom lock, readouts, "Under the hole now", echo character; hole grid on top |
+| Display | Sonar tab of the chalet web suite (main.cpp `SUITE_PAGE`, docs/WEB_SUITE.md) | prototype layout: flasher, 60 s waterfall + overlays, bottom lock, readouts, "Under the hole now", echo character; hole grid on top |
 
 On a real sonar node only the first stage changes (TUSS4470 capture instead of SonarScene).
 
 ## Switch it on
 | Where | How |
 |---|---|
-| Chalet web | `/sonar` → "Sonar test mode" switch; tap a hole to stream it (also linked from the main page footer) |
+| Chalet web | Sonar tab (or Settings tab) → "Sonar test mode" switch; tap a hole to stream it, or Watch on the Holes tab |
 | Chalet serial | `SONAR ON` / `SONAR OFF`, `FOCUS <node>` / `FOCUS OFF` |
 | Chalet API | `POST /api/sonar {"sim":true,"focus":144}` |
 | Hub serial | `SIMNODES 0-4` virtual sonar holes on this hub (default 2, saved); `SIMNODES` alone = CPU cost per fake ping |
@@ -32,7 +32,7 @@ The chalet setting is saved (NVS key `sonarSim`) and survives a reboot — turn 
 | Chalet | `BF_SONAR_SIM` in every beacon; FOCUS hole in the beacon; the hub reporting it gets a 180 B slot |
 | Hub | runs N virtual holes (IDs 128 + (hub & 0x0F) × 8 + k); queues blocks from real nodes (`MSG_SONAR`); broadcasts `MSG_SONAR_CTRL` every 1 s and right after a node transmits |
 | Node (WROOM / C3) | listens 120 ms after each wake-up TX; test mode on = **stays awake** and runs the chain at 4 pings/s; reed/alerts/heartbeat keep working; back to deep sleep 10 s after "off" (or 30 s without control). Debug serial prints the CPU cost per ping every minute |
-| Phone `/sonar` | ft by default (ft/m toggle remembered on the phone), light/dark from the phone setting |
+| Phone, Sonar tab | ft by default (ft/m toggle remembered on the phone), light/dark from the phone setting |
 
 ## Differences from the prototype page (on purpose)
 | Prototype | /sonar | Why |
@@ -63,9 +63,9 @@ The chalet setting is saved (NVS key `sonarSim`) and survives a reboot — turn 
 mkdir -p .preview
 g++ -std=c++11 -O2 -Ilib/IceMesh/src tools/sonar_trace.cpp -o .preview/sonar_trace
 .preview/sonar_trace 300 > .preview/trace.json
-python3 tools/sonar_preview.py          # http://localhost:8000/sonar
+python3 tools/web_preview.py            # http://localhost:8000/sonar
 ```
-The trace uses the real chain, codec and store; the page is read from main.cpp (`SONAR_PAGE=file.html` to try a page file).
+The trace uses the real chain, codec and store; the page is read from main.cpp (`SUITE_PAGE=file.html` to try a page file).
 Reference trace of the prototype: `node tools/proto_reference.js > test/fixtures/proto_ref.txt`.
 
 ## Not done / to check on hardware
