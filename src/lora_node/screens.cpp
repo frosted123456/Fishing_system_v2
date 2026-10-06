@@ -230,7 +230,7 @@ void sonarPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
   uint16_t range = 300;
   for (int k = 0; k < n; k++) if (m.holes[idx[k]].son.bottom_cm + 30 > range) range = m.holes[idx[k]].son.bottom_cm + 30;
   char r[16], d[12]; depthStr(d, sizeof(d), range, m.feet); snprintf(r, sizeof(r), "0-%s", d);
-  char h[16]; if (pages > 1) snprintf(h, sizeof(h), "Sonar %d/%d", sub + 1, pages); else snprintf(h, sizeof(h), "Sonar");
+  char h[24]; if (pages > 1) snprintf(h, sizeof(h), "Sonar %d/%d", sub + 1, pages); else snprintf(h, sizeof(h), "Sonar");
   header(u, h, r);
   if (!n) { u8g2_SetFont(u, F_MED); center(u, 38, "No sonar hole"); return; }
   const int y0 = 15, y1 = 55, H = y1 - y0;
