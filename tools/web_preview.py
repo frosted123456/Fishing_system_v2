@@ -53,6 +53,8 @@ def status():
     return {"network_id": 66, "node_count": len(nodes), "uptime": int(el) + 7380, "role": "Chalet", "node_id": 100, "fw": "v2",
             "silenced": state["silenced"], "silence_left_sec": max(0, int(state["sil_until"] - time.time())) if state["silenced"] else 0,
             "sonar_sim": state["sim"], "radio_test": TESTS[state["test"]],
+            "setup_arm_s": max(0, 260 - int(el)), "transport": ["auto", "lora", "espnow"][state["transport"]],
+            "lora_ch": state["ch"] + 1, "master": "chalet",
             "wifi": {"ap_active": True, "ap_ip": "192.168.4.1", "sta_connected": False, "sta_ip": ""},
             "lora": {"ready": True, "rx_count": 1200 + int(el) * 3, "tx_count": 400 + int(el)}, "nodes": nodes}
 
@@ -71,6 +73,7 @@ def radio():
              {"id": 3, "lora_age": 75, "eb_age": 1, "eb_hops": 2, "relay": False, "eb_path": True}]
     return {"role": "chalet", "radio_ok": True, "frame": el, "rx_ok": 2000 + el * 3, "rx_crc": 12, "tx": 300 + el,
             "test_mode": TESTS[state["test"]], "adaptive": state["adaptive"],
+            "setup": el < 260, "arm_in_s": max(0, 260 - el),
             "transport": ["auto", "lora", "espnow"][state["transport"]], "channel": state["ch"], "channel_mhz": mhz[state["ch"]],
             "eb": {"lr": True, "relay": False, "rx": 800 + el, "tx": 400 + el, "relayed": 0, "dup": 35},
             "channel_setting": state["ch_setting"], "channel_moves": state["moves"],

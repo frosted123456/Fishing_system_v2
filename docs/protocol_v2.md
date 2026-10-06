@@ -125,7 +125,11 @@ cannot enable LR (D27), so the backbone only reaches hubs built with `ESPNOW_LON
 | 0x71 EB hub | the hub packet built without slot (`buildHubFree`: line states first, sonar, node info, health) | hub, every 1 s while the policy says so, 250 ms after a new line event |
 Relays: any device with the relay setting on (hub, tip-up kept awake, spare board) rebroadcasts frames not seen
 before (dedup on origin/type/seq, 48 entries), up to **2 relays in a row**; its own frames are never relayed back.
-Transport policy per hub (`TransportPolicy`):
+**Setup phase (D30):** after power-on every device starts on the saved LoRa channel. Automatic channel moves
+wait until a hub has been in the network 5 min (or 10 min uptime); a hub's automatic fallback waits for 5 min of
+stable LoRa beacons. A hub that has not heard any beacon yet also sends its status on the backbone (searching).
+All hubs relay the backbone by default (D29).
+Transport policy per hub (`TransportPolicy`, once armed):
 | Setting | Hub sends on | Safety net |
 |---|---|---|
 | Auto | LoRa; + backbone after 10 s without LoRa beacon, until 5 LoRa beacons in a row | – |

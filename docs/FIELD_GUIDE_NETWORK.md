@@ -4,12 +4,20 @@ Everything here is set **on the chalet** (phone → Settings → Network, or ser
 follow by radio: nothing to reflash on the ice. Protocol details: protocol_v2.md §6c.
 **Not yet tested on hardware** — ranges below are simulation estimates.
 
-## The settings
+## Setting up on the ice
+- Switch the devices on **in any order**, as you prepare the holes. Nothing changes mode during this
+  **setup phase**: everyone stays on the LoRa channel used last time.
+- The page says "setup phase (N min)" until the network has run complete for 5 min; then the automatic
+  fallbacks (channel change, ESP-NOW backup) are armed.
+- Mount every tip-up board **at least 20 cm above the ice** (v1 range problems: boards at ~5 cm).
+- Every hub already relays ESP-NOW; nothing to set.
+
+## The settings (Settings → Network → Advanced; normally nothing to change)
 | Setting | Choices | Default | What it does |
 |---|---|---|---|
 | Hub ↔ chalet link | Auto / LoRa / ESP-NOW | Auto | Auto = LoRa, and a hub that loses the LoRa beacon for 10 s also sends over ESP-NOW until LoRa is back |
 | LoRa channel | Auto / 1-8 | Auto | Auto = start on the last channel (915.0 MHz first), move when it gets > 25 % busy and another is clearly quieter |
-| Relay (per device) | on / off | off | Device rebroadcasts ESP-NOW backbone frames; max 2 relays in a row. A tip-up relay stays awake (battery) |
+| Relay (per device) | on / off | hubs on, tip-ups off | Device rebroadcasts ESP-NOW backbone frames; max 2 relays in a row. A tip-up relay stays awake (battery) |
 
 ## On the ice: what to do when…
 | Situation | You see | Do |
@@ -22,9 +30,9 @@ follow by radio: nothing to reflash on the ice. Protocol details: protocol_v2.md
 ## Placing relays (estimates, flat ice, sim v2)
 | Link | Path loss exponent 2.5 (clear) | 3.0 | 3.5 (pessimistic) |
 |---|---|---|---|
-| ESP-NOW LR, one hop (6 dB margin) | ~1.3 km | ~390 m | ~170 m |
+| ESP-NOW normal rate (1 Mbps), one hop between raised boards (6 dB margin) | ~745 m | ~250 m | ~110 m |
 | LoRa SF9/500 hub ↔ hub | | | ~1.4 km |
-- Plan **one relay per ~200 m** of ESP-NOW distance until the field test gives real numbers; at most 2 relays in a row.
+- Plan **one relay per ~150-200 m** of ESP-NOW distance until the field test gives real numbers; at most 2 relays in a row.
 - A relay can be: a hub (no battery cost difference, it is awake anyway), a spare board flashed as a tip-up with
   `-DEB_RELAY_FORCE=1`, or a tip-up (stays awake: its battery lasts much less).
 - Height helps more than anything: raise the board/antenna a little above the ice.

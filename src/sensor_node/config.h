@@ -54,7 +54,11 @@
 //
 // Set to false to use standard 802.11 mode (shorter range but compatible with all devices)
 // ═══════════════════════════════════════════════════════════════════════════
-#define ESPNOW_LONG_RANGE_MODE  true    // Enable ESP32 proprietary Long Range mode
+// v2 (D28): ESP-NOW runs at the NORMAL rate (802.11b 1 Mbps) on every device. LR cannot share a board
+// with a phone hotspot (Espressif, esp-idf #4554), and the v1 range problem was the antenna height
+// (≈5 cm over the ice); the 20 cm mast gains far more than LR. Keep LR only for a range comparison:
+// it must then be set to the SAME value on every hub and tip-up (LR-only and normal cannot talk).
+#define ESPNOW_LONG_RANGE_MODE  false   // v2: normal rate (was true in v1)
 
 // Broadcast address for ESP-NOW
 static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};

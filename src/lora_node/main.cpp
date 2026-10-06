@@ -642,10 +642,10 @@ void loop() {
       // 7A FIX: Skip web server and WiFi status checks in LR mode
       // ESP-NOW LR requires STA mode radio which is unchanged in setupEspNow()
       // We only disable web server polling since there's no AP to serve
-      #if !ESPNOW_LONG_RANGE_MODE
-      if (settings.webServerEnabled) loopWebServer();
-      checkWiFiStatus();
-      #endif
+      if (wifiApActive) {   // v2: hub hotspot only when turned on (step 2)
+        if (settings.webServerEnabled) loopWebServer();
+        checkWiFiStatus();
+      }
       loopLocalSensor();
       checkSerialWifiConfig();
 
@@ -1692,11 +1692,9 @@ void setupEspNow() {
   // GATEWAY_ONSHORE: Use STA-only mode with Long Range protocol
   // Other roles: Use AP+STA for normal WiFi compatibility
   // ═══════════════════════════════════════════════════════════════════════════
-  #if ESPNOW_LONG_RANGE_MODE
+  // v2: the ice hub runs ESP-NOW on its station interface, no AP (the hub hotspot is on demand, step 2).
   if (currentRole == ROLE_GATEWAY_ONSHORE) {
-    // STA-only mode for LR - no AP (phones can't connect, but that's intentional)
-    // User accesses status from OFFSHORE gateway in cabin
-    DEBUG_PRINTLN(F("GATEWAY_ONSHORE: Using STA-only mode for Long Range"));
+    DEBUG_PRINTLN(F("GATEWAY_ONSHORE: station mode for ESP-NOW (no AP)"));
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
 
@@ -1710,22 +1708,19 @@ void setupEspNow() {
       DEBUG_PRINTF("TX power set to: %.2f dBm\n", actualPower * 0.25);
     }
 
-    // Enable Long Range protocol
-    // WIFI_PROTOCOL_LR improves sensitivity from ~-72dBm to ~-98dBm
+    #if ESPNOW_LONG_RANGE_MODE
+    // range-comparison build only (config.h): LR on the station, no hotspot possible on this board
     esp_err_t lrResult = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
     if (lrResult != ESP_OK) {
       DEBUG_PRINTF("WARNING: Failed to enable LR mode: %d\n", lrResult);
     } else {
-      DEBUG_PRINTLN(F("Long Range (LR) mode enabled - sensitivity ~-98dBm"));
+      DEBUG_PRINTLN(F("Long Range (LR) mode enabled"));
     }
+    #endif
   } else {
     // Other roles use standard AP+STA mode
     WiFi.mode(WIFI_AP_STA);
   }
-  #else
-  // LR mode disabled - all roles use standard AP+STA
-  WiFi.mode(WIFI_AP_STA);
-  #endif
 
   // Set ESP-NOW channel
   delay(100);  // Let WiFi mode stabilize
@@ -2791,16 +2786,12 @@ void setupWiFiAP() {
   //   - Web server is not accessible anyway without AP
   //   - This preserves the LR protocol setting (AP mode would break it)
   // ═══════════════════════════════════════════════════════════════════════════
-  #if ESPNOW_LONG_RANGE_MODE
-  if (currentRole == ROLE_GATEWAY_ONSHORE) {
-    DEBUG_PRINTLN(F("GATEWAY_ONSHORE: Skipping WiFi AP (using LR mode for ESP-NOW)"));
-    DEBUG_PRINTLN(F("  → No web server on ice gateway"));
-    DEBUG_PRINTLN(F("  → Check status from offshore gateway (cabin) instead"));
+  if (currentRole == ROLE_GATEWAY_ONSHORE) {   // v2: no hotspot on the ice hub by default (on demand: step 2)
+    DEBUG_PRINTLN(F("GATEWAY_ONSHORE: no WiFi AP (status on the chalet page)"));
     wifiApActive = false;
     wifiStaConnected = false;
     return;  // Skip all WiFi AP setup
   }
-  #endif
 
   // Load credentials from NVS (or use defaults)
   loadWifiCredentials();
@@ -2811,15 +2802,8 @@ void setupWiFiAP() {
            currentRole == ROLE_GATEWAY_OFFSHORE ? "Remote" : "Ice");
 
   // Determine WiFi mode based on settings
-  // Note: GATEWAY_ONSHORE with LR mode already returned above
+  // Note: GATEWAY_ONSHORE already returned above (no hotspot by default)
   uint8_t effectiveWifiMode = settings.wifiModeSetting;
-  #if !ESPNOW_LONG_RANGE_MODE
-  // Only force AP mode for GATEWAY_ONSHORE when LR mode is disabled
-  if (currentRole == ROLE_GATEWAY_ONSHORE) {
-    DEBUG_PRINTLN(F("GATEWAY_ONSHORE: Forcing AP-only mode (no STA)"));
-    effectiveWifiMode = 0;  // Force AP mode
-  }
-  #endif
 
   switch (effectiveWifiMode) {
     case 0:  // AP only
@@ -3180,6 +3164,7 @@ body.has-alert{padding-bottom:84px}
 .bat{display:flex;align-items:center;gap:8px;font-size:.88rem;color:var(--muted)}
 .bat .bar{flex:1;height:6px;background:var(--chip);border-radius:3px;overflow:hidden}.bat .bar i{display:block;height:100%;background:var(--accent)}
 .busy .bat span:first-child{min-width:8.5em;color:var(--ink)}.busy .bat.cur span:first-child{font-weight:700}
+details.adv{margin-top:6px}details.adv>summary{cursor:pointer;color:var(--muted);font-weight:600;padding:6px 0}details.adv[open]>summary{margin-bottom:10px}
 .rl{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.rl .sm{color:var(--muted);font-size:.86rem}
 .node.low .bat .bar i{background:#E0A43A}
 .son{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid var(--line);font-size:.9rem}
@@ -3347,6 +3332,9 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     </section>
     <section class="card">
       <h2>Network</h2>
+      <p id="nStatus" style="margin:0 0 4px;font-weight:600"></p>
+      <p class="hint" id="nStatus2" style="margin:0"></p>
+      <details class="adv" id="nAdv"><summary>Advanced (normally nothing to change)</summary>
       <div class="form">
         <div><span class="hint">Hub ↔ chalet link</span><br><span class="seg" role="group" aria-label="Transport" id="nTr"><button type="button" data-tr="0" aria-pressed="true">Auto</button><button type="button" data-tr="1" aria-pressed="false">LoRa</button><button type="button" data-tr="2" aria-pressed="false">ESP-NOW</button></span>
           <p class="hint" id="nTrHint" style="margin:6px 0 0"></p></div>
@@ -3356,6 +3344,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
         <div><span class="hint">ESP-NOW relays (rebroadcast between hubs and the chalet, max 2 in a row)</span><div id="nRelays"></div></div>
         <p class="hint" style="margin:0">Hubs follow these settings through the beacon: nothing to reprogram on the ice. A channel change is announced 6 beacons ahead.</p>
       </div>
+      </details>
     </section>
     <section class="card">
       <h2>This phone</h2>
@@ -3791,7 +3780,8 @@ function loadStatus() {
 function onStatus() {
   const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
   const lora = st.lora || {}, wifi = st.wifi || {};
-  $('sysline').textContent = `${online}/${nodes.length} holes online · LoRa ${lora.ready ? 'OK' : 'FAIL'} · Wi-Fi ${wifi.sta_connected ? 'STA' : (wifi.ap_active ? 'AP' : '–')} · up ${fmtUp(st.uptime || 0)}`;
+  const net = st.setup_arm_s ? `setup phase (${Math.ceil(st.setup_arm_s / 60)} min)` : 'network OK';
+  $('sysline').textContent = `${online}/${nodes.length} holes online · ${net} · LoRa ${lora.ready ? 'ch ' + (st.lora_ch || 1) : 'FAIL'} · Wi-Fi ${wifi.sta_connected ? 'STA' : (wifi.ap_active ? 'AP' : '–')} · up ${fmtUp(st.uptime || 0)}`;
   $('testb').hidden = !(st.sonar_sim || (st.radio_test && st.radio_test !== 'off'));
   $('testb').textContent = st.sonar_sim ? 'TEST MODE: FAKE SONAR' : 'RADIO TEST';
   const sil = !!st.silenced;
@@ -3898,6 +3888,16 @@ const TR_HINT = ['LoRa first. A hub that loses the LoRa beacon for 10 s also sen
 function renderNetwork() {
   const d = radio; if (!d || !$('nTr')) return;
   const tr = TRN[d.transport] || 0;
+  // plain-language status first; settings stay behind "Advanced"
+  const viaEb = (d.paths || []).filter(p => p.eb_path).map(p => 'hub ' + p.id);
+  if (d.setup) {
+    $('nStatus').textContent = 'Setup phase: everything stays in basic mode';
+    $('nStatus2').textContent = `Switch the holes on in any order. The automatic fallbacks (channel change, ESP-NOW backup) arm once the network has run complete for 5 min — in about ${Math.ceil((d.arm_in_s || 0) / 60)} min.`;
+  } else {
+    $('nStatus').textContent = viaEb.length ? `Running · ${viaEb.join(', ')} on ESP-NOW backup` : 'Running · all hubs on LoRa';
+    $('nStatus2').textContent = `LoRa channel ${d.channel + 1} (${f1(d.channel_mhz, 1)} MHz${d.channel_setting === 'auto' ? ', automatic' : ', fixed'})` +
+      (d.channel_moves ? ` · moved ${d.channel_moves}× because of other LoRa users` : '') + ` · link ${TRL[d.transport] || 'Auto'}`;
+  }
   $('nTr').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.tr === tr)));
   $('nTrHint').textContent = TR_HINT[tr];
   if (document.activeElement !== $('nCh') && d.channel_setting !== undefined) $('nCh').value = d.channel_setting === 'auto' ? 'auto' : String(d.channel_setting + 1);
@@ -3986,6 +3986,11 @@ void handleWebApi() {
   doc["silence_left_sec"] = (alertsSilenced && silenceExpireTime > millis()) ? (silenceExpireTime - millis()) / 1000 : 0;
   doc["sonar_sim"] = meshSonarSim();
   doc["radio_test"] = meshTestModeName(meshTestMode());
+  // v2 network one-liner: setup phase countdown (0 = running), link, LoRa channel (1-8), master
+  doc["setup_arm_s"] = meshSetupArmInS();
+  { static const char* const TRN[] = {"auto", "lora", "espnow"}; const uint8_t t = meshTransport(); doc["transport"] = TRN[t <= 2 ? t : 0]; }
+  doc["lora_ch"] = meshLoraChannel() + 1;
+  doc["master"] = "chalet";
 
   // WiFi status
   JsonObject wifi = doc.createNestedObject("wifi");
@@ -5026,7 +5031,7 @@ void loadSettings() {
   if (settings.transportMode > 2) settings.transportMode = 0;
   settings.loraChannel = preferences.getUChar("loraCh", 255);
   if (settings.loraChannel > 7) settings.loraChannel = 255;
-  settings.ebRelay = preferences.getBool("ebRelay", false);
+  settings.ebRelay = preferences.getBool("ebRelay", currentRole != ROLE_GATEWAY_OFFSHORE);   // v2: every hub relays by default
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;

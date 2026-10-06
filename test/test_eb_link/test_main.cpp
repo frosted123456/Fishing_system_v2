@@ -44,9 +44,22 @@ static void test_dedup(void) {
 
 static void test_policy(void) {
   eb::TransportPolicy tp; uint32_t t = 1000; tp.begin(t);
-  for (int k = 0; k < 5; k++) { t += 1000; tp.onLoraBeacon(t); tp.tick(t); }
+  // setup phase: no beacon yet (chalet not switched on): searching, status also on the backbone
+  t += 600000; tp.tick(t);
+  TEST_ASSERT_FALSE(tp.armed()); TEST_ASSERT_TRUE(tp.searching()); TEST_ASSERT_TRUE(tp.useEb(TR_AUTO, t));
+  TEST_ASSERT_FALSE(tp.useEb(TR_LORA, t));
+  t += 1000; tp.onLoraBeacon(t); tp.tick(t);
+  TEST_ASSERT_FALSE(tp.searching()); TEST_ASSERT_FALSE(tp.useEb(TR_AUTO, t));   // first beacon: LoRa only
+  // beacons for 4 min, a 20 s break (chalet moved), beacons again: the 5 min run restarts
+  for (int k = 0; k < 240; k++) { t += 1000; tp.onLoraBeacon(t); tp.tick(t); }
+  t += 20000; tp.tick(t);
+  TEST_ASSERT_FALSE(tp.useEb(TR_AUTO, t));
+  for (int k = 0; k < 300; k++) { t += 1000; tp.onLoraBeacon(t); tp.tick(t); }   // 300 beacons = 299 s
+  TEST_ASSERT_FALSE(tp.armed()); TEST_ASSERT_TRUE(tp.armInS(t) > 0);
+  t += 1000; tp.onLoraBeacon(t); tp.tick(t);
+  TEST_ASSERT_TRUE(tp.armed()); TEST_ASSERT_EQUAL(0, tp.armInS(t));
   TEST_ASSERT_TRUE(tp.useLora(TR_AUTO, t)); TEST_ASSERT_FALSE(tp.useEb(TR_AUTO, t));
-  t += 11000; tp.tick(t);                                      // LoRa silent 11 s
+  t += 11000; tp.tick(t);                                      // armed, LoRa silent 11 s
   TEST_ASSERT_TRUE(tp.useEb(TR_AUTO, t)); TEST_ASSERT_TRUE(tp.useLora(TR_AUTO, t));
   for (int k = 0; k < 4; k++) { t += 1000; tp.onLoraBeacon(t); tp.tick(t); }
   TEST_ASSERT_TRUE(tp.useEb(TR_AUTO, t));                      // 4 beacons back: not yet

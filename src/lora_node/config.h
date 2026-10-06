@@ -49,13 +49,17 @@
 //   - Communication with sensor nodes requires matching LR mode
 //
 // ARCHITECTURE:
-//   - GATEWAY_ONSHORE (on ice): Uses LR mode, no web server, ESP-NOW + LoRa
-//   - GATEWAY_OFFSHORE (cabin): Normal WiFi AP for phone access, LoRa only (no ESP-NOW)
+//   - GATEWAY_ONSHORE (on ice): ESP-NOW (normal rate) + LoRa, no hotspot by default (v2)
+//   - GATEWAY_OFFSHORE (cabin): Normal WiFi AP for phone access, LoRa + ESP-NOW backbone (v2)
 //   - User checks fish status from OFFSHORE gateway via phone
 //
-// CRITICAL: Sensor nodes must also have ESPNOW_LONG_RANGE_MODE enabled!
+// CRITICAL: hubs and sensor nodes must use the SAME ESPNOW_LONG_RANGE_MODE value!
 // ═══════════════════════════════════════════════════════════════════════════
-#define ESPNOW_LONG_RANGE_MODE  true    // Enable LR mode for GATEWAY_ONSHORE
+// v2 (D28): ESP-NOW runs at the NORMAL rate (802.11b 1 Mbps) on every device. LR cannot share a board
+// with a phone hotspot (Espressif, esp-idf #4554), and the v1 range problem was the antenna height
+// (≈5 cm over the ice); the 20 cm mast gains far more than LR. Keep LR only for a range comparison:
+// it must then be set to the SAME value on every hub and tip-up (LR-only and normal cannot talk).
+#define ESPNOW_LONG_RANGE_MODE  false   // v2: normal rate (was true in v1)
 
 static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 

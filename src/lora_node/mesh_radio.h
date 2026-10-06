@@ -100,6 +100,7 @@ bool meshEbRelay();
 void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
 bool meshPollRelayCmd(uint8_t& dev, bool& on);           // hub: CMD_SET_RELAY received (dev may be self or a node)
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
+uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)
 
 // ---- sonar: test mode (fake data) + FOCUS stream. Blocks: lib/IceMesh/src/sonar_codec.h ----
 // Virtual sonar nodes on hubs use IDs 128 + (hub ID & 0x0F) * 8 + k: keep real node IDs below 128.

@@ -151,3 +151,36 @@ n = 3.0: 247 / 392 m; n = 3.5: 113 / 167 m. LoRa SF9/500 hub ↔ hub at n = 3.5:
 | V3 | **LoRa gone** for 10 min: Auto + 2 relays keeps every alert (p95 1 s); without relays 7 alerts are lost → relays matter when the pockets are far apart. |
 | V4 | **ESP-NOW only works with relays** (0 miss); without them the far pocket is out of reach (10 missed). |
 | V5 | ESP-NOW range is **the** uncertainty: with pessimistic 2.4 GHz propagation even 2 relays lose 41 alerts at 1 Mbps; LR brings it to 3 — the firmware uses LR (D24). Field-test before relying on ESP-NOW only. |
+
+## Sim v2.1 — design after D28: normal-rate ESP-NOW, every hub relays, setup phase (2026-10-06)
+Supersedes the v2 table above for the design choices (LR rows kept as reference only). Changes in the model:
+every device starts on the saved LoRa channel; the chalet moves channel only once armed; hubs' automatic
+fallback arms after 5 min of stable beacons; every hub relays the backbone; ESP-NOW at 1 Mbps (n = 3.0 unless noted).
+
+| Scenario | What | Trips | Missed | Alert p50/p95/max (s) | Hub pkts LoRa / ESP-NOW | FOCUS | Channel moves |
+|---|---|---|---|---|---|---|---|
+| p3_setup | hubs on at 0 / 5 / 15 min, chalet last at 25 min, 915 MHz 40 % busy (50 min runs) | 84 | 0 | 1 / 1 / 1 | 12456 / 2 | 48 %* | 1 per run, **0 before armed** |
+| p3_setup_newsite | same, hubs start on random channels (first use) | 91 | 0 | 1 / 1 / 2 | 12545 / 11 | 49 %* | 1 per run, **0 before armed** |
+| p3_lora | quiet LoRa | 101 | 0 | 1 / 1 / 1 | 16113 / 0 | 98 % | 0 |
+| p3_ch0_busy | 915 MHz 60 % busy at 5 min, Auto | 106 | 0 | 0 / 1 / 1 | 16067 / 0 | 97 % | 1 per run |
+| p3_ch0_busy_fixed | same, channel fixed | 101 | 0 | 1 / 4 / 6 | 10178 / 0 | 65 % | 0 |
+| p3_all_busy | every channel 35 % busy | 98 | 0 | 1 / 3 / 6 | 11056 / 3 | 71 % | 0 |
+| p3_lora_out | LoRa unusable 10-20 min, hubs relay | 104 | 0 | 1 / 1 / 3 | 10655 / 4545 | 91 % | 0 |
+| p3_lora_out_board | same + 1 spare relay board | 96 | 0 | 1 / 1 / 2 | 10675 / 4928 | 94 % | 0 |
+| p3_lora_out_norelay | same, relays off | 100 | 0 | 1 / 9 / 37 | 10710 / 2423 | 75 % | 0 |
+| p3_espnow | ESP-NOW only, hubs relay | 96 | 0 | 1 / 2 / 3 | 0 / 13754 | 83 % | 0 |
+| p3_espnow_board | ESP-NOW only, hubs relay + board | 104 | 0 | 1 / 2 / 3 | 0 / 15001 | 91 % | 0 |
+| p3_espnow_pess | ESP-NOW only, pessimistic 2.4 GHz (n = 3.5) | 102 | **58** | 6 / 42 / 55 | 0 / 903 | 5 % | 0 |
+| p3_espnow_pess_lr | same with LR (reference, not in the design) | 99 | **8** | 2 / 51 / 62 | 0 / 6070 | 42 % | 0 |
+| p3_degraded | +10 dB LoRa loss, bursts ×5, tip-up ESP-NOW 50 % | 96 | 0 | 1 / 1 / 6 | 15662 / 0 | 82 % | 0 |
+| h10_lora | 10 hubs | 343 | 0 | 1 / 2 / 11 | 22393 / 0 | 85 % | 0 |
+| h10_degraded | 10 hubs degraded | 328 | 0 | 1 / 7 / 25 | 18984 / 44 | 54 % | 0 |
+| h10_storm | 10 hubs, half the holes trip within 5 s | 361 | 0 | 1 / 2 / 11 | 22424 / 8 | 85 % | 0 |
+| h10_busy | 10 hubs, every channel 20 % busy | 350 | 0 | 2 / 6 / 16 | 17379 / 83 | 55 % | 0 |
+\* includes the 25 min before the chalet was switched on.
+
+| # | Finding |
+|---|---|
+| V6 | **Setup phase works**: switching devices on in any order, chalet last, causes no channel move and no fallback; all hubs are in the chalet's plan 4-9 s after it is switched on. Hubs that have not heard any beacon yet also send their status on ESP-NOW (searching), which is invisible to the user. |
+| V7 | With every hub relaying, a LoRa outage costs nothing in these layouts (p95 1 s); a spare relay board adds little. Relays off: p95 9 s, max 37 s. |
+| V8 | **ESP-NOW only over 250-660 m pockets is fragile if 2.4 GHz propagates badly** (58 missed at n = 3.5). LR would help (8 missed) but is not compatible with hotspots (D27). Covered in the design by LoRa first, and later by a hub becoming master on the ice (step 3), which shortens the ESP-NOW distances. |

@@ -79,39 +79,60 @@ class Dedup {
 //   TR_AUTO   : LoRa, plus the backbone after FALLBACK_MS without a LoRa beacon, until RETURN_BEACONS
 //               LoRa beacons in a row came back.
 // Sending on both is safe: the chalet keeps one state per node and drops repeated sonar pings.
+//
+// SETUP PHASE: after power-on the automatic fallbacks (Auto -> backbone, LoRa-only safety net) are not
+// armed: devices are switched on one by one while the holes are prepared, and a missing chalet then is
+// normal, not a failure. They arm after ARM_MS of LoRa beacons without a break longer than FALLBACK_MS
+// (the network ran complete for 5 min), and stay armed until the next reboot. ESP-NOW only, set by the
+// user, is never gated (explicit choice). A hub that has not heard a single LoRa beacon since power-on
+// is still searching: it also sends on the backbone (a chalet set to ESP-NOW only, or out of LoRa
+// reach, still gets it); that stops at the first LoRa beacon and is not a fallback.
 class TransportPolicy {
  public:
-  enum { FALLBACK_MS = 10000, SAFETY_MS = 60000, RETURN_BEACONS = 5, STREAK_GAP_MS = 3500 };
+  enum { FALLBACK_MS = 10000, SAFETY_MS = 60000, RETURN_BEACONS = 5, STREAK_GAP_MS = 3500, ARM_MS = 300000 };
 
-  void begin(uint32_t now_ms) { last_lora_ = last_eb_ = now_ms; streak_ = 0; eb_active_ = false; started_ = true; }
+  void begin(uint32_t now_ms) { last_lora_ = last_eb_ = now_ms; streak_ = 0; eb_active_ = false; started_ = true; stable_ = false; armed_ = false; heard_lora_ = false; }
   void onLoraBeacon(uint32_t now_ms) {
     if (!started_) begin(now_ms);
+    heard_lora_ = true;
+    if (!stable_ || now_ms - last_lora_ > FALLBACK_MS) { stable_ = true; stable_since_ = now_ms; }   // (re)start the arming run
     streak_ = (now_ms - last_lora_ <= STREAK_GAP_MS) ? static_cast<uint16_t>(streak_ + 1) : 1;
     last_lora_ = now_ms;
+    if (!armed_ && now_ms - stable_since_ >= ARM_MS) armed_ = true;
     if (eb_active_ && streak_ >= RETURN_BEACONS) eb_active_ = false;
   }
   void onEbBeacon(uint32_t now_ms) { if (!started_) begin(now_ms); last_eb_ = now_ms; }
   void tick(uint32_t now_ms) {
     if (!started_) begin(now_ms);
-    if (now_ms - last_lora_ > FALLBACK_MS) { eb_active_ = true; streak_ = 0; }
+    if (armed_ && now_ms - last_lora_ > FALLBACK_MS) { eb_active_ = true; streak_ = 0; }
   }
+  void arm() { armed_ = true; }   // user: "setup done" (and tests)
   bool useLora(uint8_t mode, uint32_t now_ms) const {
     if (mode == tdma::TR_ESPNOW) return now_ms - last_eb_ > SAFETY_MS;
     return true;
   }
   bool useEb(uint8_t mode, uint32_t now_ms) const {
     if (mode == tdma::TR_ESPNOW) return true;
-    if (mode == tdma::TR_LORA) return now_ms - last_lora_ > SAFETY_MS;
-    return eb_active_;
+    if (mode == tdma::TR_LORA) return armed_ && now_ms - last_lora_ > SAFETY_MS;
+    return eb_active_ || !heard_lora_;
+  }
+  bool armed() const { return armed_; }
+  // seconds until the fallbacks arm (0 = armed; ARM_MS/1000 while no beacon run is going)
+  uint32_t armInS(uint32_t now_ms) const {
+    if (armed_) return 0;
+    if (!stable_ || now_ms - last_lora_ > FALLBACK_MS) return ARM_MS / 1000;
+    const uint32_t run = now_ms - stable_since_;
+    return run >= ARM_MS ? 0 : (ARM_MS - run + 999) / 1000;
   }
   bool fallbackActive() const { return eb_active_; }
+  bool searching() const { return !heard_lora_; }
   uint32_t msSinceLora(uint32_t now_ms) const { return now_ms - last_lora_; }
   uint32_t msSinceEb(uint32_t now_ms) const { return now_ms - last_eb_; }
 
  private:
-  uint32_t last_lora_ = 0, last_eb_ = 0;
+  uint32_t last_lora_ = 0, last_eb_ = 0, stable_since_ = 0;
   uint16_t streak_ = 0;
-  bool eb_active_ = false, started_ = false;
+  bool eb_active_ = false, started_ = false, stable_ = false, armed_ = false, heard_lora_ = false;
 };
 
 }  // namespace eb

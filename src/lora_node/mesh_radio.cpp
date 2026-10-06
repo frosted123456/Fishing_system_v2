@@ -125,6 +125,21 @@ static volatile uint8_t g_relay_dev = 0;
 static volatile bool g_relay_on = false;
 struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; };
 static HubPath g_paths[12];                     // chalet, under lock: how each hub was last heard
+// Setup phase (chalet): no automatic channel move until a hub has been in the network for 5 min, or
+// 10 min after boot (a channel so busy that no hub can join). Hubs: TransportPolicy::armed().
+static const uint32_t CH_ARM_HUB_MS = 300000, CH_ARM_BOOT_MS = 600000;
+static volatile uint32_t g_first_hub_ms = 0;
+static bool chaletArmed() {
+  const uint32_t now = millis();
+  return (g_first_hub_ms != 0 && now - g_first_hub_ms >= CH_ARM_HUB_MS) || now >= CH_ARM_BOOT_MS;
+}
+static uint32_t chaletArmInS() {
+  if (chaletArmed()) return 0;
+  const uint32_t now = millis();
+  uint32_t a = CH_ARM_BOOT_MS - now;
+  if (g_first_hub_ms != 0) { const uint32_t b = CH_ARM_HUB_MS - (now - g_first_hub_ms); if (b < a) a = b; }
+  return (a + 999) / 1000;
+}
 
 struct Lock {
   Lock() { xSemaphoreTake(g_mx, portMAX_DELAY); }
@@ -390,14 +405,14 @@ static void chaletHandle(const ChaletRxResult& res, bool eb = false, uint8_t hop
   }
 }
 
-// Boot: fixed channel, or (Auto) sample every channel and leave the last one used only if it is busy.
+// Boot: fixed channel, or (Auto) the channel used last time — every device starts there, so the
+// network comes up the same way however the devices are switched on. The scan only fills the
+// activity meter; Auto moves wait for the end of the setup phase (chaletArmed).
 static void chaletBootChannel() {
   if (g_cfg_channel < LORA_CHANNELS) { g_lora_ch = g_cfg_channel; tune(g_lora_ch); return; }
   tune(g_lora_ch);
   for (uint8_t c = 0; c < LORA_CHANNELS; c++) sampleChannel(c, nowUs() + BOOT_SCAN_US);
   busyPublish();
-  const int b = betterChannel(g_lora_ch);
-  if (b >= 0) { g_lora_ch = static_cast<uint8_t>(b); g_ch_event = true; }
   tune(g_lora_ch);
 }
 
@@ -429,7 +444,7 @@ static void chaletChannelEval() {
   busyPublish();
   int to = -1;
   if (g_cfg_channel < LORA_CHANNELS) { if (g_cfg_channel != g_lora_ch) to = g_cfg_channel; }
-  else to = betterChannel(g_lora_ch);
+  else if (chaletArmed()) to = betterChannel(g_lora_ch);   // setup phase: never move by itself
   if (to >= 0) { Lock l; cmdQueue(CMD_SET_CHANNEL, 0, static_cast<uint8_t>(to)); }
 }
 
@@ -493,6 +508,9 @@ static void chaletTask() {
     }
     {
       Lock l;
+      if (g_first_hub_ms == 0) {   // setup phase clock starts with the first hub in the network
+        for (uint8_t i = 0; i < g_ch->planner.capacity(); i++) if (g_ch->planner.hubAt(i) != nullptr) { g_first_hub_ms = millis(); break; }
+      }
       NodeChange ex[8];
       const uint8_t n = g_ch->expireNodes(ex, 8);
       for (uint8_t k = 0; k < n; k++) {
@@ -881,6 +899,13 @@ float meshLoraChannelMHz(uint8_t ch) { return loraChannelMHz(ch); }
 void meshRescanChannels() { g_cfg_rescan = true; }
 void meshChannelBusy(uint8_t* pct8) { for (uint8_t c = 0; c < LORA_CHANNELS; c++) pct8[c] = g_busy_pct[c]; }
 
+uint32_t meshSetupArmInS() {
+  if (g_mx == nullptr) return 0;
+  if (g_chalet) return chaletArmInS();
+  Lock l;
+  return g_pol.armInS(millis());
+}
+
 bool meshPollChannelChanged(uint8_t& ch) {
   if (!g_ch_event) return false;
   g_ch_event = false;
@@ -996,6 +1021,12 @@ String meshRadioJson() {
   static const char* const TR_NAMES[] = {"auto", "lora", "espnow"};
   const uint8_t tr = meshTransport();
   s += ",\"transport\":\""; s += TR_NAMES[tr <= TR_ESPNOW ? tr : 0]; s += "\"";
+  {
+    uint32_t arm_s;
+    if (g_chalet) arm_s = chaletArmInS();
+    else { Lock l; arm_s = g_pol.armInS(millis()); }
+    s += ",\"setup\":"; s += arm_s ? "true" : "false"; s += ",\"arm_in_s\":"; s += arm_s;
+  }
   s += ",\"channel\":"; s += g_lora_ch;
   s += ",\"channel_mhz\":"; s += String(loraChannelMHz(g_lora_ch), 1);
   s += ",\"eb\":{\"lr\":"; s += EB_LR ? "true" : "false";
@@ -1150,6 +1181,13 @@ void meshPrintStatus(Print& out) {
   out.printf("[mesh] late TX skipped: %lu\n", (unsigned long)g_tx_late_skips);
   static const char* const TR_NAMES[] = {"Auto", "LoRa only", "ESP-NOW only"};
   const uint8_t tr = meshTransport();
+  {
+    uint32_t arm_s;
+    if (g_chalet) arm_s = chaletArmInS();
+    else { Lock l; arm_s = g_pol.armInS(millis()); }
+    if (arm_s) out.printf("[net] SETUP PHASE: automatic fallbacks arm in %lu s (network complete and stable for 5 min)\n", (unsigned long)arm_s);
+    else out.println(F("[net] running: automatic fallbacks armed"));
+  }
   out.printf("[net] transport %s | LoRa ch %u (%.1f MHz)%s | backbone rx %lu tx %lu relayed %lu dup %lu | relay %s\n",
              TR_NAMES[tr <= TR_ESPNOW ? tr : 0], g_lora_ch, loraChannelMHz(g_lora_ch),
              g_chalet ? (g_cfg_channel == MESH_CH_AUTO ? " auto" : " fixed") : "",

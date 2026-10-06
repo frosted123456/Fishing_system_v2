@@ -475,18 +475,10 @@ void setupEspNow() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LONG RANGE MODE - Enable ESP32 proprietary 802.11 LR mode
-  // ═══════════════════════════════════════════════════════════════════════════
-  // LR mode improves receiver sensitivity from ~-72dBm to ~-98dBm
-  // This provides 10-20x range improvement on flat ice surfaces
-  // IMPORTANT: Both sender and receiver MUST use LR mode for communication
-  // ═══════════════════════════════════════════════════════════════════════════
-  #if ESPNOW_LONG_RANGE_MODE
-  DEBUG_PRINTLN(F("Enabling Long Range (LR) mode..."));
-
-  // Set maximum TX power (84 = 21dBm, which is the max allowed)
-  // This must be done before setting protocol
+  // v2: ESP-NOW at the normal rate (config.h, D28). Range comes from the antenna height (mast ≥ 20 cm):
+  // at ~5 cm over the ice the surface reflection cancels most of the signal (est. ~24 dB lost at 50 m),
+  // far more than LR adds. LR-only and normal devices cannot hear each other.
+  // v2: maximum TX power in every mode (was only set in LR mode)
   esp_err_t txResult = esp_wifi_set_max_tx_power(84);
   if (txResult != ESP_OK) {
     DEBUG_PRINTF("WARNING: Failed to set TX power: %d\n", txResult);
@@ -496,8 +488,8 @@ void setupEspNow() {
     DEBUG_PRINTF("TX power set to: %.2f dBm\n", actualPower * 0.25);
   }
 
-  // Enable LR (Long Range) protocol
-  // WIFI_PROTOCOL_LR is ESP32-specific and provides ~26dB sensitivity improvement
+  #if ESPNOW_LONG_RANGE_MODE
+  // range-comparison build only (config.h): every hub and tip-up must use the same setting
   esp_err_t lrResult = esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
   if (lrResult != ESP_OK) {
     DEBUG_PRINTF("WARNING: Failed to enable LR mode: %d\n", lrResult);

@@ -56,7 +56,8 @@ struct Scenario {
   uint8_t transport = TR_AUTO;
   bool lr = false;
   double eb_exp = 3.0;                 // ESP-NOW path loss exponent (open ice ~2.5-3, people/snow ~3.5)
-  std::vector<int> relay_hubs;         // hub indices with the relay setting on
+  std::vector<int> relay_hubs;         // hub indices with the relay setting on (besides hubs_relay)
+  bool hubs_relay = true;              // firmware v2 default: every hub relays the backbone
   std::vector<std::pair<double, double> > relays;   // dedicated relay boards (x, y)
   double extra_db = 0, flat_loss = 0, wifi_loss = 0.03;
   double burst_p = 0.002, burst_exit = 0.25;
@@ -70,6 +71,9 @@ struct Scenario {
   double hub_timeout_s = 150;          // firmware v2 value (sim finding S3)
   int sonar_tries = 2;                 // firmware v2 value (sim finding S4)
   bool storm = false;
+  // setup phase: devices switched on one by one (hub_on[h] s), chalet at chalet_on s; no trip before chalet_on + 60
+  std::vector<double> hub_on; double chalet_on = 0;
+  bool hubs_random_ch = false;         // hubs start on random channels (first use ever); default: all on the saved channel
 };
 
 struct NodeSim {
@@ -97,6 +101,9 @@ struct Stats {
   long fmade = 0, fgot = 0, timing = 0, ch_switch = 0;
   long pkt_lora = 0, pkt_eb = 0;        // hub packets delivered to the chalet per path
   double eb_time = 0;                   // hub-seconds with the backbone in use
+  double eb_setup = 0;                  // ... of which while the chalet was not yet on (setup phase)
+  long moves_setup = 0;                 // channel moves before the chalet armed
+  std::vector<double> join;             // s from chalet power-on to every hub scheduled
 };
 
 static double pct(std::vector<double> v, double p) {
@@ -141,10 +148,11 @@ class World {
       H.idx = h; H.id = static_cast<uint8_t>(h + 1); H.x = pos[h][0]; H.y = pos[h][1]; H.obst = pos[h][2];
       H.role.network_id = 0x42; H.role.self = H.id;
       H.ppm = rng.range(-sc.ppm, sc.ppm); H.off_us = rng.range(0, 3e8);
-      H.ch = static_cast<uint8_t>(rng.next() % LORA_CHANNELS);   // hubs start anywhere and search
+      H.ch = sc.hubs_random_ch ? static_cast<uint8_t>(rng.next() % LORA_CHANNELS) : 0;   // firmware: saved channel
       H.pol.begin(0);
     }
     for (int k : sc.relay_hubs) if (k < NH) hubs[k].relay = true;
+    if (sc.hubs_relay) for (auto& H : hubs) H.relay = true;
     NR = static_cast<int>(sc.relays.size());
     for (auto& r : sc.relays) { rx_.push_back(r.first); ry_.push_back(r.second); }
     relay_dedup.resize(NR);
@@ -158,12 +166,16 @@ class World {
         NodeSim n; n.hub = h;
         n.hub_hole = p3 && k == 0;
         n.id = n.hub_hole ? hubs[h].id : static_cast<uint8_t>(10 * (h + 1) + k);
-        n.next_trip = rng.range(60, 600); n.next_send = rng.range(0, 60);
+        n.next_trip = sc.chalet_on + rng.range(60, 600); n.next_send = rng.range(0, 60);
         n.sonar = p3 ? true : (k == 0 && (h == 2 || h == 7 || h == 4 || h == 9));
         hubs[h].nodes.push_back(static_cast<int>(nodes.size())); nodes.push_back(n);
       }
     for (auto& n : nodes) if (n.sonar) { n.src = new sonar::SonarSource(); n.src->begin(n.id, 1000u + n.id, static_cast<uint16_t>(rng.next())); }
-    chalet_ch = pickChannel();
+    chalet_ch = 0;   // firmware: the chalet starts on the saved channel, Auto moves only once armed
+  }
+  bool chalet_alive = true; double first_hub_s = -1, joined_s = -1;
+  bool chaletArmed() const {   // firmware chaletArmed(): a hub in the network for 5 min, or 10 min uptime
+    return (first_hub_s >= 0 && now_s - first_hub_s >= 300) || now_s - sc.chalet_on >= 600;
   }
   ~World() { for (auto& n : nodes) delete n.src; }
 
@@ -171,7 +183,7 @@ class World {
   double dx(int d) const { return d == 0 ? 0 : (d <= NH ? hubs[d - 1].x : rx_[d - 1 - NH]); }
   double dy(int d) const { return d == 0 ? 0 : (d <= NH ? hubs[d - 1].y : ry_[d - 1 - NH]); }
   double dist(int a, int b) const { return std::max(1.0, std::hypot(dx(a) - dx(b), dy(a) - dy(b))); }
-  bool alive(int d) const { return d == 0 || d > NH || hubs[d - 1].alive; }
+  bool alive(int d) const { return d == 0 ? chalet_alive : (d > NH || hubs[d - 1].alive); }
 
   // ---------------- LoRa ----------------
   double duty(uint8_t ch) const {
@@ -291,12 +303,12 @@ class World {
   void manageChannel(uint16_t f) {
     if (ch_countdown >= 0) {
       chalet.cmd = CMD_SET_CHANNEL; chalet.cmd_seq = cmd_seq; chalet.cmd_target = static_cast<uint8_t>(ch_countdown); chalet.cmd_value = ch_target;
-      if (ch_countdown == 0) { chalet_ch = ch_target; ch_countdown = -1; st.ch_switch++; }
+      if (ch_countdown == 0) { chalet_ch = ch_target; ch_countdown = -1; st.ch_switch++; if (!chaletArmed()) st.moves_setup++; }
       else ch_countdown--;
       return;
     }
     chalet.cmd = CMD_NONE;
-    if (!sc.auto_channel || now_s - last_ch_eval < 60) return;
+    if (!sc.auto_channel || now_s - last_ch_eval < 60 || !chaletArmed()) return;
     last_ch_eval = now_s;
     const double cur = duty(chalet_ch);
     if (cur > 0.25) {
@@ -318,7 +330,10 @@ class World {
       if (!s.empty()) { focus = s[(static_cast<int>(now_s) / 120) % s.size()]; chalet.focus_node = focus; }
     }
     if (sc.storm && std::fabs(now_s - 720) < 1.0) for (auto& n : nodes) if (!n.tripped && rng.chance(0.5)) n.next_trip = now_s + rng.range(0, 5);
-    manageChannel(f);
+    // power-on order (setup phase)
+    chalet_alive = now_s >= sc.chalet_on;
+    for (int h = 0; h < NH; h++) hubs[h].alive = h >= static_cast<int>(sc.hub_on.size()) || now_s >= sc.hub_on[h];
+    if (chalet_alive) manageChannel(f);
     chalet.net_cfg = makeNetCfg(sc.transport, sc.lr, chalet_ch);
 
     uint8_t bbuf[MAX_PACKET];
@@ -335,6 +350,8 @@ class World {
     for (uint8_t i = 0; i < plan.n_slots; i++) if (plan.slots[i].kind == SLOT_HUB) hub_slots++;
     int alive_hubs = 0; for (auto& H : hubs) alive_hubs += H.alive;
     if (!lora_on || hub_slots >= alive_hubs) st.frames_all++;
+    if (chalet_alive && first_hub_s < 0 && hub_slots > 0) first_hub_s = now_s;
+    if (chalet_alive && joined_s < 0 && alive_hubs == NH && hub_slots >= NH) { joined_s = now_s; st.join.push_back(now_s - sc.chalet_on); }
     if (getenv("SIM_PLAN") && now_s > 120) {
       fprintf(stderr, "frame %u ms hubslots %d slots %u allow %u missing:", plan.frame_10ms * 10u, hub_slots, plan.n_slots, chalet.planner.lastAllowance());
       for (int h = 0; h < NH; h++) { bool in = false; for (uint8_t i = 0; i < plan.n_slots; i++) in |= plan.slots[i].kind == SLOT_HUB && plan.slots[i].owner == hubs[h].id;
@@ -344,7 +361,7 @@ class World {
 
     // ---- LoRa: beacon, echo, slots ----
     std::vector<bool> fresh(NH, false);
-    if (lora_on) {
+    if (lora_on && chalet_alive) {
       const double b_air = beaconAirtimeUs(static_cast<uint16_t>(blen));
       for (int h = 0; h < NH; h++) {
         HubSim& H = hubs[h];
@@ -449,7 +466,7 @@ class World {
     if (sc.transport != TR_LORA || true) {
       uint8_t eb_pl[MAX_PACKET];
       const size_t eb_len = chalet.buildEbBeacon(eb_pl, sizeof eb_pl);
-      const bool send_beacon = sc.transport != TR_LORA;
+      const bool send_beacon = sc.transport != TR_LORA && chalet_alive;
       if (send_beacon) {
         chalet_eb_seq++;
         const std::vector<int> got = flood(0);
@@ -470,6 +487,7 @@ class World {
         H.used_eb = use;
         if (!use) continue;
         st.eb_time += dt;
+        if (!chalet_alive) st.eb_setup += dt;
         uint8_t hp[MAX_PACKET];
         const size_t hl = H.role.buildHubFree(hp, eb::MAX_PAYLOAD, 0, 4000, 1, H.role.frameNow());
         if (!hl) continue;
@@ -565,6 +583,8 @@ static void runOne(const Scenario& sc, uint64_t seed, int minutes, Agg& A) {
   a.base_sum += s.base_sum; a.base_n += s.base_n; a.base_max = std::max(a.base_max, s.base_max); a.sync = std::max(a.sync, s.sync);
   a.fmade += s.fmade; a.fgot += s.fgot; a.timing += s.timing; a.ch_switch += s.ch_switch;
   a.pkt_lora += s.pkt_lora; a.pkt_eb += s.pkt_eb; a.eb_time += s.eb_time;
+  a.eb_setup += s.eb_setup; a.moves_setup += s.moves_setup;
+  if (sc.chalet_on > 0) a.join.push_back(w.joined_s >= 0 ? w.joined_s - sc.chalet_on : -1);
 }
 
 static std::vector<Scenario> scenarios() {
@@ -572,16 +592,18 @@ static std::vector<Scenario> scenarios() {
   auto add = [&](Scenario s) { v.push_back(s); };
   // ---- Frank's field setup: 3 pockets x 3 holes ----
   { Scenario s; s.name = "p3_lora"; s.what = "3 pockets, quiet LoRa, Auto"; add(s); }
+  { Scenario s; s.name = "p3_setup"; s.what = "setup: hubs on at 0 / 5 / 15 min, chalet last at 25 min, 915 MHz 40 % busy all along"; s.hub_on = {0, 300, 900}; s.chalet_on = 1500; s.duty[0] = 0.4; add(s); }
+  { Scenario s; s.name = "p3_setup_newsite"; s.what = "same, first use: hubs start on random channels"; s.hub_on = {0, 300, 900}; s.chalet_on = 1500; s.duty[0] = 0.4; s.hubs_random_ch = true; add(s); }
   { Scenario s; s.name = "p3_ch0_busy"; s.what = "channel 915 MHz gets 60 % foreign traffic at 5 min; chalet moves the network"; s.busy_ch0_from = 300; s.auto_channel = true; add(s); }
   { Scenario s; s.name = "p3_ch0_busy_fixed"; s.what = "same, channel change off"; s.busy_ch0_from = 300; s.auto_channel = false; add(s); }
-  { Scenario s; s.name = "p3_all_busy"; s.what = "every LoRa channel 35 % foreign traffic, Auto, relays: hub 1 + 1 board"; for (int c = 0; c < 8; c++) s.duty[c] = 0.35; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
-  { Scenario s; s.name = "p3_lora_out"; s.what = "LoRa unusable 10-20 min, Auto, relays: hub 1 + 1 board"; s.jam_from = 600; s.jam_to = 1200; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
-  { Scenario s; s.name = "p3_lora_out_norelay"; s.what = "LoRa unusable 10-20 min, Auto, no relay"; s.jam_from = 600; s.jam_to = 1200; add(s); }
-  { Scenario s; s.name = "p3_espnow"; s.what = "ESP-NOW only, relays: hub 1 + 1 board"; s.transport = TR_ESPNOW; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
-  { Scenario s; s.name = "p3_espnow_lr"; s.what = "ESP-NOW only + LR, relays: hub 1 + 1 board"; s.transport = TR_ESPNOW; s.lr = true; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
-  { Scenario s; s.name = "p3_espnow_norelay"; s.what = "ESP-NOW only, no relay"; s.transport = TR_ESPNOW; add(s); }
-  { Scenario s; s.name = "p3_espnow_pess"; s.what = "ESP-NOW only, relays, pessimistic 2.4 GHz (people, snow)"; s.transport = TR_ESPNOW; s.eb_exp = 3.5; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
-  { Scenario s; s.name = "p3_espnow_pess_lr"; s.what = "ESP-NOW only + LR, relays, pessimistic 2.4 GHz"; s.transport = TR_ESPNOW; s.lr = true; s.eb_exp = 3.5; s.relay_hubs = {0}; s.relays = {{330, 0}}; add(s); }
+  { Scenario s; s.name = "p3_all_busy"; s.what = "every LoRa channel 35 % foreign traffic, Auto"; for (int c = 0; c < 8; c++) s.duty[c] = 0.35; add(s); }
+  { Scenario s; s.name = "p3_lora_out"; s.what = "LoRa unusable 10-20 min, Auto, hubs relay (default)"; s.jam_from = 600; s.jam_to = 1200; add(s); }
+  { Scenario s; s.name = "p3_lora_out_board"; s.what = "same + 1 spare relay board between pocket 2 and 3"; s.jam_from = 600; s.jam_to = 1200; s.relays = {{330, 0}}; add(s); }
+  { Scenario s; s.name = "p3_lora_out_norelay"; s.what = "LoRa unusable 10-20 min, Auto, relays off"; s.jam_from = 600; s.jam_to = 1200; s.hubs_relay = false; add(s); }
+  { Scenario s; s.name = "p3_espnow"; s.what = "ESP-NOW only (normal rate), hubs relay"; s.transport = TR_ESPNOW; add(s); }
+  { Scenario s; s.name = "p3_espnow_board"; s.what = "ESP-NOW only, hubs relay + 1 spare relay board"; s.transport = TR_ESPNOW; s.relays = {{330, 0}}; add(s); }
+  { Scenario s; s.name = "p3_espnow_pess"; s.what = "ESP-NOW only, hubs relay + board, pessimistic 2.4 GHz (n = 3.5)"; s.transport = TR_ESPNOW; s.eb_exp = 3.5; s.relays = {{330, 0}}; add(s); }
+  { Scenario s; s.name = "p3_espnow_pess_lr"; s.what = "same with LR (reference only, not in the design)"; s.transport = TR_ESPNOW; s.lr = true; s.eb_exp = 3.5; s.relays = {{330, 0}}; add(s); }
   { Scenario s; s.name = "p3_degraded"; s.what = "+10 dB LoRa loss, bursts x5, tip-up ESP-NOW 50 %"; s.extra_db = 10; s.burst_p = 0.01; s.espnow_p = 0.5; add(s); }
   // ---- scaling: 10 hubs ----
   { Scenario s; s.name = "h10_lora"; s.layout = "hubs10"; s.what = "10 hubs, quiet LoRa (frame length chosen by the chalet)"; add(s); }
@@ -611,6 +633,11 @@ int main(int argc, char** argv) {
            sc.name.c_str(), A.trips, A.missed, pct(s.alert, 0.5), pct(s.alert, 0.95), pct(s.alert, 1.0), pct(s.clear, 0.95), s.foff_s / 60.0,
            100 * s.frames_all / s.frames, s.frame_ms_sum / s.frames, s.pkt_lora, s.pkt_eb, 100 * s.eb_time / hub_time,
            s.fmade ? 100.0 * s.fgot / s.fmade : 0, pct(s.son, 0.95), s.base_n ? s.base_sum / s.base_n : 0, s.base_max, s.ch_switch);
+    if (sc.chalet_on > 0) {
+      printf("|  ↳ setup | searching hubs also on ESP-NOW before the chalet: %.0f hub-s | channel moves before armed: %ld | all hubs scheduled after chalet on (s):", s.eb_setup, s.moves_setup);
+      for (double j : s.join) printf(" %.0f", j);
+      printf(" |\n");
+    }
     fflush(stdout);
   }
   if (getenv("SIM_SCENARIOS")) { printf("\n"); for (auto& sc : scenarios()) printf("| %s | %s |\n", sc.name.c_str(), sc.what.c_str()); }
