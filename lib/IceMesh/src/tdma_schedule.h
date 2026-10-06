@@ -1,8 +1,9 @@
 // Superframe timing shared by the chalet and every hub. All times are µs relative to the
-// frame reference REF = end of the chalet beacon transmission (TxDone at the chalet,
-// RxDone at a hub). Both sides compute the same offsets from the beacon's slot list.
+// frame reference REF = START of the chalet beacon transmission. Nobody measures a start directly:
+// the chalet takes TxDone - airtime(beacon), a hub RxDone - airtime(beacon) (same formula on both
+// sides), so REF is exactly periodic whatever the beacon length.
 //
-//   REF | BEACON_GAP | slot 0: LEAD  [tx airtime(allowance)]  TAIL | slot 1 ... | margin | next beacon
+//   REF [beacon airtime] BEACON_GAP | slot 0: LEAD [tx airtime(allowance)] TAIL | slot 1 ... | margin | next REF
 //
 // All the timing constants below are ESTIMATES to be confirmed with the radio test mode
 // (hubs report their measured beacon timing error in the health record).
@@ -33,9 +34,14 @@ inline uint32_t slotDurationUs(const Slot& s) {
   return LEAD_US + modeAirtimeUs(slotMode(s), s.allowance) + TAIL_US;
 }
 
+inline uint32_t beaconAirtimeUs(uint16_t beacon_len) { return modeAirtimeUs(MODE_SF9_BW500, beacon_len); }
+
+// REF from the end of a received/transmitted beacon of `len` bytes.
+inline uint32_t refFromBeaconEnd(uint32_t end_us, uint16_t len) { return end_us - beaconAirtimeUs(len); }
+
 // Fills out[i] for each slot; returns the end of the last slot (µs after REF).
-inline uint32_t computeSlotTimes(const Slot* slots, uint8_t n, SlotTime* out) {
-  uint32_t t = BEACON_GAP_US;
+inline uint32_t computeSlotTimes(const Slot* slots, uint8_t n, SlotTime* out, uint16_t beacon_len) {
+  uint32_t t = beaconAirtimeUs(beacon_len) + BEACON_GAP_US;
   for (uint8_t i = 0; i < n; i++) {
     out[i].start = t;
     out[i].tx = t + LEAD_US;
@@ -51,11 +57,11 @@ inline uint32_t refFromSlotPacket(uint32_t rx_end_us, const SlotTime& st, RadioM
   return rx_end_us - (st.tx + modeAirtimeUs(mode, len));
 }
 
-// Does the plan fit in the frame? (slots after REF + margin must end before the next beacon starts)
-inline bool planFits(const Slot* slots, uint8_t n, uint32_t frame_us, uint32_t beacon_airtime_us) {
+// Does the plan fit in the frame? (beacon + slots + margin before the next REF)
+inline bool planFits(const Slot* slots, uint8_t n, uint32_t frame_us, uint16_t beacon_len) {
   SlotTime tmp[MAX_SLOTS];
-  const uint32_t end = computeSlotTimes(slots, n, tmp);
-  return end + FRAME_MARGIN_US + beacon_airtime_us <= frame_us;
+  const uint32_t end = computeSlotTimes(slots, n, tmp, beacon_len);
+  return end + FRAME_MARGIN_US <= frame_us;
 }
 
 }  // namespace tdma

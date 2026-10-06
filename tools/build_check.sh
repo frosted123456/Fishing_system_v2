@@ -45,7 +45,7 @@ for e in "${ENVS[@]}"; do
   cp "$REPO"/src/$FW/* "$SK/"; cp "$REPO"/include/*.h "$SK/"
   echo "=== $e ($FQBN)"
   if $CLI compile --fqbn "$FQBN" --library "$REPO/lib/IceMesh" \
-       --build-path "$OUT/build/$e" --warnings default \
+       --build-path "$OUT/build/$e" --warnings "${WARNINGS:-default}" \
        --build-property "runtime.tools.ctags.path=$ESP_HOME/tools/fakectags" \
        --build-property "compiler.cpp.extra_flags=$FLAGS" "$SK" > "$OUT/$e.log" 2>&1; then
     grep -E 'Sketch uses|Global variables' "$OUT/$e.log"

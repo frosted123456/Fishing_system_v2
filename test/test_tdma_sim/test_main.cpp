@@ -52,7 +52,7 @@ struct World {
     bool fresh[NH] = {false, false, false};
     uint8_t cmd;
     for (int h = 0; h < NH; h++)
-      if (hears(CHALET, ids[h])) fresh[h] = hub[h].onBeacon(bbuf, blen, ref, -90, 20, cmd);
+      if (hears(CHALET, ids[h])) fresh[h] = hub[h].onBeacon(bbuf, blen, ref + beaconAirtimeUs(static_cast<uint16_t>(blen)), -90, 20, cmd);
     const Beacon& plan = chalet.beacon;
     // echo slots first (they are first in the plan)
     uint8_t i = 0;

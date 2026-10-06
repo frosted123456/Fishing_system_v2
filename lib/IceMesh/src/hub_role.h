@@ -46,7 +46,8 @@ class HubRole {
   HubRole() { memset(&plan, 0, sizeof(plan)); resetFrameScratch(); n_joins_ = 0; n_nb_last_ = 0; nodeinfo_idx_ = 0; }
 
   // ---- beacon / echo --------------------------------------------------------------------
-  // rx_end_us: RxDone time. Returns true when a plan for the current frame was installed.
+  // rx_end_us: RxDone time (REF is derived from it).
+  uint16_t beacon_len = 0;  // length of the installed beacon/echo Returns true when a plan for the current frame was installed.
   // `cmd_out` gets a new command (CMD_*) when the beacon carries one not seen before.
   bool onBeacon(const uint8_t* p, size_t len, uint32_t rx_end_us, int8_t rssi, int8_t snr_q4, uint8_t& cmd_out) {
     cmd_out = CMD_NONE;
@@ -54,9 +55,9 @@ class HubRole {
     if (!decodeBeacon(p, len, network_id, b, t)) return false;
     if (t == PT_ECHO && b.src == self) return false;
     if (t == PT_ECHO && have_plan && !plan_from_echo && b.frame == plan.frame) return false;  // already have the original
-    uint32_t ref = rx_end_us;
+    uint32_t ref = refFromBeaconEnd(rx_end_us, static_cast<uint16_t>(len));
     SlotTime tt[MAX_SLOTS];
-    computeSlotTimes(b.slots, b.n_slots, tt);
+    computeSlotTimes(b.slots, b.n_slots, tt, static_cast<uint16_t>(len));   // echo has the beacon's length
     if (t == PT_ECHO) {
       int idx = -1;
       for (uint8_t i = 0; i < b.n_slots; i++) if (b.slots[i].kind == SLOT_ECHO && b.slots[i].owner == b.src) idx = i;
@@ -68,6 +69,7 @@ class HubRole {
     }
     sync.onBeacon(ref, b.frame, static_cast<uint32_t>(b.frame_10ms) * 10000UL);
     plan = b;
+    beacon_len = static_cast<uint16_t>(len);
     memcpy(times, tt, sizeof(tt));
     have_plan = true;
     plan_from_echo = (t == PT_ECHO);

@@ -20,6 +20,7 @@ class ChaletRole {
   Beacon beacon;
   SlotTime times[MAX_SLOTS];
   uint16_t frame = 0;
+  uint16_t beacon_len = 0;
   uint32_t packets_rx = 0, bad_packets = 0, test_bytes_rx = 0;
 
   // Flags/command the caller wants in the next beacon.
@@ -39,8 +40,10 @@ class ChaletRole {
                                         (planner.cfg.test_mode != TEST_OFF ? BF_TEST : 0) |
                                         (planner.cfg.adaptive ? BF_ADAPTIVE : 0));
     beacon.cmd = cmd; beacon.cmd_seq = cmd_seq; beacon.silence_10s = silence_10s; beacon.focus_node = focus_node;
-    computeSlotTimes(beacon.slots, beacon.n_slots, times);
-    return encodeBeacon(beacon, PT_BEACON, buf, cap);
+    const size_t len = encodeBeacon(beacon, PT_BEACON, buf, cap);
+    beacon_len = static_cast<uint16_t>(len);
+    computeSlotTimes(beacon.slots, beacon.n_slots, times, beacon_len);
+    return len;
   }
 
   // A valid packet was received during slot i. Fills `res` for HUB packets (node changes etc.).
@@ -50,7 +53,7 @@ class ChaletRole {
     if (i >= beacon.n_slots || !readHeader(p, len, planner.cfg.network_id, h)) { bad_packets++; return false; }
     const Slot& s = beacon.slots[i];
     packets_rx++;
-    if (h.type == PT_JOIN && s.kind == SLOT_JOIN) { planner.onJoin(h.src, 0, rssi, frame); return false; }
+    if (h.type == PT_JOIN) { planner.onJoin(h.src, 0, rssi, frame); return false; }   // JOIN slot or random
     if (h.type != PT_HUB) return false;
     planner.onDirectPacket(h.src, frame, rssi, snr_q4, s.mode, s.kind == SLOT_HUB && s.owner == h.src);
     res = consumeHubPacket(p, len, planner.cfg.network_id, frame, planner, nodes);

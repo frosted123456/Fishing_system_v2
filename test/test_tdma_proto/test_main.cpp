@@ -149,8 +149,9 @@ static void test_modes(void) {
 static void test_schedule_times_and_ref(void) {
   Slot s[3] = {{SLOT_JOIN, 0, MODE_SF9_BW500, 7, 0}, {SLOT_HUB, 5, MODE_SF9_BW500, 96, 0}, {SLOT_HUB, 6, MODE_SF7_BW500, 96, 0}};
   SlotTime t[3];
-  const uint32_t end = computeSlotTimes(s, 3, t);
-  TEST_ASSERT_EQUAL_UINT32(BEACON_GAP_US, t[0].start);
+  const uint32_t end = computeSlotTimes(s, 3, t, 40);
+  TEST_ASSERT_EQUAL_UINT32(beaconAirtimeUs(40) + BEACON_GAP_US, t[0].start);
+  TEST_ASSERT_EQUAL_UINT32(1000u, refFromBeaconEnd(1000u + beaconAirtimeUs(40), 40));
   TEST_ASSERT_EQUAL_UINT32(t[0].start + LEAD_US, t[0].tx);
   TEST_ASSERT_EQUAL_UINT32(t[0].end, t[1].start);
   TEST_ASSERT_EQUAL_UINT32(t[1].start + LEAD_US + modeAirtimeUs(MODE_SF9_BW500, 96) + TAIL_US, t[1].end);
@@ -159,10 +160,10 @@ static void test_schedule_times_and_ref(void) {
   const uint32_t ref = 123456789u;
   const uint32_t rx_end = ref + t[1].tx + modeAirtimeUs(MODE_SF9_BW500, 60);
   TEST_ASSERT_EQUAL_UINT32(ref, refFromSlotPacket(rx_end, t[1], MODE_SF9_BW500, 60));
-  TEST_ASSERT_TRUE(planFits(s, 3, 1000000, 80000));
+  TEST_ASSERT_TRUE(planFits(s, 3, 1000000, 60));
   Slot many[MAX_SLOTS];
   for (uint8_t i = 0; i < MAX_SLOTS; i++) many[i] = {SLOT_HUB, (uint8_t)(i + 1), MODE_SF9_BW500, 255, 0};
-  TEST_ASSERT_FALSE(planFits(many, MAX_SLOTS, 1000000, 80000));
+  TEST_ASSERT_FALSE(planFits(many, MAX_SLOTS, 1000000, 60));
 }
 
 int main(int, char**) {

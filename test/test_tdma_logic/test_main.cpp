@@ -242,8 +242,7 @@ static void test_plan_shrinks_to_fit(void) {
   for (uint8_t id = 1; id <= 6; id++) p.onJoin(id, 0, -90, 1);
   Beacon b;
   p.buildBeacon(2, b);
-  const uint32_t beacon_us = modeAirtimeUs(MODE_SF9_BW500, static_cast<uint16_t>(beaconSize(b.n_slots, b.n_acks)));
-  TEST_ASSERT_TRUE(planFits(b.slots, b.n_slots, 1000000, beacon_us));
+  TEST_ASSERT_TRUE(planFits(b.slots, b.n_slots, 1000000, static_cast<uint16_t>(beaconSize(b.n_slots, b.n_acks))));
   TEST_ASSERT_TRUE(p.lastAllowance() < 255);
   TEST_ASSERT_EQUAL(7, b.n_slots);           // nobody dropped, allowance reduced instead
 }

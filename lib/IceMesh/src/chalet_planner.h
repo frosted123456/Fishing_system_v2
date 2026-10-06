@@ -186,10 +186,11 @@ class ChaletPlanner {
     uint8_t allow = (cfg.test_mode != TEST_OFF) ? cfg.test_allowance : cfg.allowance;
     for (;;) {
       fill(frame, bc, allow);
-      const uint32_t beacon_us = modeAirtimeUs(MODE_SF9_BW500, static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks)));
-      if (planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL, beacon_us)) break;
+      const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
+      if (planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL, blen)) break;
       if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); continue; }
-      while (bc.n_slots > 0 && !planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL, beacon_us)) {
+      while (bc.n_slots > 0 && !planFits(bc.slots, bc.n_slots, static_cast<uint32_t>(cfg.frame_ms) * 1000UL,
+                                         static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks)))) {
         bc.n_slots--;              // last resort: drop the last direct slots
         dropped_slots_++;
       }

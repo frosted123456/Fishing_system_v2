@@ -59,6 +59,7 @@
 #include "config.h"
 #include "messages.h"
 #include <rx_ring.h>
+#include "mesh_radio.h"
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI LAYOUT CONSTANTS - 128x64 OLED
@@ -112,7 +113,7 @@
 
 // Use software I2C for reliable custom pin operation on Heltec V3
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, OLED_SCL, OLED_SDA, OLED_RST);
-SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+// LoRa radio (SX1262) is owned by mesh_radio.cpp (TDMA radio task)
 WebServer server(WEB_SERVER_PORT);
 Preferences preferences;
 TwoWire CardKBWire = TwoWire(1);  // Second I2C bus for CardKB
@@ -148,6 +149,8 @@ struct DeviceSettings {
   bool webServerEnabled;      // Enable/disable web server
   uint8_t wifiModeSetting;    // 0=AP, 1=STA, 2=APSTA
   bool reedActiveHigh;        // Reed switch polarity: true=trigger on HIGH
+  uint8_t radioTestMode;      // v2 chalet: 0 off, 1 rotate SF9/8/7, 2 SF9, 3 SF8, 4 SF7 (500 kHz)
+  bool adaptiveRadio;         // v2 chalet: per-hub adaptive SF (RSSI margin + hysteresis)
   uint8_t reserved[5];        // Future use
 };
 
@@ -159,6 +162,8 @@ DeviceSettings settings = {
   .webServerEnabled = true,
   .wifiModeSetting = 2,       // Default: AP+STA mode
   .reedActiveHigh = true,     // Default: trigger on HIGH (magnet away)
+  .radioTestMode = 0,
+  .adaptiveRadio = false,     // fixed SF9/500 until range tests say otherwise
   .reserved = {0}
 };
 
@@ -302,24 +307,13 @@ uint32_t loraStartRxRetries = 0;    // startReceive retry count
 
 unsigned long lastLoRaRxTime = 0;   // When last valid packet was received
 
-// Relay deduplication cache
-DedupeEntry dedupeCache[DEDUP_CACHE_SIZE];
-uint8_t dedupeCacheIdx = 0;
-
-// ISSUE 1 FIX (v2 phase 1, C3): separate relay dedup cache for LoRa aggregates.
-// Key = (origin hub, lora_sequence). Relays no longer overwrite sender_id, so
-// sender_id IS the origin hub. Kept apart from dedupeCache so aggregates neither
-// collide with alert keys nor push alert entries out of the shared ring.
-#define AGG_DEDUP_CACHE_SIZE 32   // 30 s window x 1 aggregate / 6 s = 5 per hub -> room for 6 hubs
-DedupeEntry aggDedupCache[AGG_DEDUP_CACHE_SIZE];
-uint8_t aggDedupCacheIdx = 0;
+// v2: relay dedup caches removed — duplicates are handled by the TDMA mesh (lib/IceMesh)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FORWARD DECLARATIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupDisplay();
-void setupLoRa();
 void setupEspNow();
 void setupWiFiAP();
 void setupWebServer();
@@ -332,10 +326,6 @@ void wakeDisplay();
 void sleepDisplay();
 void registerActivity();
 
-void loopLoRa();
-void loopLoRaWatchdog();           // BUG FIX #2: LoRa watchdog
-bool ensureLoRaReceiveMode();      // BUG FIX #1: Reliable startReceive
-int loRaTransmitWithWait(uint8_t* data, size_t len);  // Transmit with BUSY wait
 void loopLocalSensor();
 void loopDisplay();
 void loopWebServer();
@@ -346,24 +336,23 @@ void verifyWiFiChannel();          // BUG FIX #6: WiFi channel verification
 
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len);
 void loopEspNowRx();
-void onLoRaReceive();
+void meshLoop();
+void meshSyncNodesNow();
+int findNodeIndexForMesh(uint8_t nodeId);
+void sendSilenceSyncEspNow();
+void drawRadioTest();
+void handleWebRadio();
+void handleWebApiRadio();
+void handleWebApiRadioPost();
 
 void processEspNowMessage(const uint8_t* data, int len, int rssi);
-void processLoRaMessage(const uint8_t* data, int len, int rssi);
 
 // Deduplication functions
 bool shouldAcceptMessage(uint8_t nodeId, uint16_t seq, uint32_t uptime, uint8_t newFlags);
-bool isDuplicateForRelay(uint8_t nodeId, uint16_t seq);
-void recordForDedup(uint8_t nodeId, uint16_t seq);
-bool isAggregateDuplicate(uint8_t originHub, uint8_t loraSeq);
-void recordAggregateForDedup(uint8_t originHub, uint8_t loraSeq);
 bool canClearFishOn(uint8_t nodeId);
 NodeState* findOrCreateNode(uint8_t nodeId);
 
 void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t seq, uint32_t uptime, int8_t rssi);
-void sendLoRaAggregate();
-void sendLoRaAggregateWithRetry(int retries = 3);
-void relayLoRaAlert(uint8_t originId, uint8_t flags, uint16_t batteryMv, uint16_t seq);
 
 void updateDisplay();
 void triggerBuzzer(uint8_t pattern);
@@ -419,14 +408,11 @@ void loopAutoUnsilence();
 
 // Remote config (gateway to gateway)
 bool sendRemoteConfig(uint8_t targetNodeId);
-bool isConfigDuplicate(uint8_t originId, uint8_t seq);
-void recordConfigForDedup(uint8_t originId, uint8_t seq);
 void handleWebRemoteConfig();
 void handleWebApiRemoteConfig();
 void handleWebApiRemoteConfigStatus();
 
 // Prototypes the Arduino IDE generated automatically for the .ino (needed since the move to .cpp)
-bool loRaChannelBusy();
 void updateAlertState();
 void handleWebApiNodeName();
 void handleWebApiSilence();
@@ -511,7 +497,14 @@ void setup() {
   setupDisplay();
   lastActivityTime = millis();  // Initialize display sleep timer
   setupBuzzer();
-  setupLoRa();
+  // v2: TDMA LoRa mesh (own FreeRTOS task). Chalet = GATEWAY_OFFSHORE, every other role is a hub.
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) {
+    meshSetTestMode(settings.radioTestMode);
+    meshSetAdaptive(settings.adaptiveRadio);
+  }
+  loraReady = meshBegin(NODE_ID, currentRole == ROLE_GATEWAY_OFFSHORE, NETWORK_ID);
+  Serial.printf("LoRa mesh: %s, %s\n", loraReady ? "radio OK" : "RADIO INIT FAILED",
+                currentRole == ROLE_GATEWAY_OFFSHORE ? "chalet (beacon master)" : "hub");
   
   // Role-specific setup
   switch (currentRole) {
@@ -600,11 +593,8 @@ void loop() {
   // ESP-NOW frames queued by the Wi-Fi task callback (C9)
   if (espNowReady) loopEspNowRx();
 
-  // Always process LoRa (even in menus, to not miss alerts)
-  loopLoRa();
-
-  // BUG FIX #2: Check LoRa radio health and recover if needed
-  loopLoRaWatchdog();
+  // v2: TDMA mesh <-> node table, silence, commands, counters (the radio runs in its own task)
+  meshLoop();
 
   // Check for auto-unsilence timeout
   loopAutoUnsilence();
@@ -646,18 +636,7 @@ void loop() {
         DEBUG_PRINTF("Self heartbeat: seq=%d uptime=%lu\n", localSequence, localUptimeSec);
       }
 
-      // Add random jitter (0-500ms) to prevent synchronized collisions with other gateway
-      static uint32_t txJitter = random(0, 500);
-      // BUG FIX #16e: Defer TX if we just received a packet
-      // This prevents immediate collision when both gateways try to respond
-      {
-        bool recentRx = (millis() - lastLoRaRxTime < 1500);
-        if (!recentRx && millis() - lastLoRaTx > (LORA_TX_INTERVAL_MS + txJitter)) {
-          sendLoRaAggregate();
-          lastLoRaTx = millis();
-          txJitter = random(0, 500);  // New jitter for next transmission
-        }
-      }
+      // v2: no periodic LoRa aggregate — this hub sends its line states in its TDMA slot
       break;
 
     case ROLE_GATEWAY_OFFSHORE:
@@ -682,22 +661,7 @@ void loop() {
         DEBUG_PRINTF("Self heartbeat: seq=%d uptime=%lu\n", localSequence, localUptimeSec);
       }
 
-      // CRITICAL FIX: Offshore gateway must transmit LoRa aggregates
-      // This enables bidirectional communication - onshore can see offshore status
-      // Offshore gateway transmits with 5 second offset from onshore
-      // This provides adequate separation for TX windows with 10s interval
-      {
-        static const uint32_t OFFSHORE_TX_OFFSET = 5000;
-        static uint32_t txJitterOffshore = random(0, 300);
-        // BUG FIX #16e: Defer TX if we just received a packet
-        // This prevents immediate collision when both gateways try to respond
-        bool recentRxOffshore = (millis() - lastLoRaRxTime < 1500);
-        if (!recentRxOffshore && millis() - lastLoRaTx > (LORA_TX_INTERVAL_MS + OFFSHORE_TX_OFFSET + txJitterOffshore)) {
-          sendLoRaAggregate();
-          lastLoRaTx = millis();
-          txJitterOffshore = random(0, 300);  // New jitter for next transmission
-        }
-      }
+      // v2: the chalet transmits the beacon from the radio task (no aggregates)
       break;
 
     case ROLE_SENSOR_LORA:
@@ -713,22 +677,12 @@ void loop() {
   loopBuzzer();
   loopNodeTimeout();
 
-  // DEBUG: Print LoRa health every 30 seconds
+  // Radio status on serial: every 5 s in radio test mode, every 30 s with DEBUG_SERIAL
   static unsigned long lastHealthPrint = 0;
-  if (millis() - lastHealthPrint > 30000) {
+  const unsigned long healthEvery = meshTestMode() != 0 ? 5000UL : 30000UL;
+  if ((DEBUG_SERIAL || meshTestMode() != 0) && millis() - lastHealthPrint > healthEvery) {
     lastHealthPrint = millis();
-
-    DEBUG_PRINTLN(F("═══ LoRa Health ═══"));
-    DEBUG_PRINTF("Ready: %s\n", loraReady ? "YES" : "NO");
-    DEBUG_PRINTF("RX count: %lu\n", loraRxCount);
-    DEBUG_PRINTF("TX count: %lu\n", loraTxCount);
-    DEBUG_PRINTF("RX errors: %lu\n", loraRxErrors);
-    DEBUG_PRINTF("TX errors: %lu\n", loraTxErrors);
-    DEBUG_PRINTF("Watchdog resets: %lu\n", loraWatchdogResets);
-    DEBUG_PRINTF("RX saved from loss: %lu\n", loraRxSavedFromLoss);
-    DEBUG_PRINTF("Last RX: %lu sec ago\n", (millis() - lastLoRaRxTime) / 1000);
-    DEBUG_PRINTF("Nodes online: %d\n", network.node_count);
-    DEBUG_PRINTLN(F("═══════════════════"));
+    meshPrintStatus(Serial);
   }
 
   yield();
@@ -801,7 +755,7 @@ void registerActivity() {
 
 void loopDisplay() {
   // Check for sleep timeout (only when on live status screen)
-  if (!displaySleeping && currentScreen == SCREEN_LIVE_STATUS) {
+  if (!displaySleeping && currentScreen == SCREEN_LIVE_STATUS && meshTestMode() == 0) {
     if (millis() - lastActivityTime > DISPLAY_SLEEP_MS) {
       sleepDisplay();
       return;
@@ -821,7 +775,7 @@ void loopDisplay() {
 // Route to appropriate screen drawing function
 void drawCurrentScreen() {
   switch (currentScreen) {
-    case SCREEN_LIVE_STATUS:    drawLiveStatus(); break;
+    case SCREEN_LIVE_STATUS:    if (meshTestMode() != 0) drawRadioTest(); else drawLiveStatus(); break;
     case SCREEN_MAIN_MENU:      drawMainMenu(); break;
     case SCREEN_NODE_LIST:      drawNodeList(); break;
     case SCREEN_NODE_DETAILS:   drawNodeDetails(); break;
@@ -1642,1216 +1596,49 @@ void drawSettingEdit() {
 // LORA
 // ═══════════════════════════════════════════════════════════════════════════
 
-void setupLoRa() {
-  DEBUG_PRINTLN(F("Initializing LoRa..."));
 
-  // CRITICAL: Ensure VEXT power is enabled (Heltec V3 specific)
-  // This is also done in setupDisplay, but we do it here too for safety
-  // in case setupLoRa is called during a reset without full init
-  pinMode(VEXT_PIN, OUTPUT);
-  digitalWrite(VEXT_PIN, LOW);  // LOW = ON for Heltec V3
-  delay(100);  // Let power stabilize
-
-  // Initialize SPI
-  SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
-
-  // Explicit pin modes for SX1262
-  pinMode(LORA_RST, OUTPUT);
-  pinMode(LORA_BUSY, INPUT);
-  pinMode(LORA_DIO1, INPUT);
-
-  // Hardware reset before init
-  digitalWrite(LORA_RST, LOW);
-  delay(20);
-  digitalWrite(LORA_RST, HIGH);
-  delay(100);  // Wait for radio to boot (increased from 50ms)
-
-  int state = radio.begin(
-    LORA_FREQUENCY,
-    LORA_BANDWIDTH / 1000.0,
-    LORA_SPREADING,
-    LORA_CODING_RATE,
-    LORA_SYNC_WORD,
-    LORA_TX_POWER,
-    LORA_PREAMBLE
-  );
-
-  if (state != RADIOLIB_ERR_NONE) {
-    DEBUG_PRINTF("LoRa init failed: %d\n", state);
-    loraRxErrors++;
-    return;
-  }
-
-  // Set DIO1 action for RX interrupt
-  radio.setDio1Action(onLoRaReceive);
-
-  // Explicitly set to RX mode
-  state = radio.startReceive();
-  if (state != RADIOLIB_ERR_NONE) {
-    DEBUG_PRINTF("LoRa startReceive failed: %d\n", state);
-    loraRxErrors++;
-    return;
-  }
-
-  loraReady = true;
-  radioState = RADIO_STATE_RX;
-  lastLoRaRxTime = millis();
-  DEBUG_PRINTLN(F("LoRa ready - listening"));
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RELIABLE LORA RECEIVE MODE - Forces state machine reset
 // ═══════════════════════════════════════════════════════════════════════════
 
-bool ensureLoRaReceiveMode() {
-  if (!loraReady) return false;
 
-  // CRITICAL: Wait for BUSY pin to go LOW before sending commands
-  // SX1262 sets BUSY high during TX/RX operations
-  unsigned long busyStart = millis();
-  while (digitalRead(LORA_BUSY) == HIGH) {
-    if (millis() - busyStart > 1000) {
-      DEBUG_PRINTLN("ERROR: LoRa BUSY pin stuck HIGH - hardware reset needed");
-      // Force hardware reset
-      digitalWrite(LORA_RST, LOW);
-      delay(10);
-      digitalWrite(LORA_RST, HIGH);
-      delay(50);
-      busyStart = millis();  // Retry after reset
-    }
-    delay(1);
-  }
 
-  // CRITICAL: Force standby first to reset radio state machine
-  // This prevents the radio from getting stuck in TX mode
-  int standbyState = radio.standby();
-  if (standbyState != RADIOLIB_ERR_NONE) {
-    DEBUG_PRINTF("LoRa standby failed: %d\n", standbyState);
-  }
-  delay(2);  // SX1262 needs ~1ms to enter standby
 
-  // Try to enter RX mode with retries
-  for (int retry = 0; retry < 5; retry++) {
-    int state = radio.startReceive();
-
-    if (state == RADIOLIB_ERR_NONE) {
-      if (retry > 0) {
-        DEBUG_PRINTF("LoRa startReceive OK on retry %d\n", retry);
-      }
-      loraInterrupt = false;   // Clear any stale RX interrupt flag
-      loraTxComplete = false;  // C1 FIX: Clear TX complete flag
-      radioState = RADIO_STATE_RX;
-      return true;
-    }
-
-    loraStartRxRetries++;
-    DEBUG_PRINTF("LoRa startReceive failed (attempt %d): %d\n", retry + 1, state);
-
-    // If chip not responding, try hardware reset
-    if (state == RADIOLIB_ERR_SPI_CMD_TIMEOUT || retry >= 2) {
-      DEBUG_PRINTLN("LoRa chip unresponsive - hardware reset");
-
-      // Hardware reset sequence
-      pinMode(LORA_RST, OUTPUT);
-      digitalWrite(LORA_RST, LOW);
-      delay(20);
-      digitalWrite(LORA_RST, HIGH);
-      delay(50);
-
-      // Reinitialize radio
-      int initState = radio.begin(
-        LORA_FREQUENCY,
-        LORA_BANDWIDTH / 1000.0,
-        LORA_SPREADING,
-        LORA_CODING_RATE,
-        LORA_SYNC_WORD,
-        LORA_TX_POWER,
-        LORA_PREAMBLE
-      );
-
-      if (initState == RADIOLIB_ERR_NONE) {
-        radio.setDio1Action(onLoRaReceive);
-        DEBUG_PRINTLN("LoRa reinitialized after reset");
-      } else {
-        DEBUG_PRINTF("LoRa reinit failed: %d\n", initState);
-      }
-    }
-
-    delay(20 * (retry + 1));  // Increasing delay between retries
-  }
-
-  loraRxErrors++;
-  DEBUG_PRINTLN("LoRa startReceive FAILED after all retries!");
-  radioState = RADIO_STATE_IDLE;
-  return false;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// PROCESS PENDING RX - Must be called BEFORE transmitting to avoid packet loss
-// ═══════════════════════════════════════════════════════════════════════════
-void processPendingLoRaRx() {
-    // If no interrupt pending or we're not in RX state, nothing to do
-    if (!loraInterrupt || radioState != RADIO_STATE_RX) {
-        return;
-    }
-
-    // Check if radio is ready (BUSY low)
-    if (digitalRead(LORA_BUSY) == HIGH) {
-        return;  // Radio busy, can't read now
-    }
-
-    // Check if there's actually a packet to read
-    int len = radio.getPacketLength();
-    if (len <= 0 || len > sizeof(loraBuffer)) {
-        // No valid packet - clear the spurious interrupt
-        loraInterrupt = false;
-        return;
-    }
-
-    // Valid packet waiting - read and process it NOW before TX
-    DEBUG_PRINTLN("LoRa: Processing pending RX before TX");
-    loraRxSavedFromLoss++;  // Track how often we save packets
-
-    int state = radio.readData(loraBuffer, len);
-    loraInterrupt = false;  // Clear after reading
-
-    if (state == RADIOLIB_ERR_NONE) {
-        int rssi = radio.getRSSI();
-        float snr = radio.getSNR();
-        loraRxCount++;
-        lastLoRaRxTime = millis();
-
-        DEBUG_PRINTF("LoRa RX (pre-TX): %d bytes, RSSI:%d, SNR:%.1f\n", len, rssi, snr);
-        processLoRaMessage(loraBuffer, len, rssi);
-    } else {
-        loraRxErrors++;
-        DEBUG_PRINTF("LoRa RX error (pre-TX): %d\n", state);
-    }
-
-    // Return to RX mode for clean state
-    ensureLoRaReceiveMode();
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LORA TRANSMIT WITH BUSY WAIT - Wait for TX complete before returning
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Helper function: Transmit data and wait for completion
-// Returns RADIOLIB_ERR_NONE on success, error code otherwise
-int loRaTransmitWithWait(uint8_t* data, size_t len) {
-    if (!loraReady) return RADIOLIB_ERR_UNKNOWN;
 
-    // CRITICAL FIX: Process any pending RX packet BEFORE transmitting
-    // This prevents the race condition where we lose received packets
-    processPendingLoRaRx();
-
-    // Transition to TX state - next interrupt will be TX complete (sets loraTxComplete)
-    radioState = RADIO_STATE_TX;
-    loraTxComplete = false;  // C1 FIX: Clear TX complete flag before transmit
-
-    int result = radio.transmit(data, len);
-
-    if (result == RADIOLIB_ERR_NONE) {
-        // C2 FIX: Wait for TX complete with max attempt counter (200 iterations = ~2 seconds)
-        // SX1262 sets BUSY high during TX
-        unsigned long txStart = millis();
-        int busyAttempts = 0;
-        const int maxBusyAttempts = 200;  // ~2 seconds at 10ms per iteration
-
-        while (digitalRead(LORA_BUSY) == HIGH && busyAttempts < maxBusyAttempts) {
-            delay(10);
-            busyAttempts++;
-        }
-
-        // C2 FIX: If BUSY stuck HIGH, force radio reset and reinitialize
-        if (digitalRead(LORA_BUSY) == HIGH) {
-            DEBUG_PRINTLN("ERROR: BUSY stuck HIGH after TX - forcing radio reset");
-            loraWatchdogResets++;
-
-            // Force hardware reset
-            loraReady = false;
-            digitalWrite(LORA_RST, LOW);
-            delay(20);
-            digitalWrite(LORA_RST, HIGH);
-            delay(100);
-
-            // Reinitialize radio
-            setupLoRa();
-
-            loraTxComplete = false;
-            loraInterrupt = false;
-            radioState = RADIO_STATE_RX;
-            return RADIOLIB_ERR_TX_TIMEOUT;
-        }
-
-        loraTxCount++;
-    } else {
-        loraTxErrors++;
-        DEBUG_PRINTF("LoRa TX error: %d\n", result);
-    }
-
-    // TX complete - clear interrupt flags
-    loraTxComplete = false;  // C1 FIX: Clear TX complete flag
-    loraInterrupt = false;   // Clear any stale RX flag
-    radioState = RADIO_STATE_IDLE;
-
-    // C3 FIX: ALWAYS return to RX mode after TX (even on error)
-    ensureLoRaReceiveMode();
-    radioState = RADIO_STATE_RX;
-
-    return result;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UNIFIED LORA TRANSMIT - Handles TX with proper state cleanup
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Transmit a LoRa packet with proper state management
- *
- * CRITICAL: Processes pending RX before TX to prevent packet loss.
- * Uses radio state tracking to distinguish TX-complete from RX-complete interrupts.
- */
-bool loRaTransmitPacket(uint8_t* data, size_t len, const char* label, int maxRetries = 3) {
-    if (!loraReady) {
-        DEBUG_PRINTF("LoRa TX %s: Radio not ready\n", label);
-        return false;
-    }
 
-    // CRITICAL FIX: Process any pending RX packet BEFORE transmitting
-    processPendingLoRaRx();
-
-    // Wait for BUSY pin to be LOW (radio ready for commands)
-    unsigned long busyWait = millis();
-    while (digitalRead(LORA_BUSY) == HIGH) {
-        if (millis() - busyWait > 500) {
-            DEBUG_PRINTF("LoRa TX %s: BUSY timeout\n", label);
-            break;
-        }
-        delay(1);
-    }
-
-    // Force standby before transmit
-    radio.standby();
-    delay(2);  // SX1262 needs ~1ms to enter standby
-
-    // BUG FIX #16d: Skip LBT if we received a packet recently
-    // If we just received, the channel is clearly working - no need for CAD
-    bool skipLBT = (millis() - lastLoRaRxTime < 2000);
-    bool channelClear = skipLBT;
-
-    if (!skipLBT) {
-        // LBT with CAD - max 2 attempts with longer backoff (200-500ms)
-        for (int attempt = 0; attempt < 2; attempt++) {
-            if (!loRaChannelBusy()) {
-                channelClear = true;
-                break;
-            }
-            // Longer backoff with jitter to avoid synchronized collisions
-            int backoffMs = 200 + random(0, 300);
-            DEBUG_PRINTF("LoRa TX %s: Channel busy, backoff %dms (attempt %d)\n",
-                         label, backoffMs, attempt + 1);
-            delay(backoffMs);
-        }
-    }
-
-    // Don't spam the log if we proceed anyway
-    if (!channelClear) {
-        DEBUG_PRINTF("LoRa TX %s: Proceeding after LBT\n", label);
-    }
-
-    // Transition to TX state - next interrupt will be TX complete (sets loraTxComplete)
-    radioState = RADIO_STATE_TX;
-    loraTxComplete = false;  // C1 FIX: Clear TX complete flag before transmit
-
-    // Transmit with retries
-    bool success = false;
-    int retryDelay = 50;
-
-    for (int retry = 0; retry < maxRetries; retry++) {
-        int result = radio.transmit(data, len);
-
-        if (result == RADIOLIB_ERR_NONE) {
-            // C2 FIX: Wait for TX complete with max attempt counter
-            unsigned long txStart = millis();
-            int busyAttempts = 0;
-            const int maxBusyAttempts = 200;
-
-            while (digitalRead(LORA_BUSY) == HIGH && busyAttempts < maxBusyAttempts) {
-                delay(10);
-                busyAttempts++;
-            }
-
-            // C2 FIX: If BUSY stuck HIGH, force radio reset
-            if (digitalRead(LORA_BUSY) == HIGH) {
-                DEBUG_PRINTF("LoRa TX %s: BUSY stuck - forcing radio reset\n", label);
-                loraWatchdogResets++;
-                loraReady = false;
-                digitalWrite(LORA_RST, LOW);
-                delay(20);
-                digitalWrite(LORA_RST, HIGH);
-                delay(100);
-                setupLoRa();
-                loraTxComplete = false;
-                loraInterrupt = false;
-                radioState = RADIO_STATE_RX;
-                return false;
-            }
-
-            loraTxCount++;
-            if (retry > 0) {
-                DEBUG_PRINTF("LoRa TX %s OK (attempt %d)\n", label, retry + 1);
-            } else {
-                DEBUG_PRINTF("LoRa TX %s OK\n", label);
-            }
-            success = true;
-            break;
-        }
-
-        loraTxErrors++;
-        DEBUG_PRINTF("LoRa TX %s failed: %d (attempt %d)\n", label, result, retry + 1);
-
-        if (retry < maxRetries - 1) {
-            delay(retryDelay);
-            retryDelay *= 2;
-            radio.standby();
-            delay(2);  // SX1262 needs ~1ms to enter standby
-        }
-    }
-
-    // TX complete (or failed) - clear interrupt flags and return to RX
-    loraTxComplete = false;  // C1 FIX: Clear TX complete flag
-    loraInterrupt = false;
-    radioState = RADIO_STATE_IDLE;
-
-    // C3 FIX: ALWAYS return to RX mode after TX
-    if (!ensureLoRaReceiveMode()) {
-        DEBUG_PRINTF("LoRa TX %s: WARNING - failed to return to RX mode!\n", label);
-    }
-    radioState = RADIO_STATE_RX;
-
-    return success;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LORA WATCHDOG - Detects and recovers stuck radio
 // ═══════════════════════════════════════════════════════════════════════════
 
-void loopLoRaWatchdog() {
-  static unsigned long lastCheck = 0;
-  static uint32_t lastRxCountCheck = 0;
-  static uint8_t stuckCount = 0;
 
-  // Check every 10 seconds (more aggressive - was 15)
-  if (millis() - lastCheck < 10000) return;
-  lastCheck = millis();
 
-  if (!loraReady) return;
 
-  // WATCHDOG 1: RX count not increasing - aggressive full reset after 20 seconds
-  if (loraRxCount == lastRxCountCheck) {
-    stuckCount++;
-    DEBUG_PRINTF("LoRa watchdog: RX stalled for %d checks\n", stuckCount);
 
-    if (stuckCount >= 12) {  // 120 seconds with no RX - give time for normal operation
-      DEBUG_PRINTLN("LoRa watchdog: Forcing FULL HARDWARE RESET");
-      loraWatchdogResets++;
 
-      // Full hardware reset sequence
-      loraReady = false;
-      digitalWrite(LORA_RST, LOW);
-      delay(20);
-      digitalWrite(LORA_RST, HIGH);
-      delay(100);
 
-      setupLoRa();  // Reinitialize
-      stuckCount = 0;
-      lastRxCountCheck = loraRxCount;
-      return;
-    } else {
-      // First check - try soft recovery first
-      ensureLoRaReceiveMode();
-    }
-  } else {
-    stuckCount = 0;  // Reset counter on success
-  }
-  lastRxCountCheck = loraRxCount;
 
-  // WATCHDOG 2: Verify radio is actually in RX mode
-  // (RadioLib doesn't expose this directly, but we can try startReceive which is idempotent)
-  int state = radio.startReceive();
-  if (state != RADIOLIB_ERR_NONE) {
-    DEBUG_PRINTF("LoRa watchdog: Radio not in RX mode (err=%d) - recovering\n", state);
-    ensureLoRaReceiveMode();
-  }
-}
 
-void IRAM_ATTR onLoRaReceive() {
-    // C1 FIX: Distinguish TX-complete from RX-complete in ISR itself
-    // This prevents race conditions where TX interrupt is misinterpreted as RX
-    if (radioState == RADIO_STATE_TX) {
-        loraTxComplete = true;  // TX done - handled by transmit function
-    } else {
-        loraInterrupt = true;   // RX packet available
-    }
-}
 
-// FIXED: Use hardware CAD instead of broken RSSI-based detection
-// The SX1262 RSSI reading after standby() is invalid/garbage
-bool loRaChannelBusy() {
-    if (!loraReady) return false;
 
-    // Ensure we're not in the middle of something
-    if (digitalRead(LORA_BUSY) == HIGH) {
-        return true;
-    }
 
-    // Use SX1262 Channel Activity Detection
-    // This properly detects LoRa preambles, unlike raw RSSI
-    int state = radio.scanChannel();
 
-    if (state == RADIOLIB_LORA_DETECTED) {
-        DEBUG_PRINTLN("CAD: LoRa activity detected");
-        // BUG FIX #16c: Return to RX mode after CAD detects activity
-        // scanChannel() leaves radio in undefined state - we need to
-        // be in RX mode to receive while waiting for the channel to clear
-        radio.startReceive();
-        radioState = RADIO_STATE_RX;
-        return true;
-    } else if (state == RADIOLIB_CHANNEL_FREE) {
-        return false;
-    } else {
-        // CAD failed - assume clear and proceed
-        DEBUG_PRINTF("CAD error: %d - assuming clear\n", state);
-        return false;
-    }
-}
 
-// CRITICAL: Wait for clear channel with random backoff
-bool loRaWaitForClearChannel(int maxAttempts = 10) {
-  if (!loraReady) return false;
 
-  for (int attempt = 0; attempt < maxAttempts; attempt++) {
-    if (!loRaChannelBusy()) {
-      return true;  // Channel is clear
-    }
 
-    // Random backoff: 20-80ms to avoid synchronized collisions
-    delay(random(20, 80));
-  }
 
-  DEBUG_PRINTLN("LoRa channel busy - transmitting anyway (fallback)");
-  return true;  // Proceed anyway after max attempts
-}
 
-void loopLoRa() {
-    if (!loraReady) return;
-
-    // Periodic RX mode verification (every 5 seconds)
-    static unsigned long lastRxVerify = 0;
-    if (millis() - lastRxVerify > 5000) {
-        lastRxVerify = millis();
-        if (radioState == RADIO_STATE_RX && digitalRead(LORA_BUSY) == LOW) {
-            radio.startReceive();  // Ensure we're listening
-        }
-    }
-
-    if (!loraInterrupt) return;
-
-    // If we're in TX state, this interrupt is TX complete - ignore
-    if (radioState == RADIO_STATE_TX) {
-        DEBUG_PRINTLN("LoRa: TX complete interrupt (handled by TX function)");
-        loraInterrupt = false;
-        return;
-    }
-
-    loraInterrupt = false;
-
-    // Check BUSY pin - if HIGH, radio is still processing
-    if (digitalRead(LORA_BUSY) == HIGH) {
-        DEBUG_PRINTLN("LoRa: Interrupt while BUSY - ignoring");
-        return;
-    }
-
-    int len = radio.getPacketLength();
-
-    // Invalid length = spurious interrupt
-    if (len <= 0 || len > sizeof(loraBuffer)) {
-        if (len == 0) {
-            if (millis() - lastLoRaTx > 500) {
-                DEBUG_PRINTLN("LoRa: Spurious interrupt (len=0)");
-            }
-        } else {
-            DEBUG_PRINTF("LoRa: Invalid packet length %d\n", len);
-        }
-
-        // Return to RX mode
-        radio.standby();
-        delay(2);
-        radio.startReceive();
-        return;
-    }
-
-    // Valid packet - read and process
-    int state = radio.readData(loraBuffer, len);
-
-    if (state == RADIOLIB_ERR_NONE) {
-        int rssi = radio.getRSSI();
-        float snr = radio.getSNR();
-        loraRxCount++;
-        lastLoRaRxTime = millis();
-
-        DEBUG_PRINTF("LoRa RX: %d bytes, RSSI:%d, SNR:%.1f (total:%lu)\n",
-                     len, rssi, snr, loraRxCount);
-
-        processLoRaMessage(loraBuffer, len, rssi);
-    } else {
-        loraRxErrors++;
-        DEBUG_PRINTF("LoRa RX error: %d\n", state);
-    }
-
-    // Return to RX mode
-    ensureLoRaReceiveMode();
-}
-
-// Check if we've seen this config message recently (prevents loops)
-// H4 FIX: Extended from 30 to 60 seconds for better reliability with multi-hop
-bool isConfigDuplicate(uint8_t originId, uint8_t seq) {
-  uint32_t now = millis();
-  for (int i = 0; i < CONFIG_DEDUP_SIZE; i++) {
-    if (configDedup[i].origin_id == originId &&
-        configDedup[i].config_seq == seq &&
-        (now - configDedup[i].received_at) < 60000) {  // H4 FIX: 60 second window (was 30)
-      return true;
-    }
-  }
-  return false;
-}
-
-void recordConfigForDedup(uint8_t originId, uint8_t seq) {
-  configDedup[configDedupIdx].origin_id = originId;
-  configDedup[configDedupIdx].config_seq = seq;
-  configDedup[configDedupIdx].received_at = millis();
-  configDedupIdx = (configDedupIdx + 1) % CONFIG_DEDUP_SIZE;
-}
-
-void processLoRaMessage(const uint8_t* data, int len, int rssi) {
-  // Basic header validation
-  if (len < 3) {
-    DEBUG_PRINTF("LoRa: Message too short (%d bytes, min 3)\n", len);
-    loraRxErrors++;
-    return;
-  }
-
-  uint8_t netId = data[0];
-  uint8_t msgType = data[2];
-
-  if (netId != NETWORK_ID) return;
-
-  switch (msgType) {
-    case MSG_LORA_AGGREGATE: {
-      if (len < (int)sizeof(LoRaAggregateMessage)) {
-        DEBUG_PRINTF("LoRa AGG too short: %d < %d\n", len, (int)sizeof(LoRaAggregateMessage));
-        loraRxErrors++;
-        break;
-      }
-
-      LoRaAggregateMessage* msg = (LoRaAggregateMessage*)data;
-
-      // BUG FIX #3: Verify checksum before processing
-      uint8_t expectedChecksum = calculateChecksum((uint8_t*)msg, sizeof(LoRaAggregateMessage) - 1);
-      if (msg->checksum != expectedChecksum) {
-        loraChecksumFails++;
-        DEBUG_PRINTF("LoRa AGG checksum FAIL: got 0x%02X, expected 0x%02X (fails: %lu)\n",
-                     msg->checksum, expectedChecksum, loraChecksumFails);
-        break;  // Reject corrupted packet
-      }
-
-      DEBUG_PRINTF("LoRa AGG from %d: %d nodes, hop=%d, seq=%d\n",
-                   msg->sender_id, msg->node_count, msg->hop_count, msg->lora_sequence);
-
-      // ISSUE 1 FIX: sender_id is the ORIGIN hub (relays keep it). Our own aggregate
-      // echoed back by a relay carries our ID - nothing to learn from it, never relay it.
-      if (msg->sender_id == NODE_ID) {
-        break;
-      }
-
-      // BUG FIX #13: ALWAYS refresh sender node status on valid aggregate receipt
-      // This fixes the "gateway goes offline" bug - the sender's last_seen must be updated
-      // regardless of whether individual node entries pass deduplication
-      {
-        NodeState* senderNode = findOrCreateNode(msg->sender_id);
-        if (senderNode) {
-          senderNode->last_seen = millis();
-          senderNode->online = true;
-          senderNode->via_lora = true;
-          // ISSUE 1 FIX: RSSI only describes the origin hub when we heard it directly
-          if (msg->hop_count == 0) {
-            senderNode->rssi = rssi;
-          }
-          senderNode->role = msg->sender_role;  // Set sender's role from aggregate
-          // BUG FIX #2: AGG_FLAG_NODE_OFFLINE is now in agg_flags, not flags
-          // No need to clear it from flags anymore
-          DEBUG_PRINTF("Sender %d status refreshed: online=true, rssi=%d, role=%d\n",
-                       msg->sender_id, rssi, msg->sender_role);
-        }
-      }
-
-      // Process each node in aggregate
-      for (int i = 0; i < msg->node_count && i < 10; i++) {
-        NodeStatusCompact* ns = &msg->nodes[i];
-        if (ns->node_id == 0 || ns->node_id == NODE_ID) continue;
-
-        // BUG FIX #2: Check agg_flags for offline status (not flags)
-        bool reportedOffline = HAS_FLAG(ns->agg_flags, AGG_FLAG_NODE_OFFLINE);
-
-        if (reportedOffline) {
-          // Source says node is offline - mark offline here too
-          NodeState* node = findOrCreateNode(ns->node_id);
-          if (node) {
-            // FIX: Don't accept offline report if we have recent direct contact
-            // Another gateway may have lost the sensor while we still have it
-            // Our direct ESP-NOW knowledge takes precedence over their LoRa report
-            if (node->received_direct) {
-              bool directRecent = (millis() - node->last_direct_seen < NODE_TIMEOUT_SEC * 1000UL);
-              if (directRecent) {
-                DEBUG_PRINTF("Node %d: Ignoring offline report from %d (we have recent direct contact)\n",
-                             ns->node_id, msg->sender_id);
-                continue;  // Skip to next node in aggregate
-              }
-            }
-
-            if (node->online) {
-              DEBUG_PRINTF("Node %d marked OFFLINE (reported by node %d)\n",
-                           ns->node_id, msg->sender_id);
-              node->online = false;
-
-              // Clear FISH_ON state when node goes offline
-              if (HAS_FLAG(node->flags, FLAG_FISH_ON)) {
-                CLEAR_FLAG(node->flags, FLAG_FISH_ON);
-                node->fish_on_time = 0;
-                // Update alert history
-                for (int j = 0; j < ALERT_HISTORY_SIZE; j++) {
-                  if (alertHistory[j].nodeId == node->node_id && alertHistory[j].active) {
-                    alertHistory[j].active = false;
-                  }
-                }
-              }
-            }
-            // Update tracking but don't set online
-            // NOTE: Do NOT clear via_espnow - preserve direct path indicator
-            node->via_lora = true;
-          }
-          // Skip updateNodeState - would set online=true
-          continue;
-        }
-
-        // Node is online - process normally with deduplication
-        // BUG FIX #2: No need to clear FLAG_NODE_OFFLINE from flags anymore
-
-        // NOTE: FIX A (ESP-NOW authority block) was removed to enable gateway-to-gateway sync.
-        // Timeout logic now uses last_direct_seen to prevent echo from keeping dead nodes alive.
-        // See Change D in implementation for details.
-
-        // BUG FIX #17: Convert optimized fields back for processing
-        // uptime_min -> uptime_sec (multiply by 60)
-        // battery_pct -> battery_mv (use helper function)
-        uint32_t uptimeSec = (uint32_t)ns->uptime_min * 60;
-        uint16_t batteryMv = batteryPercentToMv(ns->battery_pct);
-
-        if (shouldAcceptMessage(ns->node_id, ns->sequence, uptimeSec, ns->flags)) {
-          updateNodeState(ns->node_id, ns->flags, batteryMv,
-                          ns->sequence, uptimeSec, rssi);
-          // Track that we received via LoRa
-          // NOTE: Do NOT clear via_espnow - it indicates we CAN receive directly
-          // If we clear it, FIX B would incorrectly skip this node in our aggregate
-          NodeState* node = findOrCreateNode(ns->node_id);
-          if (node) {
-            node->via_lora = true;
-            // via_espnow is preserved - will be refreshed on next direct message
-
-            // BUG FIX #1: Reconstruct fish_on_time from elapsed seconds
-            // This synchronizes hold timers across gateways (within LoRa latency)
-            if (HAS_FLAG(ns->flags, FLAG_FISH_ON) && ns->fish_on_elapsed_sec > 0) {
-              // Reconstruct when FISH_ON started relative to local millis()
-              uint32_t reconstructedFishOnTime = millis() - ((uint32_t)ns->fish_on_elapsed_sec * 1000);
-              // Only update if node's fish_on_time isn't already set or differs significantly
-              if (node->fish_on_time == 0) {
-                node->fish_on_time = reconstructedFishOnTime;
-                DEBUG_PRINTF("Node %d: Reconstructed fish_on_time from elapsed %u sec\n",
-                             ns->node_id, ns->fish_on_elapsed_sec);
-              }
-            }
-
-            // BUG FIX #1: Trust sender's hold_expired flag for clearing FISH_ON
-            // If the authoritative gateway says hold time has expired, we trust it
-            if (HAS_FLAG(ns->agg_flags, AGG_FLAG_HOLD_EXPIRED)) {
-              DEBUG_PRINTF("Node %d: Hold time expired (reported by sender)\n", ns->node_id);
-              // Mark our local fish_on_time as very old so canClearFishOn() will return true
-              if (node->fish_on_time > 0) {
-                // Set fish_on_time to a value that guarantees hold time has passed
-                node->fish_on_time = millis() - (settings.alertHoldSec * 1000UL) - 1000;
-              }
-            }
-          }
-        }
-      }
-
-      // Relay if allowed (and not already relayed)
-      // All LoRa-capable nodes relay aggregates for true mesh operation
-      // This enables redundant paths: GW1 → GW2 → Offshore when GW1 can't reach directly
-      if (msg->hop_count < LORA_MAX_HOPS) {
-        // ISSUE 1 FIX: dedup key = (origin hub, lora_sequence). The old key
-        // (network_id, network_id<<8 | lora_sequence) was the same for every hub, so a
-        // hub refused to relay another hub's aggregate whenever their 8-bit counters matched.
-        // sender_id is NOT overwritten any more: it stays the origin hub.
-        if (!isAggregateDuplicate(msg->sender_id, msg->lora_sequence)) {
-          recordAggregateForDedup(msg->sender_id, msg->lora_sequence);
-          msg->hop_count++;
-          // Recalculate checksum after modification
-          msg->checksum = calculateChecksum((uint8_t*)msg, sizeof(LoRaAggregateMessage) - 1);
-
-          // BUG FIX #5: Reduced max delay (50ms instead of 200ms)
-          delay(random(20, 50));
-          // Use helper that waits for BUSY and returns to RX mode
-          loRaTransmitWithWait((uint8_t*)msg, sizeof(LoRaAggregateMessage));
-          DEBUG_PRINTF("LoRa: Relayed aggregate, hop=%d\n", msg->hop_count);
-        }
-      }
-      break;
-    }
-
-    case MSG_LORA_ALERT: {
-      if (len < (int)sizeof(LoRaAlertMessage)) {
-        DEBUG_PRINTF("LoRa ALERT too short: %d < %d\n", len, (int)sizeof(LoRaAlertMessage));
-        loraRxErrors++;
-        break;
-      }
-
-      LoRaAlertMessage* msg = (LoRaAlertMessage*)data;
-      DEBUG_PRINTF("LoRa ALERT from %d (origin %d) seq=%d hop=%d uptime=%lu\n",
-                   msg->sender_id, msg->origin_id, msg->sequence, msg->hop_count, msg->uptime_sec);
-
-      // BUG FIX #4: Use actual uptime from message instead of 0
-      if (shouldAcceptMessage(msg->origin_id, msg->sequence, msg->uptime_sec, msg->flags)) {
-        updateNodeState(msg->origin_id, msg->flags, msg->battery_mv,
-                        msg->sequence, msg->uptime_sec, rssi);
-        // Track that this message came via LoRa
-        // NOTE: Do NOT clear via_espnow - it indicates we CAN receive directly
-        NodeState* node = findOrCreateNode(msg->origin_id);
-        if (node) {
-          node->via_lora = true;
-          // via_espnow is preserved - will be refreshed on next direct message
-        }
-
-        // Sound buzzer on gateways
-        if (currentRole == ROLE_GATEWAY_ONSHORE || currentRole == ROLE_GATEWAY_OFFSHORE) {
-          triggerBuzzer(3);
-        }
-      }
-
-      // Relay if allowed
-      if ((currentRole == ROLE_RELAY_LORA || currentRole == ROLE_SENSOR_LORA) &&
-          msg->hop_count < LORA_MAX_HOPS) {
-        // Use origin_id for dedup (correct - already fixed previously)
-        if (!isDuplicateForRelay(msg->origin_id, msg->sequence)) {
-          recordForDedup(msg->origin_id, msg->sequence);
-          msg->hop_count++;
-          msg->sender_id = NODE_ID;
-          // BUG FIX #5: Reduced max delay
-          delay(random(10, 30));
-          // Use helper that waits for BUSY and returns to RX mode
-          loRaTransmitWithWait((uint8_t*)msg, sizeof(LoRaAlertMessage));
-          DEBUG_PRINTF("LoRa: Relayed alert, hop=%d\n", msg->hop_count);
-        }
-      }
-      break;
-    }
-
-    case MSG_SILENCE_SYNC: {
-      if (len < (int)sizeof(LoRaSilenceSyncMessage)) {
-        DEBUG_PRINTF("LoRa SILENCE too short: %d < %d\n", len, (int)sizeof(LoRaSilenceSyncMessage));
-        loraRxErrors++;
-        break;
-      }
-
-      LoRaSilenceSyncMessage* msg = (LoRaSilenceSyncMessage*)data;
-
-      DEBUG_PRINTF("LoRa SILENCE from %d (origin %d): %s, hop=%d\n",
-                   msg->sender_id, msg->origin_id,
-                   msg->silence_state ? "ON" : "OFF", msg->hop_count);
-
-      // Apply silence state
-      alertsSilenced = (msg->silence_state == 1);
-      if (alertsSilenced) {
-        silenceTime = millis();
-        // BUG FIX #9: Use elapsed time calculation instead of absolute timestamps
-        // Convert expire_time to remaining seconds, then calculate local expire
-        if (msg->expire_time > msg->timestamp) {
-          uint32_t remainingAtSend = msg->expire_time - msg->timestamp;
-          // M4 FIX: Sanity check - max 1 hour silence duration
-          if (remainingAtSend > 3600) remainingAtSend = 3600;
-          silenceExpireTime = millis() + (remainingAtSend * 1000);
-          DEBUG_PRINTF("Silence will expire in %lu seconds\n", remainingAtSend);
-        } else {
-          silenceExpireTime = millis() + SILENCE_AUTO_CLEAR_MS;
-        }
-      } else {
-        silenceTime = 0;
-        silenceExpireTime = 0;
-      }
-
-      // Relay via ESP-NOW to local sensor nodes
-      if (espNowReady && (currentRole == ROLE_GATEWAY_ONSHORE ||
-                          currentRole == ROLE_GATEWAY_OFFSHORE)) {
-        SilenceSyncMessage espMsg;
-        espMsg.network_id = NETWORK_ID;
-        espMsg.sender_id = NODE_ID;
-        espMsg.msg_type = MSG_SILENCE_SYNC;
-        espMsg.silence_state = msg->silence_state;
-        espMsg.timestamp = msg->timestamp;
-        espMsg.expire_time = msg->expire_time;
-
-        esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&espMsg, sizeof(espMsg));
-        DEBUG_PRINTLN("ESP-NOW: Relayed silence sync to local nodes");
-      }
-
-      // Relay via LoRa if within hop limit (for multi-gateway setups)
-      if (msg->hop_count < LORA_MAX_HOPS) {
-        // Dedup check
-        if (!isDuplicateForRelay(msg->origin_id, msg->timestamp)) {
-          recordForDedup(msg->origin_id, msg->timestamp);
-
-          msg->hop_count++;
-          msg->sender_id = NODE_ID;
-          // BUG FIX #5: Reduced max delay
-          delay(random(20, 50));
-          // Use helper that waits for BUSY and returns to RX mode
-          loRaTransmitWithWait((uint8_t*)msg, sizeof(LoRaSilenceSyncMessage));
-          DEBUG_PRINTF("LoRa: Relayed silence sync, hop=%d\n", msg->hop_count);
-        }
-      }
-      break;
-    }
-
-    case MSG_RESET_CMD: {
-      if (len < (int)sizeof(ResetCmdMessage)) {
-        DEBUG_PRINTF("LoRa RESET too short: %d < %d\n", len, (int)sizeof(ResetCmdMessage));
-        loraRxErrors++;
-        break;
-      }
-
-      ResetCmdMessage* msg = (ResetCmdMessage*)data;
-      DEBUG_PRINTF("LoRa RESET CMD from %d, delay=%d sec\n",
-                   msg->sender_id, msg->reset_delay_sec);
-
-      // Show reset message on display
-      display.clearBuffer();
-      display.setFont(u8g2_font_6x10_tr);
-      display.drawStr(30, 30, "RESET CMD");
-      display.drawStr(25, 45, "Rebooting...");
-      display.sendBuffer();
-
-      // Apply delay based on role
-      uint8_t delayToUse = msg->reset_delay_sec;
-      // Override with role-based delay
-      switch (currentRole) {
-        case ROLE_SENSOR_LORA: delayToUse = 0; break;
-        case ROLE_RELAY_LORA: delayToUse = 1; break;
-        case ROLE_GATEWAY_OFFSHORE: delayToUse = 2; break;
-        case ROLE_GATEWAY_ONSHORE: delayToUse = 3; break;
-        default: break;
-      }
-
-      if (delayToUse > 0) {
-        DEBUG_PRINTF("Waiting %d seconds before reset...\n", delayToUse);
-        delay(delayToUse * 1000);
-      }
-
-      DEBUG_PRINTLN(F("Executing reset..."));
-      Serial.flush();
-      delay(100);
-      ESP.restart();
-      break;
-    }
-
-    case MSG_CONFIG_UPDATE: {
-      if (len < sizeof(ConfigUpdateMessage)) {
-        DEBUG_PRINTLN(F("LoRa: Config update too short"));
-        break;
-      }
-
-      ConfigUpdateMessage* cfg = (ConfigUpdateMessage*)data;
-
-      // Verify checksum
-      uint8_t expectedChecksum = calculateChecksum((uint8_t*)cfg, sizeof(ConfigUpdateMessage) - 1);
-      if (cfg->checksum != expectedChecksum) {
-        DEBUG_PRINTLN(F("LoRa: Config update checksum failed"));
-        loraChecksumFails++;
-        break;
-      }
-
-      // Check for duplicate (prevents relay loops)
-      if (isConfigDuplicate(cfg->origin_id, cfg->config_seq)) {
-        DEBUG_PRINTF("LoRa: Config update duplicate, origin=%d seq=%d\n",
-                     cfg->origin_id, cfg->config_seq);
-        break;
-      }
-
-      // Record for dedup BEFORE processing/relaying
-      recordConfigForDedup(cfg->origin_id, cfg->config_seq);
-
-      DEBUG_PRINTF("LoRa: Config update from origin=%d, target=%d, hop=%d, seq=%d\n",
-                   cfg->origin_id, cfg->target_id, cfg->hop_count, cfg->config_seq);
-
-      // Check if this config is for us
-      bool forUs = (cfg->target_id == NODE_ID) || (cfg->target_id == 0);
-
-      if (forUs) {
-        DEBUG_PRINTLN(F("LoRa: Applying config update..."));
-
-        // Apply settings
-        settings.buzzerEnabled = cfg->buzzerEnabled != 0;
-        settings.alertHoldSec = constrain(cfg->alertHoldSec, 5, 300);
-        settings.heartbeatSec = constrain(cfg->heartbeatSec, 10, 600);
-        settings.reedActiveHigh = cfg->reedActiveHigh != 0;
-
-        // Save to NVS
-        saveSettings();
-
-        DEBUG_PRINTF("LoRa: Config applied - buzzer=%d, alertHold=%d, heartbeat=%d, reedHigh=%d\n",
-                     settings.buzzerEnabled, settings.alertHoldSec,
-                     settings.heartbeatSec, settings.reedActiveHigh);
-
-        // Send ACK back toward origin
-        ConfigAckMessage ack;
-        ack.network_id = NETWORK_ID;
-        ack.sender_id = NODE_ID;
-        ack.msg_type = MSG_CONFIG_ACK;
-        ack.hop_count = 0;
-        ack.origin_id = cfg->origin_id;
-        ack.config_seq = cfg->config_seq;
-        ack.success = 1;
-        ack.target_id = NODE_ID;
-        memset(ack.reserved, 0, sizeof(ack.reserved));
-        ack.checksum = calculateChecksum((uint8_t*)&ack, sizeof(ack) - 1);
-
-        // Small delay before ACK to avoid collision
-        delay(50 + random(100));
-
-        loRaTransmitPacket((uint8_t*)&ack, sizeof(ack), "CONFIG_ACK");
-        DEBUG_PRINTF("LoRa: Config ACK sent to origin=%d\n", cfg->origin_id);
-      }
-
-      // Relay if not at max hops AND (not for us specifically OR target is broadcast)
-      bool shouldRelay = (cfg->hop_count < LORA_MAX_HOPS) &&
-                         (cfg->target_id != NODE_ID || cfg->target_id == 0);
-
-      if (shouldRelay) {
-        DEBUG_PRINTF("LoRa: Relaying config update, hop %d -> %d\n",
-                     cfg->hop_count, cfg->hop_count + 1);
-
-        // Copy and increment hop count
-        ConfigUpdateMessage relay = *cfg;
-        relay.hop_count++;
-        relay.checksum = calculateChecksum((uint8_t*)&relay, sizeof(relay) - 1);
-
-        // Random delay to avoid collisions with other relays
-        delay(100 + random(200));
-
-        loRaTransmitPacket((uint8_t*)&relay, sizeof(relay), "CONFIG_RELAY");
-      }
-
-      break;
-    }
-
-    case MSG_CONFIG_ACK: {
-      if (len < sizeof(ConfigAckMessage)) {
-        DEBUG_PRINTLN(F("LoRa: Config ACK too short"));
-        break;
-      }
-
-      ConfigAckMessage* ack = (ConfigAckMessage*)data;
-
-      // Verify checksum
-      uint8_t expectedChecksum = calculateChecksum((uint8_t*)ack, sizeof(ConfigAckMessage) - 1);
-      if (ack->checksum != expectedChecksum) {
-        DEBUG_PRINTLN(F("LoRa: Config ACK checksum failed"));
-        loraChecksumFails++;
-        break;
-      }
-
-      DEBUG_PRINTF("LoRa: Config ACK from node=%d, origin=%d, seq=%d, hop=%d\n",
-                   ack->sender_id, ack->origin_id, ack->config_seq, ack->hop_count);
-
-      // Check if this ACK is for us (we're the origin)
-      if (ack->origin_id == NODE_ID) {
-        // Check if this matches our pending config
-        if (pendingConfigWaiting && ack->config_seq == pendingConfigSeq) {
-          pendingConfigWaiting = false;
-          DEBUG_PRINTF("LoRa: Config ACK received! Node %d applied config, success=%d\n",
-                       ack->sender_id, ack->success);
-
-          // Could trigger UI feedback here (beep, display message, etc.)
-        }
-      } else {
-        // Not for us - relay toward origin if under hop limit
-        if (ack->hop_count < LORA_MAX_HOPS) {
-          DEBUG_PRINTF("LoRa: Relaying config ACK toward origin=%d, hop %d -> %d\n",
-                       ack->origin_id, ack->hop_count, ack->hop_count + 1);
-
-          // Copy and increment hop count
-          ConfigAckMessage relay = *ack;
-          relay.hop_count++;
-          relay.checksum = calculateChecksum((uint8_t*)&relay, sizeof(relay) - 1);
-
-          // Random delay
-          delay(50 + random(100));
-
-          loRaTransmitPacket((uint8_t*)&relay, sizeof(relay), "ACK_RELAY");
-        }
-      }
-
-      break;
-    }
-  }
-}
-
-void sendLoRaAggregate() {
-  if (!loraReady) return;
-
-  // FIX: Rotation for >10 nodes - static offset cycles through all nodes
-  // LoRa packet can only hold 10 nodes, but network supports up to 16 (MAX_NODES)
-  static uint8_t nodeOffset = 0;
-
-  LoRaAggregateMessage msg;
-  memset(&msg, 0, sizeof(msg));
-
-  msg.network_id = NETWORK_ID;
-  msg.sender_id = NODE_ID;
-  msg.msg_type = MSG_LORA_AGGREGATE;
-  msg.hop_count = 0;
-  msg.lora_sequence = txSequence++;
-  msg.sender_role = currentRole;  // Include role so receivers know gateway vs sensor
-
-  // Ensure our own state is current before sending
-  network.nodes[0].last_seen = millis();
-  network.nodes[0].last_uptime = millis() / 1000;
-
-  // FIX: Pack nodes intelligently to handle >10 nodes
-  // Priority: Always include self (node 0), then rotate through others
-  int packedCount = 0;
-
-  // Always send self (gateway/node 0) in slot 0
-  if (network.node_count > 0) {
-    msg.nodes[packedCount].node_id = network.nodes[0].node_id;
-    msg.nodes[packedCount].flags = network.nodes[0].flags;
-    msg.nodes[packedCount].agg_flags = 0;  // BUG FIX #2: Self is always online
-    // BUG FIX #17: Convert battery mV to percentage, uptime sec to minutes
-    msg.nodes[packedCount].battery_pct = batteryMvToPercent(network.nodes[0].battery_mv);
-    msg.nodes[packedCount].sequence = network.nodes[0].last_seq;
-    msg.nodes[packedCount].uptime_min = (uint16_t)(network.nodes[0].last_uptime / 60);
-
-    // BUG FIX #1: Include elapsed FISH_ON time for hold timer sync
-    if (HAS_FLAG(network.nodes[0].flags, FLAG_FISH_ON) && network.nodes[0].fish_on_time > 0) {
-      uint32_t elapsedMs = millis() - network.nodes[0].fish_on_time;
-      msg.nodes[packedCount].fish_on_elapsed_sec = (uint16_t)(elapsedMs / 1000);
-      // BUG FIX #1: Set hold expired flag if our local hold time has passed
-      if (canClearFishOn(network.nodes[0].node_id)) {
-        SET_FLAG(msg.nodes[packedCount].agg_flags, AGG_FLAG_HOLD_EXPIRED);
-      }
-    } else {
-      msg.nodes[packedCount].fish_on_elapsed_sec = 0;
-    }
-    packedCount++;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // FIX B - SENDER SIDE: FILTER OUT ECHOED NODES
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Only include nodes where THIS gateway is the authoritative source.
-  // This prevents the feedback loop where the offshore gateway echoes back
-  // sensor data it learned from the onshore gateway.
-  //
-  // Rules for including a node in the aggregate:
-  // 1. Self (node 0) - always included
-  // 2. Nodes tracked via ESP-NOW (via_espnow == true) - we're authoritative
-  // 3. Skip nodes only learned via LoRa (via_lora == true && via_espnow == false)
-  //
-  // This is defense-in-depth alongside Fix A (receiver-side check).
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // Fill remaining 9 slots with authoritative nodes only
-  if (network.node_count > 1) {
-    int slotsAvailable = 9;  // Max 9 more slots after self
-    int nodesScanned = 0;
-    int nodesRemaining = network.node_count - 1;  // Exclude node 0
-
-    // Scan through nodes, skipping those we only know via LoRa
-    for (int i = 0; i < nodesRemaining && packedCount < 10; i++) {
-      // Calculate which node index to check (skip node 0, rotate through)
-      int nodeIndex = 1 + ((nodeOffset + i) % nodesRemaining);
-      nodesScanned++;
-
-      NodeState* node = &network.nodes[nodeIndex];
-
-      // FIX B: Skip nodes that we only know via LoRa (not authoritative)
-      // These were learned from another gateway - don't echo them back
-      if (node->via_lora && !node->via_espnow) {
-        DEBUG_PRINTF("Skipping node %d in aggregate (learned via LoRa, not authoritative)\n",
-                     node->node_id);
-        continue;  // Skip this node - we're not the authoritative source
-      }
-
-      // Include this node - we're authoritative (via ESP-NOW or it's our own role)
-      msg.nodes[packedCount].node_id = node->node_id;
-      msg.nodes[packedCount].flags = node->flags;
-      msg.nodes[packedCount].agg_flags = 0;  // BUG FIX #2: Initialize agg_flags
-      // BUG FIX #17: Convert battery mV to percentage, uptime sec to minutes
-      msg.nodes[packedCount].battery_pct = batteryMvToPercent(node->battery_mv);
-      msg.nodes[packedCount].sequence = node->last_seq;
-      msg.nodes[packedCount].uptime_min = (uint16_t)(node->last_uptime / 60);
-
-      // BUG FIX #2: Set AGG_FLAG_NODE_OFFLINE in agg_flags (not flags)
-      // This propagates offline status to remote gateways without colliding with FLAG_CONFIG_MODE
-      if (!node->online) {
-        SET_FLAG(msg.nodes[packedCount].agg_flags, AGG_FLAG_NODE_OFFLINE);
-        DEBUG_PRINTF("Including offline node %d with OFFLINE flag\n", node->node_id);
-      }
-
-      // BUG FIX #1: Include elapsed FISH_ON time for hold timer sync
-      if (HAS_FLAG(node->flags, FLAG_FISH_ON) && node->fish_on_time > 0) {
-        uint32_t elapsedMs = millis() - node->fish_on_time;
-        msg.nodes[packedCount].fish_on_elapsed_sec = (uint16_t)(elapsedMs / 1000);
-        // BUG FIX #1: Set hold expired flag if our local hold time has passed
-        if (canClearFishOn(node->node_id)) {
-          SET_FLAG(msg.nodes[packedCount].agg_flags, AGG_FLAG_HOLD_EXPIRED);
-        }
-      } else {
-        msg.nodes[packedCount].fish_on_elapsed_sec = 0;
-      }
-
-      packedCount++;
-    }
-
-    // Advance offset for next transmission (rotate through all nodes)
-    nodeOffset = (nodeOffset + nodesScanned) % max(1, nodesRemaining);
-  }
-
-  msg.node_count = packedCount;
-
-  DEBUG_PRINTF("LoRa TX AGG: %d/%d nodes (offset=%d), self_seq=%d\n",
-               packedCount, network.node_count, nodeOffset, msg.nodes[0].sequence);
-
-  msg.checksum = calculateChecksum((uint8_t*)&msg, sizeof(msg) - 1);
-
-  // Record own transmission (defence in depth: echoes of our own aggregate are
-  // already dropped on receive because sender_id == NODE_ID)
-  recordAggregateForDedup(NODE_ID, msg.lora_sequence);
-
-  // Use unified transmit helper with proper TX-complete interrupt handling
-  loRaTransmitPacket((uint8_t*)&msg, sizeof(msg), "AGG");
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SEND LORA AGGREGATE WITH RETRY - For reliable status change propagation
@@ -2859,57 +1646,9 @@ void sendLoRaAggregate() {
 // Sends aggregate multiple times to ensure offshore gateway receives
 // status changes even if some packets are lost.
 
-void sendLoRaAggregateWithRetry(int retries) {
-  if (!loraReady) return;
 
-  DEBUG_PRINTF("Sending LoRa aggregate with %d retries for status change\n", retries);
 
-  for (int i = 0; i < retries; i++) {
-    sendLoRaAggregate();
 
-    if (i < retries - 1) {
-      // Random delay between retries to avoid synchronized collisions
-      // P4 NOTE: Future optimization - could use adaptive timing based on
-      // channel activity/RSSI to reduce collisions and improve throughput
-      int delayMs = 150 + random(100);
-      DEBUG_PRINTF("Retry %d/%d - waiting %dms\n", i + 1, retries, delayMs);
-      delay(delayMs);
-    }
-  }
-
-  // Update last TX time to prevent immediate scheduled aggregate
-  lastLoRaTx = millis();
-
-  DEBUG_PRINTLN("Status change aggregate complete");
-}
-
-void relayLoRaAlert(uint8_t originId, uint8_t flags, uint16_t batteryMv, uint16_t seq) {
-  if (!loraReady) return;
-
-  // BUG FIX #4: Find originating node to get its uptime
-  uint32_t originUptime = 0;
-  NodeState* originNode = findOrCreateNode(originId);
-  if (originNode) {
-    originUptime = originNode->last_uptime;
-  }
-
-  LoRaAlertMessage msg;
-  msg.network_id = NETWORK_ID;
-  msg.sender_id = NODE_ID;
-  msg.msg_type = MSG_LORA_ALERT;
-  msg.hop_count = 0;
-  msg.origin_id = originId;
-  msg.flags = flags;
-  msg.battery_mv = batteryMv;
-  msg.sequence = seq;
-  msg.uptime_sec = originUptime;  // BUG FIX #4: Include actual uptime
-  msg.alert_time = millis() / 1000;
-
-  DEBUG_PRINTF("LoRa TX ALERT for node %d seq=%d uptime=%lu\n", originId, seq, originUptime);
-
-  // Use unified transmit helper with proper TX-complete interrupt handling
-  loRaTransmitPacket((uint8_t*)&msg, sizeof(msg), "ALERT");
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ESP-NOW
@@ -3074,26 +1813,14 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
             statusChanged = true;
           }
 
-          // If status changed, send immediate aggregate with retry
-          if (statusChanged && loraReady &&
-              (currentRole == ROLE_GATEWAY_ONSHORE || currentRole == ROLE_GATEWAY_OFFSHORE)) {
-            DEBUG_PRINTLN("Status change detected - sending immediate LoRa aggregate");
-            sendLoRaAggregateWithRetry(3);
-          }
+          // v2: the change reaches the chalet in this hub's next TDMA slot (line-state record,
+          // latched until the beacon acks it)
+          if (statusChanged) meshSyncNodesNow();
         }
       } else {
         DEBUG_PRINTF("ESP-NOW: Rejected stale/dup from node %d seq=%d\n", msg->node_id, msg->sequence);
       }
 
-      // RELAY: Check if we should relay via LoRa
-      if (loraReady && (currentRole == ROLE_GATEWAY_ONSHORE ||
-                        currentRole == ROLE_SENSOR_LORA ||
-                        currentRole == ROLE_RELAY_LORA)) {
-        if (!isDuplicateForRelay(msg->node_id, msg->sequence)) {
-          recordForDedup(msg->node_id, msg->sequence);
-          // Only relay alerts immediately, status goes in aggregate
-        }
-      }
       break;
     }
     
@@ -3136,15 +1863,8 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
         }
       }
 
-      // RELAY: Always relay alerts (dedup at receiver)
-      if (loraReady && (currentRole == ROLE_GATEWAY_ONSHORE ||
-                        currentRole == ROLE_SENSOR_LORA ||
-                        currentRole == ROLE_RELAY_LORA)) {
-        if (!isDuplicateForRelay(msg->node_id, msg->sequence)) {
-          recordForDedup(msg->node_id, msg->sequence);
-          relayLoRaAlert(msg->node_id, msg->flags, msg->battery_mv, msg->sequence);
-        }
-      }
+      // v2: forwarded to the chalet as a line-state event in this hub's next TDMA slot
+      meshSyncNodesNow();
       break;
     }
 
@@ -3178,23 +1898,8 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
         silenceExpireTime = 0;
       }
 
-      // Relay via LoRa if we're a gateway (so remote gateway gets it)
-      if (loraReady && (currentRole == ROLE_GATEWAY_ONSHORE ||
-                        currentRole == ROLE_GATEWAY_OFFSHORE)) {
-        LoRaSilenceSyncMessage loraMsg;
-        loraMsg.network_id = NETWORK_ID;
-        loraMsg.sender_id = NODE_ID;
-        loraMsg.msg_type = MSG_SILENCE_SYNC;
-        loraMsg.hop_count = 0;
-        loraMsg.silence_state = msg->silence_state;
-        loraMsg.origin_id = msg->sender_id;
-        loraMsg.timestamp = msg->timestamp;
-        loraMsg.expire_time = msg->expire_time;
-
-        // Use helper that waits for BUSY and returns to RX mode
-        loRaTransmitWithWait((uint8_t*)&loraMsg, sizeof(loraMsg));
-        DEBUG_PRINTLN("LoRa: Relayed silence sync");
-      }
+      // v2: ask the chalet to silence the whole network (flag in this hub's next packets)
+      if (loraReady) meshRequestSilence(alertsSilenced);
       break;
     }
 
@@ -3243,6 +1948,12 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE STATE WITH DEDUPLICATION
 // ═══════════════════════════════════════════════════════════════════════════
+
+// v2: index of an existing node entry, -1 if unknown (no creation)
+int findNodeIndexForMesh(uint8_t nodeId) {
+  for (int i = 0; i < network.node_count; i++) if (network.nodes[i].node_id == nodeId) return i;
+  return -1;
+}
 
 // Find or create a node entry
 NodeState* findOrCreateNode(uint8_t nodeId) {
@@ -3425,47 +2136,13 @@ bool canClearFishOn(uint8_t nodeId) {
   return true;
 }
 
-// Relay deduplication - short term cache
-bool isDuplicateForRelay(uint8_t nodeId, uint16_t seq) {
-  uint32_t now = millis();
-  
-  for (int i = 0; i < DEDUP_CACHE_SIZE; i++) {
-    if (dedupeCache[i].node_id == nodeId && 
-        dedupeCache[i].sequence == seq &&
-        (now - dedupeCache[i].received_at) < DEDUP_WINDOW_MS) {
-      return true;  // Already relayed recently
-    }
-  }
-  return false;
-}
 
-void recordForDedup(uint8_t nodeId, uint16_t seq) {
-  dedupeCache[dedupeCacheIdx].node_id = nodeId;
-  dedupeCache[dedupeCacheIdx].sequence = seq;
-  dedupeCache[dedupeCacheIdx].received_at = millis();
-  dedupeCacheIdx = (dedupeCacheIdx + 1) % DEDUP_CACHE_SIZE;
-}
 
-// ISSUE 1 FIX: aggregate relay dedup, keyed by (origin hub, lora_sequence), 30 s window
-bool isAggregateDuplicate(uint8_t originHub, uint8_t loraSeq) {
-  uint32_t now = millis();
-  for (int i = 0; i < AGG_DEDUP_CACHE_SIZE; i++) {
-    if (aggDedupCache[i].received_at != 0 &&
-        aggDedupCache[i].node_id == originHub &&
-        aggDedupCache[i].sequence == loraSeq &&
-        (now - aggDedupCache[i].received_at) < DEDUP_WINDOW_MS) {
-      return true;
-    }
-  }
-  return false;
-}
 
-void recordAggregateForDedup(uint8_t originHub, uint8_t loraSeq) {
-  aggDedupCache[aggDedupCacheIdx].node_id = originHub;
-  aggDedupCache[aggDedupCacheIdx].sequence = loraSeq;
-  aggDedupCache[aggDedupCacheIdx].received_at = millis() | 1;  // never 0 (0 = empty slot)
-  aggDedupCacheIdx = (aggDedupCacheIdx + 1) % AGG_DEDUP_CACHE_SIZE;
-}
+
+
+
+
 
 // Update node state (called only after shouldAcceptMessage returns true)
 void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t seq, uint32_t uptime, int8_t rssi) {
@@ -3700,12 +2377,8 @@ void loopLocalSensor() {
       // Record in alert history
       recordAlert(NODE_ID);
 
-      // Relay via LoRa with 3x retry for reliability
-      for (int i = 0; i < 3; i++) {
-        relayLoRaAlert(NODE_ID, network.nodes[0].flags, localBatteryMv, localSequence);
-        if (i < 2) delay(150 + random(100));
-      }
-      DEBUG_PRINTLN("LOCAL: FISH_ON alert sent with 3x retry");
+      // v2: reported as a line-state event in the next TDMA slot (latched until acked)
+      meshSyncNodesNow();
     } else {
       localFishOn = false;
       CLEAR_FLAG(network.nodes[0].flags, FLAG_FISH_ON);
@@ -3718,11 +2391,7 @@ void loopLocalSensor() {
       network.nodes[0].last_seen = millis();
       network.nodes[0].last_uptime = millis() / 1000;
 
-      // Send immediate LoRa status update with retry when FISH_ON clears
-      if (loraReady) {
-        DEBUG_PRINTLN("LOCAL: FISH_ON cleared - sending LoRa aggregate with retry");
-        sendLoRaAggregateWithRetry(3);
-      }
+      meshSyncNodesNow();
     }
 
     updateAlertState();
@@ -3847,6 +2516,32 @@ void checkSerialWifiConfig() {
     if (wifiApActive) {
       Serial.printf("AP IP: %s\n", apIpAddress.c_str());
     }
+  } else if (line.startsWith("TEST")) {
+    // v2 radio test mode (chalet decides, hubs follow the beacon): TEST OFF|ROTATE|SF9|SF8|SF7
+    String a = line.substring(4); a.trim(); a.toUpperCase();
+    int m = -1;
+    if (a == "OFF") m = 0; else if (a == "ROTATE") m = 1; else if (a == "SF9") m = 2; else if (a == "SF8") m = 3; else if (a == "SF7") m = 4;
+    if (currentRole != ROLE_GATEWAY_OFFSHORE) {
+      Serial.println(F("Test mode is set on the chalet (GATEWAY_OFFSHORE); hubs follow its beacon."));
+    } else if (m < 0) {
+      Serial.println(F("Usage: TEST OFF|ROTATE|SF9|SF8|SF7"));
+    } else {
+      settings.radioTestMode = (uint8_t)m; saveSettings(); meshSetTestMode((uint8_t)m); meshResetStats();
+      Serial.printf("Radio test mode: %s\n", meshTestModeName((uint8_t)m));
+    }
+  } else if (line.startsWith("ADAPT")) {
+    String a = line.substring(5); a.trim(); a.toUpperCase();
+    if (currentRole == ROLE_GATEWAY_OFFSHORE && (a == "ON" || a == "OFF")) {
+      settings.adaptiveRadio = (a == "ON"); saveSettings(); meshSetAdaptive(settings.adaptiveRadio);
+      Serial.printf("Adaptive SF: %s\n", settings.adaptiveRadio ? "on" : "off");
+    } else {
+      Serial.println(F("Usage (chalet only): ADAPT ON|OFF"));
+    }
+  } else if (line == "RADIO") {
+    meshPrintStatus(Serial);
+  } else if (line == "RADIO RESET") {
+    meshResetStats();
+    Serial.println(F("Radio stats reset"));
   } else if (line == "WIFI CLEAR") {
     preferences.begin("wifi", false);
     preferences.clear();
@@ -4081,6 +2776,9 @@ void setupWebServer() {
   server.on("/remote-config", HTTP_GET, handleWebRemoteConfig);
   server.on("/api/remote-config", HTTP_POST, handleWebApiRemoteConfig);
   server.on("/api/remote-config/status", HTTP_GET, handleWebApiRemoteConfigStatus);
+  server.on("/radio", HTTP_GET, handleWebRadio);              // v2: radio / range test page
+  server.on("/api/radio", HTTP_GET, handleWebApiRadio);
+  server.on("/api/radio", HTTP_POST, handleWebApiRadioPost);
 
   server.begin();
   DEBUG_PRINTLN(F("Web server ready on port 80"));
@@ -5128,8 +3826,8 @@ void handleMainMenuInput(char key) {
         case 3: menuSelection = 0; navigateToScreen(SCREEN_SETTINGS); break;
         case 4: navigateToScreen(SCREEN_NETWORK_INFO); break;
         case 5: navigateToScreen(SCREEN_REBOOT_CONFIRM); break;
-        case 6:  // Reset All Nodes - only for GATEWAY_ONSHORE
-          if (currentRole == ROLE_GATEWAY_ONSHORE) {
+        case 6:  // Reset All Nodes - hub: its own nodes; chalet: whole network (v2 beacon command)
+          if (currentRole == ROLE_GATEWAY_ONSHORE || currentRole == ROLE_GATEWAY_OFFSHORE) {
             navigateToScreen(SCREEN_RESET_ALL_CONFIRM);
           } else {
             display.clearBuffer();
@@ -5487,6 +4185,8 @@ void loadSettings() {
   settings.webServerEnabled = preferences.getBool("webServer", true);
   settings.wifiModeSetting = preferences.getUChar("wifiMode", 2);  // Default: AP+STA
   settings.reedActiveHigh = preferences.getBool("reedHigh", true);  // Default: trigger on HIGH
+  settings.radioTestMode = preferences.getUChar("radioTest", 0);
+  settings.adaptiveRadio = preferences.getBool("adaptRadio", false);
 
   preferences.end();
 
@@ -5505,6 +4205,8 @@ void saveSettings() {
   preferences.putBool("webServer", settings.webServerEnabled);
   preferences.putUChar("wifiMode", settings.wifiModeSetting);
   preferences.putBool("reedHigh", settings.reedActiveHigh);
+  preferences.putUChar("radioTest", settings.radioTestMode);
+  preferences.putBool("adaptRadio", settings.adaptiveRadio);
 
   preferences.end();
 
@@ -5622,79 +4324,31 @@ void silenceAlerts() {
   sendSilenceSync();
 }
 
+void sendSilenceSyncEspNow() {
+  if (!espNowReady) return;
+  SilenceSyncMessage espMsg;
+  espMsg.network_id = NETWORK_ID;
+  espMsg.sender_id = NODE_ID;
+  espMsg.msg_type = MSG_SILENCE_SYNC;
+  espMsg.silence_state = alertsSilenced ? 1 : 0;
+  espMsg.timestamp = millis() / 1000;
+  espMsg.expire_time = alertsSilenced ? (silenceExpireTime / 1000) : 0;
+  esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&espMsg, sizeof(espMsg));
+  DEBUG_PRINTLN("ESP-NOW: Silence sync sent");
+}
+
 void sendSilenceSync() {
   DEBUG_PRINTF("Broadcasting silence state: %d\n", alertsSilenced);
-
-  // Broadcast via ESP-NOW to local nodes
-  if (espNowReady) {
-    SilenceSyncMessage espMsg;
-    espMsg.network_id = NETWORK_ID;
-    espMsg.sender_id = NODE_ID;
-    espMsg.msg_type = MSG_SILENCE_SYNC;
-    espMsg.silence_state = alertsSilenced ? 1 : 0;
-    espMsg.timestamp = millis() / 1000;
-    espMsg.expire_time = alertsSilenced ? (silenceExpireTime / 1000) : 0;
-
-    esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&espMsg, sizeof(espMsg));
-    DEBUG_PRINTLN("ESP-NOW: Silence sync sent");
-  }
-
-  // Broadcast via LoRa to remote gateways and relays
-  if (loraReady) {
-    LoRaSilenceSyncMessage loraMsg;
-    loraMsg.network_id = NETWORK_ID;
-    loraMsg.sender_id = NODE_ID;
-    loraMsg.msg_type = MSG_SILENCE_SYNC;
-    loraMsg.hop_count = 0;
-    loraMsg.silence_state = alertsSilenced ? 1 : 0;
-    loraMsg.origin_id = NODE_ID;
-    loraMsg.reserved = 0;
-    loraMsg.timestamp = millis() / 1000;
-    loraMsg.expire_time = alertsSilenced ? (silenceExpireTime / 1000) : 0;
-
-    // Use unified transmit helper with proper TX-complete interrupt handling
-    loRaTransmitPacket((uint8_t*)&loraMsg, sizeof(loraMsg), "SILENCE");
-    DEBUG_PRINTLN("LoRa: Silence sync sent");
-  }
+  sendSilenceSyncEspNow();                              // local tip-up nodes
+  if (loraReady) meshRequestSilence(alertsSilenced);    // v2: chalet beacon carries the network state
 }
 
 bool sendRemoteConfig(uint8_t targetNodeId) {
-  if (!loraReady) {
-    DEBUG_PRINTLN(F("LoRa not ready for config send"));
-    return false;
-  }
-
-  ConfigUpdateMessage cfg;
-  cfg.network_id = NETWORK_ID;
-  cfg.origin_id = NODE_ID;  // We are the origin
-  cfg.msg_type = MSG_CONFIG_UPDATE;
-  cfg.hop_count = 0;        // Starting hop
-  cfg.target_id = targetNodeId;
-  cfg.config_seq = ++pendingConfigSeq;
-  cfg.buzzerEnabled = settings.buzzerEnabled ? 1 : 0;
-  cfg.alertHoldSec = settings.alertHoldSec;
-  cfg.heartbeatSec = settings.heartbeatSec;
-  cfg.reedActiveHigh = settings.reedActiveHigh ? 1 : 0;
-  memset(cfg.reserved, 0, sizeof(cfg.reserved));
-  cfg.checksum = calculateChecksum((uint8_t*)&cfg, sizeof(cfg) - 1);
-
-  // Record in our own dedup cache (so we don't process our own relay)
-  recordConfigForDedup(NODE_ID, cfg.config_seq);
-
-  // Track pending config for ACK
-  pendingConfigTarget = targetNodeId;
-  pendingConfigTime = millis();
-  pendingConfigWaiting = true;
-
-  DEBUG_PRINTF("LoRa: Sending config to node %d, seq=%d\n", targetNodeId, cfg.config_seq);
-
-  // Send with retry for reliability
-  for (int i = 0; i < 2; i++) {
-    loRaTransmitPacket((uint8_t*)&cfg, sizeof(cfg), "CONFIG");
-    if (i < 1) delay(300 + random(200));
-  }
-
-  return true;
+  // v2: remote configuration over the TDMA mesh is not implemented yet (planned with the beacon
+  // command field). The web page reports the failure.
+  (void)targetNodeId;
+  DEBUG_PRINTLN(F("Remote config: not available in mesh v2 yet"));
+  return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5725,10 +4379,11 @@ void sendResetAllCommand() {
     delay(100);  // Give it time to transmit
   }
 
-  // Send via LoRa to reach offshore gateway and relays
-  if (loraReady) {
-    loRaTransmitPacket((uint8_t*)&msg, sizeof(msg), "RESET");
-    DEBUG_PRINTLN("LoRa: Reset command sent");
+  // v2: only the chalet can reset the network (beacon command, repeated for 5 s)
+  if (loraReady && currentRole == ROLE_GATEWAY_OFFSHORE) {
+    meshSendResetAll();
+    DEBUG_PRINTLN("LoRa: Reset command in beacon");
+    delay(6000);   // let hubs receive it (the radio task keeps running)
   }
 
   // Update display
@@ -5746,4 +4401,233 @@ void sendResetAllCommand() {
   Serial.flush();
   delay(100);
   ESP.restart();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2: TDMA MESH INTEGRATION (loop side). The radio runs in its own task (mesh_radio.cpp).
+//   Hub:    network.nodes[] (ESP-NOW nodes + own tip-up) -> line-state table of the mesh
+//   Chalet: owner-resolved node states from the mesh -> network.nodes[] (UI, web, buzzer)
+// ═══════════════════════════════════════════════════════════════════════════
+
+static volatile bool meshSyncPending = false;
+void meshSyncNodesNow() { meshSyncPending = true; }
+
+static uint8_t lineStateOf(const NodeState& n, bool self) {
+  if (!self && !n.online) return MESH_LS_OFFLINE;
+  if (HAS_FLAG(n.flags, FLAG_FISH_ON)) return MESH_LS_TRIPPED;
+  if (HAS_FLAG(n.flags, FLAG_SENSOR_ERROR)) return MESH_LS_FAULT;
+  return MESH_LS_IDLE;
+}
+
+static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
+  if (u.node == 0 || u.node == NODE_ID) return;
+  const bool isNew = (findNodeIndexForMesh(u.node) < 0);
+  NodeState* n = findOrCreateNode(u.node);
+  if (n == nullptr) return;
+  if (isNew) {
+    String saved = loadNodeName(u.node);
+    if (saved.length() > 0) { strncpy(n->name, saved.c_str(), sizeof(n->name) - 1); n->name[sizeof(n->name) - 1] = '\0'; }
+  }
+  const bool wasFish = HAS_FLAG(n->flags, FLAG_FISH_ON);
+  const bool fish = (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING);
+  n->initialized = true;
+  n->via_lora = true;
+  n->role = ROLE_SENSOR_ONLY;
+  if (u.new_state == MESH_LS_OFFLINE) {
+    n->online = false;
+  } else {
+    if (!n->online) registerActivity();
+    n->online = true;
+    n->last_seen = millis();
+  }
+  if (u.flags & 0x01) SET_FLAG(n->flags, FLAG_LOW_BATTERY); else CLEAR_FLAG(n->flags, FLAG_LOW_BATTERY);
+  if (u.new_state == MESH_LS_FAULT) SET_FLAG(n->flags, FLAG_SENSOR_ERROR); else CLEAR_FLAG(n->flags, FLAG_SENSOR_ERROR);
+  if (fish && !wasFish) {
+    SET_FLAG(n->flags, FLAG_FISH_ON);
+    n->fish_on_time = millis();
+    recordAlert(u.node);
+    triggerBuzzer(3);
+    registerActivity();
+  } else if (!fish && wasFish) {
+    CLEAR_FLAG(n->flags, FLAG_FISH_ON);
+    n->fish_on_time = 0;
+    for (int i = 0; i < ALERT_HISTORY_SIZE; i++)
+      if (alertHistory[i].nodeId == u.node && alertHistory[i].active) alertHistory[i].active = false;
+  }
+  updateAlertState();
+  network.last_update = millis();
+  DEBUG_PRINTF("mesh: node %u state %u -> %u (hub %u)\n", u.node, u.old_state, u.new_state, u.owner);
+}
+
+static void networkResetFromChalet() {
+  DEBUG_PRINTLN(F("RESET ALL from chalet: forwarding to nodes, then rebooting"));
+  if (espNowReady) {
+    ResetCmdMessage msg;
+    msg.network_id = NETWORK_ID;
+    msg.sender_id = NODE_ID;
+    msg.msg_type = MSG_RESET_CMD;
+    msg.reset_delay_sec = 0;
+    msg.timestamp = millis() / 1000;
+    esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
+  }
+  showOverlayMessage("Network reset", 1500);
+  delay(100 * (NODE_ID % 10));   // stagger hub reboots
+  ESP.restart();
+}
+
+void meshLoop() {
+  const bool chalet = (currentRole == ROLE_GATEWAY_OFFSHORE);
+  static unsigned long lastSync = 0, lastSnap = 0, lastCounters = 0;
+
+  if (!chalet) {
+    if (meshSyncPending || millis() - lastSync >= 250) {
+      meshSyncPending = false;
+      lastSync = millis();
+      meshHubSetBattery(localBatteryMv);
+      for (int i = 0; i < network.node_count; i++) {
+        const NodeState& n = network.nodes[i];
+        const bool self = (i == 0);
+        if (self && !HAS_LOCAL_SENSOR) continue;
+        if (!self && !n.initialized) continue;
+        const uint16_t mv = self ? localBatteryMv : n.battery_mv;
+        meshHubObserveNode(n.node_id, lineStateOf(n, self), 0,
+                           HAS_FLAG(n.flags, FLAG_LOW_BATTERY) ? 0x01 : 0x00, batteryMvToPercent(mv));
+      }
+    }
+    if (meshPollReset()) networkResetFromChalet();
+  } else {
+    MeshNodeUpdate u;
+    uint8_t budget = 16;
+    while (budget-- && meshPollNodeUpdate(u)) applyMeshNodeUpdate(u);
+    if (millis() - lastSnap >= 1000) {
+      lastSnap = millis();
+      MeshNodeSnapshot snap[32];
+      const uint8_t k = meshNodeSnapshot(snap, 32);
+      for (uint8_t i = 0; i < k; i++) {
+        if (snap[i].state == MESH_LS_OFFLINE || snap[i].node == NODE_ID) continue;
+        const int idx = findNodeIndexForMesh(snap[i].node);
+        if (idx < 0) continue;
+        NodeState& n = network.nodes[idx];
+        n.last_seen = millis();      // keeps loopNodeTimeout quiet while the mesh reports the node
+        n.online = true;
+        if (snap[i].battery != 255) n.battery_mv = batteryPercentToMv(snap[i].battery);
+      }
+    }
+  }
+
+  bool s;
+  if (meshPollSilence(s) && s != alertsSilenced) {
+    alertsSilenced = s;
+    if (s) { silenceTime = millis(); silenceExpireTime = millis() + SILENCE_AUTO_CLEAR_MS; }
+    else { silenceTime = 0; silenceExpireTime = 0; }
+    if (!chalet) sendSilenceSyncEspNow();   // forward to this hub's tip-up nodes
+    registerActivity();
+  }
+
+  if (millis() - lastCounters >= 1000) {
+    lastCounters = millis();
+    MeshCounters c;
+    meshCounters(c);
+    loraReady = c.radio_ok;
+    loraRxCount = c.rx_ok;
+    loraTxCount = c.tx;
+    loraChecksumFails = c.rx_crc;     // hardware CRC failures
+    if (c.last_rx_ms) lastLoRaRxTime = c.last_rx_ms;
+  }
+}
+
+// OLED screen shown instead of the live status while the radio test mode is on.
+void drawRadioTest() {
+  display.clearBuffer();
+  display.setFont(u8g2_font_5x7_tr);
+  char line[32];
+  snprintf(line, sizeof(line), "RADIO TEST: %s", meshTestModeName(meshTestMode()));
+  display.drawStr(0, 7, line);
+  display.drawHLine(0, 9, 128);
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) {
+    MeshHubSummary h[5];
+    const uint8_t n = meshHubSummaries(h, 5);
+    if (n == 0) display.drawStr(0, 20, "No hub heard yet");
+    for (uint8_t i = 0; i < n; i++) {
+      snprintf(line, sizeof(line), "H%u%s %s %lu/%lu %ddB", h[i].id, h[i].via ? "*" : " ", meshModeName(h[i].mode),
+               (unsigned long)h[i].rx, (unsigned long)h[i].sched, h[i].rssi);
+      display.drawStr(0, 18 + i * 9, line);
+    }
+  } else {
+    MeshHubView v;
+    meshHubView(v);
+    snprintf(line, sizeof(line), "%s frame %u", v.synced ? (v.from_echo ? "SYNC(echo)" : "SYNC") : "SEARCHING", v.frame);
+    display.drawStr(0, 18, line);
+    snprintf(line, sizeof(line), "Beacon %d dBm SNR %.1f", v.beacon_rssi, v.beacon_snr);
+    display.drawStr(0, 27, line);
+    snprintf(line, sizeof(line), "Lost %u/64  err %ld us", v.lost64, (long)v.sync_err_us);
+    display.drawStr(0, 36, line);
+    snprintf(line, sizeof(line), "Slot %s  %uB", v.own_slot_mode >= 0 ? meshModeName((uint8_t)v.own_slot_mode) : "none", v.allowance);
+    display.drawStr(0, 45, line);
+    snprintf(line, sizeof(line), "B%lu E%lu TX%lu", (unsigned long)v.beacons, (unsigned long)v.echoes, (unsigned long)v.tx);
+    display.drawStr(0, 54, line);
+  }
+  display.sendBuffer();
+}
+
+// ---- web: /radio page and API (chalet; hubs in LR mode have no web server) ----
+void handleWebApiRadio() {
+  server.send(200, "application/json", meshRadioJson());
+}
+
+void handleWebApiRadioPost() {
+  StaticJsonDocument<192> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) {
+    server.send(400, "application/json", "{\"error\":\"radio settings are set on the chalet\"}");
+    return;
+  }
+  if (doc.containsKey("test")) {
+    const int m = doc["test"].as<int>();
+    if (m >= 0 && m <= 4) { settings.radioTestMode = (uint8_t)m; meshSetTestMode((uint8_t)m); meshResetStats(); }
+  }
+  if (doc.containsKey("adaptive")) { settings.adaptiveRadio = doc["adaptive"].as<bool>(); meshSetAdaptive(settings.adaptiveRadio); }
+  if (doc["resetStats"] | false) meshResetStats();
+  saveSettings();
+  server.send(200, "application/json", meshRadioJson());
+}
+
+void handleWebRadio() {
+  String html = F(R"rawliteral(<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Radio test</title>
+<style>body{font-family:sans-serif;background:#0f0f1a;color:#eee;margin:12px}table{border-collapse:collapse;width:100%;font-size:13px}
+td,th{border-bottom:1px solid #333;padding:4px;text-align:right}th:first-child,td:first-child{text-align:left}
+select,button,label{font-size:15px;margin:4px 6px 4px 0}.muted{color:#999;font-size:12px}a{color:#4fc3f7}</style></head><body>
+<h3>Radio / range test</h3>
+<div><label>Test mode <select id="t"><option value="0">off</option><option value="1">rotate SF9/8/7</option>
+<option value="2">fixed SF9/500</option><option value="3">fixed SF8/500</option><option value="4">fixed SF7/500</option></select></label>
+<label><input type="checkbox" id="a"> adaptive SF</label><button id="r">Reset stats</button> <a href="/">back</a></div>
+<p class="muted">Per hub and per mode: packets received / slots scheduled at the chalet (uplink), RSSI/SNR at the chalet.
+Hub columns: beacon (downlink) as measured by the hub, beacons lost in the last 64, timing error vs prediction.
+Sensitivity estimates (theory, not measured): SF9/500 -123.5, SF8/500 -121, SF7/500 -118.5 dBm.</p>
+<div id="s" class="muted"></div><table id="h"></table>
+<script>
+function post(o){fetch('/api/radio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(o)}).then(load);}
+document.getElementById('t').onchange=e=>post({test:+e.target.value});
+document.getElementById('a').onchange=e=>post({adaptive:e.target.checked});
+document.getElementById('r').onclick=()=>post({resetStats:true});
+function f(x,d){return x===undefined?'-':(+x).toFixed(d||0);}
+function load(){fetch('/api/radio').then(r=>r.json()).then(d=>{
+ const tm={off:0,rotate:1,'SF9/500':2,'SF8/500':3,'SF7/500':4};
+ if(document.activeElement.id!=='t')document.getElementById('t').value=tm[d.test_mode]||0;
+ document.getElementById('a').checked=!!d.adaptive;
+ document.getElementById('s').textContent='frame '+d.frame+' | rx '+d.rx_ok+' | crc '+d.rx_crc+' | tx '+d.tx+' | allowance '+d.allowance+' B | dropped slots '+d.dropped_slots;
+ let h='<tr><th>Hub</th><th>via</th><th>mode</th><th>rx/sched</th><th>loss %</th><th>RSSI avg/min</th><th>SNR avg/min</th><th>beacon RSSI/SNR @hub</th><th>lost/64</th><th>sync err us</th></tr>';
+ (d.hubs||[]).forEach(x=>{(x.modes||[]).forEach((m,i)=>{
+  const loss=m.sched?(100*(m.sched-m.rx)/m.sched):undefined;const hl=x.health||{};
+  h+='<tr><td>'+(i?'':'H'+x.id)+'</td><td>'+(i?'':(x.via||'direct'))+'</td><td>'+m.mode+'</td><td>'+m.rx+'/'+m.sched+'</td><td>'+f(loss,1)+
+  '</td><td>'+f(m.rssi_avg,1)+' / '+f(m.rssi_min)+'</td><td>'+f(m.snr_avg,1)+' / '+f(m.snr_min,1)+'</td><td>'+(i?'':f(hl.beacon_rssi)+' / '+f(hl.beacon_snr,1))+
+  '</td><td>'+(i?'':f(hl.beacon_lost64))+'</td><td>'+(i?'':f(hl.sync_err_us))+'</td></tr>';});});
+ document.getElementById('h').innerHTML=h;}).catch(()=>{});}
+load();setInterval(load,2000);
+</script></body></html>)rawliteral");
+  server.send(200, "text/html", html);
 }

@@ -19,18 +19,17 @@
 // LORA SETTINGS - OPTIMIZED FOR SPEED AND RELIABILITY
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define LORA_FREQUENCY      915.0       // MHz (915 North America, 868 Europe)
-#define LORA_BANDWIDTH      125000      // Hz (125kHz standard)
-// Spreading factor: SF9 is 2x faster than SF10, only -2.5dB sensitivity loss
-#define LORA_SPREADING      9           // SF9 for faster updates (SF10 for max range)
-#define LORA_CODING_RATE    5           // 4/5 to 4/8
+// v2 (TDMA mesh): spreading factor and bandwidth are per slot, from lib/IceMesh/src/radio_modes.h:
+// SF9/500 kHz (beacon, echo, join, relay links, default), SF8/500, SF7/500 — all 500 kHz single
+// channel (digital modulation, RSS-247 §5.2), no 125 kHz single-channel operation (that would have to hop).
+// Not legal advice.
+#define LORA_FREQUENCY      915.0       // MHz, channel centre (914.75-915.25 MHz at 500 kHz)
+#define LORA_CODING_RATE    5           // 4/5 (must match radio_modes.h airtime: cr_denom = 5)
 #define LORA_SYNC_WORD      0x34        // Private sync (default 0x12 is public)
 #define LORA_TX_POWER       20          // Higher power (was 17, max 22)
 #define LORA_PREAMBLE       8           // 8 symbols minimum reliable (saves ~40ms)
 
-// Mesh settings
-#define LORA_MAX_HOPS       3           // Maximum relay hops
-#define LORA_TX_INTERVAL_MS 6000        // 6 seconds with faster modulation
+// Mesh settings: superframe 1 s, one relay hop max (see lib/IceMesh/src/tdma_schedule.h)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ESP-NOW SETTINGS
