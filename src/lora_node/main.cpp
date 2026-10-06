@@ -4837,7 +4837,7 @@ a{color:var(--acc)}.mut{color:var(--mut);font-size:12px}label{font-size:14px}
 #fp{margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px}
 .fh{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;margin-bottom:6px}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}
 #wfw{flex:1 1 300px;min-width:0;position:relative}#wf{width:100%;height:320px;display:block;background:#001020;border-radius:4px}
-#sc{position:absolute;right:2px;top:0;bottom:0;font-size:10px;color:#9fb3c8;pointer-events:none}
+#sc{position:absolute;right:2px;top:0;bottom:0;font-size:10px;color:#9fb3c8;pointer-events:none;white-space:nowrap}
 #fl{width:240px;height:240px;flex:0 0 auto;margin:auto}button{font-size:14px;padding:4px 10px;border-radius:6px;border:1px solid var(--line);background:#1d2636;color:var(--txt)}
 .lg span{margin-right:10px;font-size:12px}
 </style></head><body>
@@ -4928,7 +4928,10 @@ function drawFlasher(){
 // playback: 4 pings/s, catch up when the queue grows (radio delivers in bursts of ~1 s)
 setInterval(()=>{if(!focus||!queue.length)return;let n=1+Math.floor(queue.length/8);if(queue.length>40)queue.splice(0,queue.length-12);while(n--&&queue.length)drawPing(queue.shift());},250);
 setInterval(loadPings,700);setInterval(loadList,2000);setInterval(loadNames,5000);
-window.addEventListener('resize',()=>{if(focus)clearWf();});
+// keep the picture on resize (phones fire resize when the address bar hides)
+window.addEventListener('resize',()=>{if(!focus)return;const r=wf.getBoundingClientRect(),w=Math.max(200,Math.round(r.width));if(w===wf.width)return;
+ const t=document.createElement('canvas');t.width=wf.width;t.height=wf.height;t.getContext('2d').drawImage(wf,0,0);
+ wf.width=w;wx.fillStyle=CB[0];wx.fillRect(0,0,w,wf.height);wx.drawImage(t,w-t.width,0);});
 loadNames();loadList();
 </script></body></html>)rawliteral");
   server.send(200, "text/html", html);

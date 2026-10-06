@@ -64,7 +64,7 @@ class SonarSim {
     // fish
     for (uint8_t i = 0; i < MAX_FISH; i++) {
       Fish& f = fish_[i];
-      if (!f.active) { if ((rnd() % 80u) == 0) spawn(f); continue; }
+      if (!f.active) { if ((rnd() % 120u) == 0) spawn(f); continue; }   // ~every 30 s per free slot
       moveFish(f);
       if (f.active) addTarget(p, f.track, f.depth_mm, f.level, f.width);
     }

@@ -37,7 +37,7 @@ slot = LEAD 3 ms + airtime(allowance, mode) + TAIL 3 ms            (all est.)
 Header 6 B: `network_id, 0xF2, type, src, superframe u16`.
 | Type | Body |
 |---|---|
-| BEACON / ECHO | flags (test, adaptive, silenced), cmd + cmd_seq (RESET ALL), silence ×10 s, focus node, frame ×10 ms, test mode, slots n × {kind, owner, mode, allowance, via}, acks n × {hub, node, seq} |
+| BEACON / ECHO | flags (test, adaptive, silenced, sonar sim), cmd + cmd_seq (RESET ALL), silence ×10 s, focus node, frame ×10 ms, test mode, slots n × {kind, owner, mode, allowance, via}, acks n × {hub, node, seq} |
 | HUB | flags (silence on/off request, pending), then sections {type, len, value} |
 | JOIN | firmware version |
 
@@ -45,12 +45,13 @@ Hub sections, in this order, within the slot allowance:
 | Section | Content |
 |---|---|
 | LINE | 3 B per node: node ID, state(3) / event seq(4) / pending(1), quarter turns(5) / flags(3). Pending first. Always first. |
-| RELAY | remote hub's packet re-packed: hub, frame lo, flags, its sections (LINE only if it doesn't fit) |
+| RELAY | remote hub's packet re-packed: hub, frame lo, flags, its sections. If it doesn't fit: LINE trimmed to whole records, other sections kept whole while they fit, TEST dropped |
 | HEALTH | every 8 frames: battery, uptime, fw, beacon RSSI/SNR as heard, beacons lost /64, timing error, neighbour hubs + RSSI |
 | JOINS | hub IDs heard joining (relay duty) |
 | NODEINFO | rotating {node, battery %, flags} |
+| SONAR | one sonar block per section (§6b), whole blocks only: BASE, then DATA (oldest first), then BG |
+| NODEINFO | (after SONAR) rotating {node, battery %, flags} |
 | TEST | filler up to the allowance in test mode (counter + pattern) |
-| SONAR | reserved (phase 4/5) |
 Line states: 0 idle, 1 tripped, 2 running, 3 fault, 4 offline (hub lost the node).
 
 ## 5. Reliability rules
@@ -76,14 +77,31 @@ or serial on the chalet: `TEST OFF|ROTATE|SF9|SF8|SF7`, `ADAPT ON|OFF`, `RADIO`,
 Read: `/radio` (per hub per mode: rx/scheduled, CRC, RSSI/SNR avg/min; hub's view of the beacon,
 loss /64, timing error), hub OLED test screen, serial every 5 s.
 
+## 6b. Sonar blocks (lib/IceMesh/src/sonar_codec.h, sonar_link.h)
+Every block decodes on its own (review fixes): node ID in each block, length = its SEC_SONAR section
+(or its ESP-NOW frame), first ping index (16 bit), 3-bit track ID on every target.
+| Block | Content | Size (measured on the fake scene, NOT real water) |
+|---|---|---|
+| BASE (every 4 s, + at once when a fish shows up) | node, activity 0-15, ping index, bottom (cm, 11 b), fish count, nearest fish depth + level, bg version | 7-8 B → ≈ 2 B/s per hole |
+| DATA (FOCUS, N = 4 pings/block, 1 block/s) | header 6 B; per ping: bottom (abs 11 b, then ±7 cm delta / escape), counts, targets (track + abs depth/level/width on first appearance in the block, then ±31 cm delta / escape + level), residual cells (Rice gaps k=6 + level) | 7.7 B/ping incl. header |
+| BG (FOCUS, 1 of 8 segments every 2 s) | 2-bit background profile (bottom, weeds), RLE + Rice, version-tagged | 38 B for the full 488-bin profile |
+FOCUS total ≈ 36 B/s incl. section headers (fake scene). Pixel layer: not implemented (deferred).
+- Hub: `SonarOutbox` (12 blocks, stale after 4 frames, eviction BG → DATA → BASE). No ACK.
+- Chalet: `SonarStore` (16 nodes, ring of 128 pings, duplicate/late pings dropped, node restart detected).
+- Planner: the hub reporting the FOCUS node gets 180 B (est.) instead of 96 B; a remote FOCUS hub
+  gets at most 255 − 96 so its relay can carry it; FOCUS shrinks first when the plan is too long.
+- Node ↔ hub (ESP-NOW): `MSG_SONAR` 0x60 = [net][node][0x60] + one block;
+  `MSG_SONAR_CTRL` 0x61 = {net, hub, 0x61, focus node, sim on, 0}, every 1 s while the test
+  mode is on and right after any node message. Test mode details: docs/SONAR_SIM.md.
+
 ## 7. Open points
 | # | Point |
 |---|---|
 | O1 | Guard / window values (LEAD, TAIL, gaps, beacon window) are estimates — check timing error and slot loss in test mode. |
 | O2 | Remote configuration over LoRa removed for now (web page returns an error); to add as a beacon command. |
 | O3 | Node firmware still v1 (reed, 2 states). Hall quarter-turn counting, line "running" state and global-ID provisioning come with the WROOM node rewrite. |
-| O4 | Sonar codec (phase 4/5) goes in the SONAR section; budget at SF9/500 ≈ 3× the FOCUS + BASE need (est.). |
+| O4 | Sonar codec built and tested on FAKE data only (§6b). Real sizes need TUSS4470 recordings; the pixel layer is deferred; the node-side processing (bottom lock, tracker, background) is still to write. |
 | O5 | 125 kHz modes not offered (would need hopping). |
 | O6 | ESP-NOW RSSI is not available with core 2.x callbacks — node-to-hub link quality is not used yet. |
-| O7 | Capacity (calc., est.): a 96 B slot at SF9/500 reserves ≈ 139 ms → about 6 direct hubs per 1 s frame (beacon ≈ 72 ms, join ≈ 30 ms, margin 40 ms). Allowances are fixed per hub today; for sonar they must follow each hub's need (FOCUS hub large, others small). |
+| O7 | Capacity (calc., est.): a 96 B slot at SF9/500 reserves ≈ 139 ms → about 6 direct hubs per 1 s frame (beacon ≈ 72 ms, join ≈ 30 ms, margin 40 ms). Allowances: 96 B per hub, 180 B for the FOCUS hub (est.); not yet sized from each hub's queue. |
 | O8 | To verify on hardware: TX start latency (log nowUs() around startTransmit), RadioLib 7.7.1 RX IRQ defaults (HeaderValid enabled, DIO1 = RxDone), TCXO delay. A settings save (NVS write) can shift one frame's timing — harmless, only when settings change. |

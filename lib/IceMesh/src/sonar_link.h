@@ -108,6 +108,7 @@ struct NodeSonar {
   uint8_t bg_ver;
   uint8_t bg_mask;          // segments received for bg_ver
   uint8_t gain;
+  uint16_t act_bits;         // fish present in the last 16 DATA pings (activity when streaming)
   uint8_t bg[BINS];
 };
 
@@ -209,9 +210,13 @@ class SonarStore : public SonarSink {
 
   static void deriveSummary(NodeSonar& ns, const Ping& p, uint8_t bg_ver) {
     Summary& s = ns.sum;
-    const uint8_t act = ns.has_sum ? s.activity : 0;
+    bool fish = false;
+    for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track != 0) fish = true;
+    ns.act_bits = static_cast<uint16_t>((ns.act_bits << 1) | (fish ? 1u : 0u));
+    uint8_t act = 0;
+    for (uint16_t b = ns.act_bits; b; b >>= 1) act = static_cast<uint8_t>(act + (b & 1u));
     memset(&s, 0, sizeof(s));
-    s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.activity = act;
+    s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.activity = act > 15 ? 15 : act;
     s.nearest_cm = DEPTH_NONE;
     uint16_t bait = DEPTH_NONE;
     for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track == 0) bait = p.t[i].depth_cm;

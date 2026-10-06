@@ -14,3 +14,6 @@
 | 2026-10-05 | D10 | **Hubs ("master LoRa hubs") and chalet = Heltec V3**; tip-up nodes = ESP32 WROOM (C3 env kept for existing nodes) | |
 | 2026-10-05 | D11 | No separate range-test firmware: **radio test setting in the real firmware** (rotate / fixed modes, stats on web, serial, OLED) | Values in the code marked "est." are to be tuned from these tests |
 | 2026-10-05 | D12 | One relay hop max; relay chosen by the chalet from hub neighbour reports; echo slot repeats the beacon for hubs that cannot hear the chalet | |
+| 2026-10-05 | D13 | **Sonar test mode** in the real firmware: fake sonar from virtual nodes on hubs AND from real nodes (sim switch), through the real codec + TDMA transport; switched from the chalet (`/sonar`, `SONAR ON|OFF`) | Fake scene is my own (the prototype from Frank's other conversation was not available to me) |
+| 2026-10-05 | D14 | Sonar blocks are **never truncated**: one block per SEC_SONAR section / ESP-NOW frame; hubs and relays drop whole blocks | Review fix #3 |
+| 2026-10-05 | D15 | Virtual sonar node IDs = 128 + (hub ID & 0x0F) × 8 + k; **real node IDs stay below 128** | Two hubs with the same low 4 bits of ID would collide |
