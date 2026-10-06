@@ -349,6 +349,7 @@ static void scrStep(int dir);
 static void scrAction(bool kb = false);
 void loopOptions();
 static void optBuild(ScrOptions* o);
+static void menuBuild(ScrOptions* o);
 void loopWebServer();
 void loopBuzzer();
 void loopNodeTimeout();
@@ -620,7 +621,7 @@ void setup() {
   display.setFont(u8g2_font_6x10_tr);
   display.drawStr(0, 27, currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet (offshore)" :
                          currentRole == ROLE_GATEWAY_ONSHORE ? "Hub (on the ice)" : getRoleName(currentRole));
-  display.drawStr(0, 60, "Ready");
+  display.drawStr(0, 60, cardKbAvailable ? "Ready - Esc = menu" : "Ready");
   display.sendBuffer();
   
   triggerBuzzer(1);
@@ -2665,24 +2666,26 @@ void loopBuzzer() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void loadWifiCredentials() {
-  preferences.begin("wifi", true);  // Read-only
-  
+  // v2: the Wi-Fi written in config.h wins once after it is changed and flashed (before: a network
+  // saved earlier from the web page / serial / OLED always won, so a new config.h was silently ignored).
+  // Afterwards the OLED / web page / serial can change it again; "Forget network" saves an empty one.
+  uint32_t h = 2166136261u;   // FNV-1a of the config.h name + password
+  for (const char* c = STA_SSID "\x1f" STA_PASSWORD; *c; c++) { h ^= (uint8_t)*c; h *= 16777619u; }
+  preferences.begin("wifi", false);
+  if (preferences.getUInt("cfgHash", 0) != h) {
+    preferences.putString("ssid", STA_SSID);
+    preferences.putString("pass", STA_PASSWORD);
+    preferences.putUInt("cfgHash", h);
+    Serial.printf("Wi-Fi: config.h network changed -> using %s\n", STA_SSID);
+  }
   String ssid = preferences.getString("ssid", "");
   String pass = preferences.getString("pass", "");
-  const bool saved = preferences.isKey("ssid");   // v2: saved empty = "Forget network" (do not fall back to config.h)
-  
   preferences.end();
-  
-  if (ssid.length() > 0 || saved) {
-    strncpy(storedSsid, ssid.c_str(), sizeof(storedSsid) - 1);
-    strncpy(storedPassword, pass.c_str(), sizeof(storedPassword) - 1);
-    DEBUG_PRINTF("Loaded WiFi credentials: %s\n", storedSsid);
-  } else {
-    // Use defaults from config.h
-    strncpy(storedSsid, STA_SSID, sizeof(storedSsid) - 1);
-    strncpy(storedPassword, STA_PASSWORD, sizeof(storedPassword) - 1);
-    DEBUG_PRINTLN(F("Using default WiFi credentials from config"));
-  }
+
+  memset(storedSsid, 0, sizeof(storedSsid)); memset(storedPassword, 0, sizeof(storedPassword));
+  strncpy(storedSsid, ssid.c_str(), sizeof(storedSsid) - 1);
+  strncpy(storedPassword, pass.c_str(), sizeof(storedPassword) - 1);
+  Serial.printf("Wi-Fi: cabin network %s\n", storedSsid[0] ? storedSsid : "(none)");
 }
 
 void saveWifiCredentials(const char* ssid, const char* password) {
@@ -4820,6 +4823,8 @@ void loopCardKB() {
 // =============================================================================================
 static ScreenModel scr;
 static uint8_t scrPage = PG_HOME, scrSub = 0;
+static bool scrMenu = false;           // CardKB menu (list of pages) open
+static uint8_t scrMenuSel = 0;
 static uint32_t scrLastInput = 0;
 static MeshPingLite scrPings[118];
 
@@ -4914,7 +4919,9 @@ static void buildScreenModel() {
   m.kb = cardKbAvailable;
   snprintf(m.sta_ssid, sizeof(m.sta_ssid), "%s", storedSsid);
   wifiStateText(m.sta_state, sizeof(m.sta_state));
-  if (scrPage == PG_OPTIONS) optBuild(&m.opt);
+  m.menu = scrMenu;
+  if (scrMenu) menuBuild(&m.opt);
+  else if (scrPage == PG_OPTIONS) optBuild(&m.opt);
 }
 
 // =============================================================================================
@@ -5045,7 +5052,7 @@ static void optBuild(ScrOptions* o) {
   if (optSel >= optN) optSel = optN ? optN - 1 : 0;
   if (!o) return;
   o->mode = optMode; o->n = optN; o->sel = optSel;
-  static const char* const TITLES[] = {"Options", "Wi-Fi", "Choose Wi-Fi", "Simulation"};
+  static const char* const TITLES[] = {"Settings", "Wi-Fi", "Choose Wi-Fi", "Simulation"};
   snprintf(o->title, sizeof(o->title), "%s", TITLES[optMenu & 3]);
   snprintf(o->hint, sizeof(o->hint), "%s", !cardKbAvailable ? "CardKB or web page" : optN ? optHint(optRows[optSel].item) : "Esc: back");
   o->line[0] = 0; o->text[0] = 0;
@@ -5229,6 +5236,57 @@ static void scrStep(int dir) {
   scrLastInput = millis();
 }
 
+// ---- CardKB menu: Esc opens the list of pages, up/down + Enter opens one, Esc in a page comes back here ----
+static const uint8_t MENU_ORDER[] = {PG_HOME, PG_HOLES, PG_SONAR, PG_FOCUS, PG_NETWORK, PG_CONNECT, PG_TEST, PG_OPTIONS};
+static uint8_t menuPages[PG_COUNT], menuN = 0;
+
+static void menuBuild(ScrOptions* o) {
+  static const char* const NAMES[PG_COUNT] = {"Home", "Sonar", "Focus", "Holes", "Network", "Test / simulation", "Connect phone", "Settings"};
+  menuN = 0;
+  for (uint8_t k = 0; k < sizeof(MENU_ORDER); k++) {
+    const uint8_t p = MENU_ORDER[k];
+    if (!scrPageAvailable(p)) continue;
+    if (o) {
+      ScrRow& r = o->rows[menuN];
+      snprintf(r.label, sizeof(r.label), "%s", NAMES[p]); r.value[0] = 0; r.sub = false;
+      if (p == PG_HOLES) snprintf(r.value, sizeof(r.value), "%u", scr.n_holes);
+      else if (p == PG_NETWORK) snprintf(r.value, sizeof(r.value), "ch%u", scr.lora_ch);
+      else if (p == PG_CONNECT && scr.chalet) snprintf(r.value, sizeof(r.value), "%s", scr.sta ? "Wi-Fi OK" : "hotspot");
+      else if (p == PG_TEST && simAnyOn()) snprintf(r.value, sizeof(r.value), "SIM ON");
+    }
+    menuPages[menuN++] = p;
+  }
+  if (scrMenuSel >= menuN) scrMenuSel = menuN ? menuN - 1 : 0;
+  if (!o) return;
+  o->mode = SO_LIST; o->n = menuN; o->sel = scrMenuSel;
+  snprintf(o->title, sizeof(o->title), "Menu");
+  snprintf(o->hint, sizeof(o->hint), "OK: open   Esc: home");
+}
+
+static void menuOpen() {
+  menuBuild(nullptr);
+  scrMenuSel = 0;
+  for (uint8_t i = 0; i < menuN; i++) if (menuPages[i] == scrPage) scrMenuSel = i;
+  scrMenu = true;
+  scrLastInput = millis();
+}
+
+// key while the menu is open
+static void menuKey(uint8_t k) {
+  menuBuild(nullptr);
+  switch (k) {
+    case KEY_UP: if (scrMenuSel > 0) scrMenuSel--; break;
+    case KEY_DOWN: if (scrMenuSel + 1 < menuN) scrMenuSel++; break;
+    case KEY_ENTER: case KEY_RIGHT:
+      if (!menuN) break;
+      scrPage = menuPages[scrMenuSel]; scrSub = 0; scrMenu = false;
+      if (scrPage == PG_OPTIONS) { optMenu = OM_MAIN; optSel = 0; optMode = SO_LIST; }
+      break;
+    case KEY_ESC: case KEY_LEFT: scrMenu = false; scrPage = PG_HOME; scrSub = 0; break;
+    default: break;
+  }
+}
+
 // FOCUS: the next / previous hole that has a sonar
 static void focusStep(int dir) {
   if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
@@ -5258,7 +5316,7 @@ static void scrScroll(int dir) {
 static void scrAction(bool kb) {
   scrLastInput = millis();
   switch (scrPage) {
-    case PG_HOME: if (alertsSilenced) { silenceAlerts(); showOverlayMessage("Unsilenced", 800); } break;
+    case PG_HOME: if (alertsSilenced) { silenceAlerts(); showOverlayMessage("Unsilenced", 800); } else if (kb) menuOpen(); break;
     case PG_HOLES: scrSub = (uint8_t)((scrSub + 1) % screenHolesPages(scr)); break;
     case PG_SONAR: scrSub = (uint8_t)((scrSub + 1) % screenSonarPages(scr)); break;
     case PG_FOCUS: focusStep(+1); break;
@@ -5270,7 +5328,7 @@ static void scrAction(bool kb) {
 
 static void scrDraw() {
   const uint32_t idle = scrPage == PG_OPTIONS ? 180000UL : 60000UL;   // typing a password takes time
-  if (scrPage != PG_HOME && millis() - scrLastInput > idle) { scrPage = PG_HOME; scrSub = 0; optMode = SO_LIST; }
+  if ((scrPage != PG_HOME || scrMenu) && millis() - scrLastInput > idle) { scrPage = PG_HOME; scrSub = 0; optMode = SO_LIST; scrMenu = false; }
   buildScreenModel();
   if (!scrPageAvailable(scrPage)) scrPage = PG_HOME;
   if (scrPage == PG_NETWORK && scr.radio_test) { drawRadioTest(); return; }   // radio test: detailed per-hub stats
@@ -5447,8 +5505,9 @@ void loopButton() {
 }
 
 void handleKeyPress(char key) {
-  // v2 CardKB: left/right = page, up/down = inside the page, Enter = OK (the action in the footer),
-  // Esc = back / home, s = silence. On the Options page the keys go to the list / text entry first.
+  // v2 CardKB: Esc = menu (list of pages: up/down, Enter = open, Esc = home); in a page up/down = inside
+  // the page, Enter = OK (the action in the footer), left/right = previous/next page, s = silence.
+  // On Settings the keys go to the list / text entry first (Esc there = up one level, then the menu).
   const bool wasAsleep = displaySleeping;
   registerActivity();
   if (wasAsleep) return;   // the first key only wakes the screen
@@ -5459,6 +5518,7 @@ void handleKeyPress(char key) {
     silenceAlerts(); showOverlayMessage("Silenced", 800);
     return;
   }
+  if (scrMenu) { menuKey(k); return; }
   if (scrPage == PG_OPTIONS && optKey(k)) return;
   switch (k) {
     case KEY_RIGHT: case KEY_TAB: case ' ': case 'n': case 'N': scrStep(+1); break;
@@ -5467,7 +5527,7 @@ void handleKeyPress(char key) {
     case KEY_UP: scrScroll(-1); break;
     case KEY_ENTER: scrAction(true); break;
     case 's': case 'S': silenceAlerts(); showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 800); break;
-    case KEY_ESC: scrPage = PG_HOME; scrSub = 0; break;
+    case KEY_ESC: menuOpen(); break;   // back to the menu, pick another page
     default: break;
   }
 }

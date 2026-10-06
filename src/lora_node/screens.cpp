@@ -114,6 +114,7 @@ void footer(u8g2_t* u, const ScreenModel& m, uint8_t page) {
   if (scroll) snprintf(line, sizeof(line), "^v: more holes");
   else if (act[0]) snprintf(line, sizeof(line), "%s %s", m.kb ? "OK:" : "2x:", act);
   else if (m.silenced) { char t[12]; mmss(t, sizeof(t), m.silence_s); snprintf(line, sizeof(line), "SILENCED %s", t); }
+  else if (m.kb && page != PG_HOME) snprintf(line, sizeof(line), "Esc: menu");
   else if (m.chalet && m.sta) { const char* ip = strncmp(m.url, "http://", 7) == 0 ? m.url + 7 : m.url; snprintf(line, sizeof(line), "%s", ip); }
   else if (m.chalet) snprintf(line, sizeof(line), "%s", (m.sta_ssid[0] && (m.uptime_s / 3) % 2) ? "No cabin Wi-Fi" : m.ssid);   // alternates every 3 s
   else if (m.hotspot) snprintf(line, sizeof(line), "Hotspot on %lu min", (unsigned long)m.hotspot_min);
@@ -383,7 +384,7 @@ void connectPage(u8g2_t* u, const ScreenModel& m) {
 }
 
 // ---- options: list / text entry / yes-no (content decided by the firmware) ----
-void optionsPage(u8g2_t* u, const ScreenModel& m, bool blink) {
+void optionsPage(u8g2_t* u, const ScreenModel& m, bool blink, uint8_t dots_page) {
   const ScrOptions& o = m.opt;
   char s[72];
   if (o.mode == SO_TEXT) {
@@ -428,9 +429,9 @@ void optionsPage(u8g2_t* u, const ScreenModel& m, bool blink) {
     u8g2_SetDrawColor(u, 1);
   }
   u8g2_SetFont(u, F_SMALL);
-  snprintf(s, sizeof(s), "%s", o.hint); fit(u, s, 128 - PG_COUNT * 5 - 2);
+  snprintf(s, sizeof(s), "%s", o.hint); fit(u, s, dots_page < PG_COUNT ? 128 - PG_COUNT * 5 - 2 : 128);
   u8g2_DrawStr(u, 0, 63, s);
-  pageDots(u, PG_OPTIONS);
+  if (dots_page < PG_COUNT) pageDots(u, dots_page);
 }
 
 // rows used by the chalet home (pockets, two columns above 4)
@@ -473,6 +474,7 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
   bool fish = false;
   for (uint8_t i = 0; i < m.n_holes; i++) fish |= m.holes[i].state == SH_FISH;
   if (fish && !m.silenced) { drawAlert(u, m, blink); u8g2_SendBuffer(u); return; }
+  if (m.menu) { optionsPage(u, m, blink, 255); u8g2_SendBuffer(u); return; }   // CardKB menu (list of pages)
   switch (page) {
     case PG_HOLES: holesPage(u, m, sub, blink); footer(u, m, page); break;
     case PG_SONAR: sonarPage(u, m, sub, blink); break;
@@ -480,7 +482,7 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
     case PG_NETWORK: networkPage(u, m); break;
     case PG_TEST: testPage(u, m); footer(u, m, page); break;
     case PG_CONNECT: connectPage(u, m); break;
-    case PG_OPTIONS: optionsPage(u, m, blink); break;
+    case PG_OPTIONS: optionsPage(u, m, blink, PG_OPTIONS); break;
     default:
       if (m.chalet) homeChalet(u, m, blink); else homeHub(u, m, blink);
       if (homeRows(m) <= 4) footer(u, m, PG_HOME); else pageDots(u, PG_HOME);   // 5 pocket rows: no room for the footer

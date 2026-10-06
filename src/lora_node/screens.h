@@ -1,7 +1,7 @@
 // v2 OLED screens (128x64, Heltec V3) — chalet and hubs. Pure drawing from a ScreenModel, with the U8g2
 // C API, so the exact same code renders on the PC (tools/screens_mock.cpp → PNG mockups) and on the board.
 // Design: docs/SCREENS.md. One button: short press = next page (silence during an alert).
-// CardKB: left/right = page, up/down = inside the page, Enter = OK, Esc = back / home.
+// CardKB: Esc = menu (list of pages, up/down + Enter), up/down = inside the page, Enter = OK, left/right = page.
 #pragma once
 #include <stdint.h>
 #ifdef ARDUINO
@@ -71,7 +71,8 @@ struct ScreenModel {
   // test
   uint8_t radio_test;        // 0 off, else a test mode
   const char* radio_test_name;
-  ScrOptions opt;            // PG_OPTIONS
+  ScrOptions opt;            // PG_OPTIONS (Settings) or the menu
+  bool menu;                 // CardKB menu open: opt holds the list of pages
 };
 
 // Draws one frame. `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).

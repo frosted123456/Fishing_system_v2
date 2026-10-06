@@ -113,11 +113,16 @@ int main(int argc, char** argv) {
   m = base(true); m.sta = true; snprintf(m.url, sizeof(m.url), "http://192.168.2.37"); snprintf(m.sta_ssid, sizeof(m.sta_ssid), "BELL494");
   pockets3(m); shot("home_on_cabin_wifi", m, PG_HOME, 0, true);
   // ---- options (CardKB) ----
-  m = base(true); olist(m, "Options", 0, "OK: open");
+  m = base(true); olist(m, "Settings", 0, "OK: open");
   orow(m, "Wi-Fi", "not conn.", true); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "Link", "Auto");
   orow(m, "LoRa channel", "Auto (1)"); orow(m, "Simulation", "off", true); orow(m, "Network reset", ""); orow(m, "Reboot", ""); orow(m, "Built", "Oct  6 15:40");
   shot("options_main", m, PG_OPTIONS, 0, true);
   m.opt.sel = 4; snprintf(m.opt.hint, sizeof(m.opt.hint), "OK: change"); shot("options_main_scrolled", m, PG_OPTIONS, 0, true);
+  m = base(true); pockets3(m); m.menu = true; olist(m, "Menu", 0, "OK: open   Esc: home");
+  orow(m, "Home", ""); orow(m, "Holes", "9"); orow(m, "Sonar", ""); orow(m, "Focus", ""); orow(m, "Network", "ch1");
+  orow(m, "Connect phone", "hotspot"); orow(m, "Test / simulation", ""); orow(m, "Settings", "");
+  shot("menu", m, PG_HOME, 0, true);
+  m.opt.sel = 7; shot("menu_settings", m, PG_HOME, 0, true);
   m = base(true); olist(m, "Wi-Fi", 0, "Esc: back");
   orow(m, "Status", "not found"); orow(m, "Network", "BELL494"); orow(m, "Choose network", "", true); orow(m, "Type name", "", true);
   orow(m, "Address", "-"); orow(m, "Retry now", ""); orow(m, "Channel", "1 OK"); orow(m, "AP", "IceFish-Remote"); orow(m, "AP pass", "fishon123"); orow(m, "Forget network", "");
@@ -134,7 +139,7 @@ int main(int argc, char** argv) {
   orow(m, "All holes", "OFF"); orow(m, "Test holes", "OFF"); orow(m, "Fake fish rate", "6 /h"); orow(m, "Pointe", "both");
   orow(m, "Baie", "sonar~"); orow(m, "Roche", "off"); orow(m, "Drop-off", "off");
   shot("options_sim", m, PG_OPTIONS, 0, true);
-  m = base(false); olist(m, "Options", 0, "OK: change");
+  m = base(false); olist(m, "Settings", 0, "OK: change");
   orow(m, "Hotspot", "OFF"); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "ESP-NOW relay", "ON"); orow(m, "Reed polarity", "HIGH");
   shot("hub_options", m, PG_OPTIONS, 0, true);
   printf("%d screens\n", k);

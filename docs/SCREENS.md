@@ -61,3 +61,15 @@ Options page (last page, values change at once and are saved like the web page d
 
 Cabin Wi-Fi made visible: home footer shows the address when joined, else alternates "No cabin Wi-Fi" / hotspot name;
 Connect page shows "<network>: not found / bad password? / connecting..." (reason from the Wi-Fi driver, D36).
+
+## Menu (Frank, 2026-10-06, after the second bench test)
+"I'd rather do a scrolling menu and Esc to go back and select the tab I want, a bit like before."
+Mockups: `docs/screens/v2_menu.png`.
+| Where | Esc | ↑ / ↓ | Enter | ← / → |
+|---|---|---|---|---|
+| Home | opens the **Menu** | - | opens the Menu (unsilences when silenced) | previous / next page |
+| Menu (Home, Holes, Sonar, Focus, Network, Connect phone, Test / simulation, Settings) | Home | move | open the page | ← Home, → open |
+| A page | back to the Menu | inside the page | the page action ("OK: ...") | previous / next page |
+| Settings | up one level, then the Menu | move | change / open | ← up one level |
+The page "Options" is renamed **Settings**. Boot screen: "Ice Fishing v2 / Chalet (offshore) / built <date>", then "Ready - Esc = menu".
+Cabin Wi-Fi: a network changed in config.h and flashed now wins once over the one saved before (D37).
