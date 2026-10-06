@@ -51,6 +51,7 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <esp_timer.h>
 #include <SPI.h>
 #include <RadioLib.h>
 #include <U8g2lib.h>
@@ -172,6 +173,7 @@ struct DeviceSettings {
   bool ebRelay;               // v2 any device: rebroadcast ESP-NOW backbone frames
   bool ebChaletLr;            // v2 chalet: LR on for ESP-NOW. Kills the phone hotspot (Espressif: no per-interface LR) - bench only
   uint8_t lastLoraCh;         // v2: LoRa channel last used (start point after a reboot)
+  bool buzzerPassive;         // v2: passive buzzer (needs a tone) instead of an active one (sounds on DC)
 };
 
 DeviceSettings settings = {
@@ -190,7 +192,8 @@ DeviceSettings settings = {
   .loraChannel = 255,
   .ebRelay = false,
   .ebChaletLr = false,
-  .lastLoraCh = 0
+  .lastLoraCh = 0,
+  .buzzerPassive = false
 };
 
 // Remote config state
@@ -394,7 +397,8 @@ void simAll(bool on);
 void demoSet(uint8_t hubs, uint8_t holes);
 bool simAnyOn();
 static inline uint8_t simValueOf(bool sonar, bool hall, uint8_t tph) {
-  return static_cast<uint8_t>((sonar ? MESH_SIM_SONAR : 0) | (hall ? MESH_SIM_HALL : 0) | ((tph > 63 ? 63 : tph) << 2));
+  // 62 max: 63 with sonar + fish would make 0xFF, the "not a demo hole" mark of meshDemoSim()
+  return static_cast<uint8_t>((sonar ? MESH_SIM_SONAR : 0) | (hall ? MESH_SIM_HALL : 0) | ((tph > 62 ? 62 : tph) << 2));
 }
 
 // Deduplication functions
@@ -406,6 +410,9 @@ void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t
 
 void updateDisplay();
 void triggerBuzzer(uint8_t pattern);
+void buzzerStop();
+void buzzerTest();
+void buzzerApplyType();
 void handleWebRoot();
 void handleWebApi();
 void handleWebApiSonar();
@@ -650,7 +657,7 @@ void setup() {
 
 // v2 loop timing (serial PERF): where loop() spends its time, to find what makes the page or screen slow
 enum PerfSlot : uint8_t { PF_LOOP = 0, PF_DISPLAY, PF_WEB, PF_DEMO, PF_MESH, PF_COUNT };
-struct PerfAcc { uint32_t sum_us, max_us, n; };
+struct PerfAcc { uint64_t sum_us; uint32_t max_us, n; };
 static PerfAcc perfAcc[PF_COUNT];
 static uint32_t perfSince = 0;
 struct PerfScope {
@@ -665,7 +672,7 @@ void perfPrint() {
   for (uint8_t i = 0; i < PF_COUNT; i++) {
     const PerfAcc& a = perfAcc[i];
     Serial.printf("  %-8s %6lu calls  %7.2f ms / %7.2f ms  %5.1f %%\n", NAMES[i], (unsigned long)a.n,
-                  a.n ? a.sum_us / 1000.0f / a.n : 0.0f, a.max_us / 1000.0f, ms ? a.sum_us / 10.0f / ms : 0.0f);
+                  a.n ? (float)a.sum_us / 1000.0f / a.n : 0.0f, a.max_us / 1000.0f, ms ? (float)a.sum_us / 10.0f / ms : 0.0f);
   }
   Serial.printf("  free heap %u B, min %u B\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
   memset(perfAcc, 0, sizeof(perfAcc)); perfSince = millis();
@@ -1988,7 +1995,11 @@ void demoSet(uint8_t hubs, uint8_t holes) {
 
 bool simAnyOn() {
   if (settings.sonarSim) return true;
-  for (int i = 1; i < network.node_count; i++) if (HAS_FLAG(network.nodes[i].flags, FLAG_SIM)) return true;
+  for (int i = 1; i < network.node_count; i++) {
+    const uint8_t dv = meshDemoSim(network.nodes[i].node_id);   // demo hole: always SIM-flagged, use what it runs
+    if (dv != 0xFF) { if (dv & 3) return true; continue; }
+    if (HAS_FLAG(network.nodes[i].flags, FLAG_SIM)) return true;
+  }
   return false;
 }
 
@@ -2678,10 +2689,81 @@ void loopLocalSensor() {
 // BUZZER
 // ═══════════════════════════════════════════════════════════════════════════
 
-void setupBuzzer() {
+// v2: the beeps are timed by an esp_timer (10 ms tick), not by loop(). Before, loop() switched the pin,
+// so every pause of loop() (screen transfer, web request, the 1 s message boxes, the Wi-Fi wait) made
+// beeps longer or uneven, and a beep could stay on for a whole message box. Also fixed: on/off times
+// were swapped (100 ms on / 200 ms off instead of 200 / 100).
+// Buzzer type (Settings > Buzzer type, saved): active = sounds when powered (DC on the pin);
+// passive = needs a tone (LEDC square wave). A passive buzzer driven with DC only clicks; an active one
+// driven with a tone sounds rough. Pick the one that sounds clean with Settings > Buzzer test.
+#ifndef BUZZER_TONE_HZ
+#define BUZZER_TONE_HZ 2700   // typical resonance of small passive buzzers (est.; the part's datasheet wins)
+#endif
+static const uint8_t BUZZ_LEDC_CH = 6;   // LEDC channel for the passive tone (free in this firmware)
+static esp_timer_handle_t buzzTimer = nullptr;
+static portMUX_TYPE buzzMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint8_t buzzSteps = 0;   // halves left: even = next half is ON
+static volatile uint16_t buzzLeftMs = 0;
+static volatile bool buzzPinOn = false;
+static bool buzzLedc = false;
+
+static void buzzPin(bool on) {
+  if (buzzLedc) ledcWriteTone(BUZZ_LEDC_CH, on ? BUZZER_TONE_HZ : 0);
+  else digitalWrite(BUZZER_PIN, on ? HIGH : LOW);
+  buzzPinOn = on;
+}
+
+static void buzzTick(void*) {   // esp_timer task, every 10 ms
+  uint8_t steps; uint16_t left;
+  portENTER_CRITICAL(&buzzMux);
+  if (buzzLeftMs > 10) { buzzLeftMs = (uint16_t)(buzzLeftMs - 10); portEXIT_CRITICAL(&buzzMux); return; }
+  steps = buzzSteps;
+  if (steps) { buzzSteps = (uint8_t)(steps - 1); buzzLeftMs = (steps % 2 == 0) ? BUZZER_BEEP_ON_MS : BUZZER_BEEP_OFF_MS; }
+  left = buzzLeftMs;
+  portEXIT_CRITICAL(&buzzMux);
+  (void)left;
+  const bool on = steps != 0 && steps % 2 == 0;
+  if (on != buzzPinOn) buzzPin(on);
+}
+
+static void buzzStart(uint8_t beeps) {
+  portENTER_CRITICAL(&buzzMux);
+  buzzSteps = (uint8_t)(beeps * 2); buzzLeftMs = 0;
+  portEXIT_CRITICAL(&buzzMux);
+}
+
+void buzzerStop() {
+  portENTER_CRITICAL(&buzzMux);
+  buzzSteps = 0; buzzLeftMs = 0;
+  portEXIT_CRITICAL(&buzzMux);
+}
+
+// active <-> passive (also at boot)
+void buzzerApplyType() {
+  buzzerStop();
+  if (buzzLedc) { ledcWriteTone(BUZZ_LEDC_CH, 0); ledcDetachPin(BUZZER_PIN); buzzLedc = false; }
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+  if (settings.buzzerPassive) {
+    ledcSetup(BUZZ_LEDC_CH, BUZZER_TONE_HZ, 8);
+    ledcAttachPin(BUZZER_PIN, BUZZ_LEDC_CH);
+    ledcWriteTone(BUZZ_LEDC_CH, 0);
+    buzzLedc = true;
+  }
+  buzzPinOn = false;
 }
+
+void setupBuzzer() {
+  buzzerApplyType();
+  if (buzzTimer == nullptr) {
+    esp_timer_create_args_t a = {};
+    a.callback = buzzTick; a.name = "buzz";
+    if (esp_timer_create(&a, &buzzTimer) == ESP_OK) esp_timer_start_periodic(buzzTimer, 10000);
+  }
+}
+
+// Settings > Buzzer test / serial BUZZ: two beeps, even when the buzzer is off or alerts are silenced
+void buzzerTest() { buzzStart(2); lastBuzzerTime = millis(); }
 
 void triggerBuzzer(uint8_t pattern) {
   // Respect buzzer enabled setting
@@ -2690,33 +2772,17 @@ void triggerBuzzer(uint8_t pattern) {
   // Respect silence state (but only for alert patterns, not startup beep)
   if (alertsSilenced && pattern > 1) return;
   
-  buzzerState = pattern * 2;
-  lastBuzzerTime = 0;
+  buzzStart(pattern);
+  lastBuzzerTime = millis();
 }
 
+// loop(): only decides when an alert pattern repeats (the timer plays it)
 void loopBuzzer() {
-  if (buzzerState == 0) {
-    // Auto-repeat alerts if enabled and not silenced
-    if (activeAlerts && !alertsSilenced && settings.buzzerEnabled &&
-        (millis() - lastBuzzerTime > BUZZER_REPEAT_DELAY_MS)) {
-      buzzerState = BUZZER_ALERT_BEEPS * 2;
-      lastBuzzerTime = 0;
-    }
-    return;
-  }
-  
-  unsigned long interval = (buzzerState % 2 == 0) ? BUZZER_BEEP_ON_MS : BUZZER_BEEP_OFF_MS;
-  
-  if (millis() - lastBuzzerTime >= interval) {
+  if (buzzSteps != 0) { lastBuzzerTime = millis(); return; }   // still playing: the pause starts after it
+  if (activeAlerts && !alertsSilenced && settings.buzzerEnabled &&
+      millis() - lastBuzzerTime > BUZZER_REPEAT_DELAY_MS) {
+    buzzStart(BUZZER_ALERT_BEEPS);
     lastBuzzerTime = millis();
-    
-    if (buzzerState % 2 == 0) {
-      digitalWrite(BUZZER_PIN, HIGH);
-    } else {
-      digitalWrite(BUZZER_PIN, LOW);
-    }
-    
-    buzzerState--;
   }
 }
 
@@ -2736,10 +2802,14 @@ void loadWifiCredentials() {
   for (const char* c = STA_SSID "\x1f" STA_PASSWORD; *c; c++) { h ^= (uint8_t)*c; h *= 16777619u; }
   preferences.begin("wifi", false);
   if (preferences.getUInt("cfgHash", 0) != h) {
-    preferences.putString("ssid", STA_SSID);
-    preferences.putString("pass", STA_PASSWORD);
+    const bool first = !preferences.isKey("cfgHash");
+    const bool saved = preferences.getString("ssid", "").length() > 0;
+    if (STA_SSID[0] && !(first && saved)) {   // never an empty config.h name; a board's first v2 boot keeps its saved network
+      preferences.putString("ssid", STA_SSID);
+      preferences.putString("pass", STA_PASSWORD);
+      Serial.printf("Wi-Fi: config.h network changed -> using %s\n", STA_SSID);
+    }
     preferences.putUInt("cfgHash", h);
-    Serial.printf("Wi-Fi: config.h network changed -> using %s\n", STA_SSID);
   }
   String ssid = preferences.getString("ssid", "");
   String pass = preferences.getString("pass", "");
@@ -2943,6 +3013,11 @@ void checkSerialWifiConfig() {
     } else {
       Serial.println(F("Usage (chalet only): EBMODE NORMAL|LR  (reboot; LR removes the phone hotspot)"));
     }
+  } else if (line == "BUZZ" || line == "BUZZ ACTIVE" || line == "BUZZ PASSIVE") {
+    // v2: BUZZ = two test beeps; BUZZ ACTIVE|PASSIVE = buzzer type (saved), then the test
+    if (line != "BUZZ") { settings.buzzerPassive = (line == "BUZZ PASSIVE"); saveSettings(); buzzerApplyType(); }
+    Serial.printf("Buzzer: %s, test beeps\n", settings.buzzerPassive ? "passive (tone)" : "active (DC)");
+    buzzerTest();
   } else if (line == "PERF") {
     perfPrint();   // v2: loop timing since the last PERF
   } else if (line == "RADIO") {
@@ -3082,13 +3157,13 @@ void setupWiFiAP() {
     case 1:  // STA only
       DEBUG_PRINTLN(F("Mode: STA only"));
       WiFi.mode(WIFI_STA);
-      WiFi.begin(storedSsid, storedPassword);
+      if (storedSsid[0]) WiFi.begin(storedSsid, storedPassword);   // v2: no network set: no 15 s wait
       DEBUG_PRINTF("Connecting to: %s\n", storedSsid);
 
       // Wait for connection (with timeout)
       {
         int attempts = 0;
-        while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        while (storedSsid[0] && WiFi.status() != WL_CONNECTED && attempts < 30) {
           delay(500);
           DEBUG_PRINT(".");
           attempts++;
@@ -3122,13 +3197,13 @@ void setupWiFiAP() {
       wifiApActive = true;
 
       // Try to connect to STA network with timeout
-      WiFi.begin(storedSsid, storedPassword);
+      if (storedSsid[0]) WiFi.begin(storedSsid, storedPassword);   // v2: no network set: no 10 s wait
       DEBUG_PRINTF("Connecting to: %s", storedSsid);
 
       // Wait up to 10 seconds for connection
       {
         int attempts = 0;
-        while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        while (storedSsid[0] && WiFi.status() != WL_CONNECTED && attempts < 20) {
           delay(500);
           DEBUG_PRINT(".");
           attempts++;
@@ -3183,7 +3258,7 @@ void checkWiFiStatus() {
   if (millis() - lastCheck < 5000) return;
   lastCheck = millis();
 
-  if (WIFI_MODE_SETTING == WIFI_MODE_APSTA || WIFI_MODE_SETTING == WIFI_MODE_STA) {
+  if (settings.wifiModeSetting != 0) {   // v2: the saved mode (Settings / web), not only the config.h default
     if (WiFi.status() == WL_CONNECTED && !wifiStaConnected) {
       wifiStaConnected = true;
       staIpAddress = WiFi.localIP().toString();
@@ -3194,8 +3269,10 @@ void checkWiFiStatus() {
       wifiStaConnected = false;
       staIpAddress = "";
       DEBUG_PRINTLN(F("STA disconnected"));
+      // v2: back to the hubs' channel (it followed the router while joined); allowed now the station is down
+      if (currentRole == ROLE_GATEWAY_OFFSHORE) esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
     }
-    if (wifiStaConnected) staBackoffMs = STA_RETRY_FIRST_MS;
+    if (wifiStaConnected) { staBackoffMs = STA_RETRY_FIRST_MS; staNextTry = millis() + STA_RETRY_FIRST_MS; }   // no stale retry time after a long connection
     else staRetryTick();
   }
 }
@@ -3709,13 +3786,14 @@ function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of 
 function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
 // v2: one request of each kind at a time (the ESP32 serves one request at a time; overlapping polls piled up)
 let listBusy = false, pingBusy = false;
-function loadList() { if (listBusy) return; listBusy = true; fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}).then(() => { listBusy = false; }); }
+const sfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
+function loadList() { if (listBusy) return; listBusy = true; sfetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}).then(() => { listBusy = false; }); }
 function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }   // called by the suite with /api/status
 function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
 function loadPings() {
   if (!focus || pingBusy) return; const n = focus;
   pingBusy = true;
-  fetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
+  sfetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
     if (n !== focus) return;
     (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
   }).catch(() => {}).then(() => { pingBusy = false; });
@@ -4020,10 +4098,14 @@ syncControls(); loadList();
 'use strict';
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const api = (url, body) => fetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+// v2: every request gives up after 8 s (a half-open connection after a Wi-Fi blip would block that poll for minutes)
+const tfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
+window.tfetch = tfetch;
+const api = (url, body) => tfetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
 // v2: a poll is skipped while the same one is still waiting, and nothing polls while the page is hidden
 const busy = {};
-const poll = (key, fn) => () => { if (busy[key] || document.hidden) return; busy[key] = true; Promise.resolve(fn()).catch(() => {}).then(() => { busy[key] = false; }); };
+// status keeps polling while the page is hidden: it rings FISH ON
+const poll = (key, fn) => () => { if (busy[key] || (document.hidden && key !== 'status')) return; busy[key] = true; Promise.resolve(fn()).catch(() => {}).then(() => { busy[key] = false; }); };
 const SON = () => window.sonarApi;
 let st = null, tab = 'holes', soundOn = true, actx = null, lastFish = {}, radio = null;
 try { soundOn = localStorage.getItem('alertSound') !== 'false'; } catch (e) { /* private mode */ }
@@ -4311,7 +4393,11 @@ function postSim(o) { api('/api/sim', o).then(d => { sim = d; renderSim(); }).ca
 function renderSim() {
   if (!sim) return;
   $('fSim').setAttribute('aria-checked', String(!!sim.virtual));
-  if (document.activeElement !== $('simDemo')) { const dv = sim.demo_hubs ? sim.demo_hubs + 'x' + sim.demo_holes : '0'; $('simDemo').value = [...$('simDemo').options].some(o => o.value === dv) ? dv : '0'; }
+  if (document.activeElement !== $('simDemo')) {
+    const dv = sim.demo_hubs ? sim.demo_hubs + 'x' + sim.demo_holes : '0', sel = $('simDemo');
+    if (![...sel.options].some(o => o.value === dv)) sel.add(new Option(sim.demo_hubs + ' hubs x ' + sim.demo_holes + ' holes', dv));   // set from the box or serial
+    sel.value = dv;
+  }
   if (document.activeElement !== $('simRate')) $('simRate').value = String([2, 6, 12, 30, 60].reduce((a, b) => Math.abs(b - sim.rate) < Math.abs(a - sim.rate) ? b : a, 6));
   let h = '<tr><th>Hole</th><th>Fake sonar</th><th>Fake fish</th><th></th></tr>';
   (sim.holes || []).forEach(x => {
@@ -4943,7 +5029,7 @@ static void buildScreenModel() {
     if (n.node_id == NODE_ID && hubSimTripped(NODE_ID)) h.state = SH_FISH;
     h.batt = n.battery_mv ? batteryMvToPercent(n.battery_mv) : 255;
     h.since_s = (h.state == SH_FISH && n.fish_on_time) ? (now - n.fish_on_time) / 1000 : 0;
-    h.sim = HAS_FLAG(n.flags, FLAG_SIM) ? 1 : 0;
+    { const uint8_t dv = meshDemoSim(n.node_id); h.sim = dv != 0xFF ? (dv & 3) : (HAS_FLAG(n.flags, FLAG_SIM) ? 1 : 0); }
     h.fish = -1;
     MeshSonarLite sl;
     if (chalet && meshSonarSummary(n.node_id, sl)) {
@@ -5022,7 +5108,7 @@ enum OptItem : uint8_t {
   OI_NETRESET, OI_REBOOT, OI_BUILT,
   OI_W_STATUS, OI_W_NAME, OI_W_CHOOSE, OI_W_TYPE, OI_W_ADDR, OI_W_RETRY, OI_W_CH, OI_W_AP, OI_W_APPASS, OI_W_FORGET,
   OI_SC_NET, OI_SC_AGAIN,
-  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES
+  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES, OI_BUZZTEST, OI_BUZZTYPE
 };
 struct OptRow { uint8_t item, idx; };
 static const uint8_t OPT_MAX = 56;
@@ -5053,6 +5139,8 @@ static const char* optHint(uint8_t item) {
     case OI_WIFI: case OI_SIM: case OI_W_CHOOSE: return "OK: open";
     case OI_W_TYPE: return "OK: type the name";
     case OI_W_RETRY: return "OK: try now";
+    case OI_BUZZTEST: return "OK: 2 beeps";
+    case OI_BUZZTYPE: return "OK: switch + test";
     case OI_SC_NET: return "OK: join";
     case OI_SC_AGAIN: return "OK: scan again";
     case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: return "OK: ask to confirm";
@@ -5078,6 +5166,8 @@ static void optBuild(ScrOptions* o) {
       optRow(o, OI_HOTSPOT, 0, "Hotspot", v);
     }
     optRow(o, OI_BUZZER, 0, "Buzzer", settings.buzzerEnabled ? "ON" : "OFF");
+    optRow(o, OI_BUZZTEST, 0, "Buzzer test", "");
+    optRow(o, OI_BUZZTYPE, 0, "Buzzer type", settings.buzzerPassive ? "passive" : "active");
     snprintf(v, sizeof(v), "%u s", settings.alertHoldSec); optRow(o, OI_HOLD, 0, "Alert hold", v);
     if (chalet) {
       const uint8_t t = settings.transportMode;
@@ -5240,7 +5330,9 @@ static void optActivate(const OptRow& row) {
   switch (row.item) {
     case OI_WIFI: optOpen(OM_WIFI); break;
     case OI_SIM: optOpen(OM_SIM); break;
-    case OI_BUZZER: settings.buzzerEnabled = !settings.buzzerEnabled; saveSettings(); break;
+    case OI_BUZZER: settings.buzzerEnabled = !settings.buzzerEnabled; saveSettings(); if (!settings.buzzerEnabled) buzzerStop(); break;
+    case OI_BUZZTEST: buzzerTest(); break;
+    case OI_BUZZTYPE: settings.buzzerPassive = !settings.buzzerPassive; saveSettings(); buzzerApplyType(); buzzerTest(); break;
     case OI_HOLD: {
       uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] <= settings.alertHoldSec) k++;
       settings.alertHoldSec = HOLD_STEPS[k % 5]; saveSettings(); break;
@@ -5321,6 +5413,7 @@ static bool scrPageAvailable(uint8_t p) {
 }
 
 static void scrStep(int dir) {
+  scrMenu = false;   // the button (or left/right) shows a page: the CardKB menu closes
   for (uint8_t k = 0; k < PG_COUNT; k++) {
     scrPage = (uint8_t)((scrPage + PG_COUNT + dir) % PG_COUNT);
     if (scrPageAvailable(scrPage)) break;
@@ -5579,7 +5672,7 @@ void loopButton() {
       showOverlayMessage("Network reset", 1500);
     } else if (pressDuration >= HOLD_CONNECT_MS) {
       if (currentRole != ROLE_GATEWAY_OFFSHORE) { if (wifiApActive) hubHotspotOff(); else hubHotspotOn(); }
-      scrPage = PG_CONNECT; scrSub = 0; scrLastInput = millis();
+      scrPage = PG_CONNECT; scrSub = 0; scrLastInput = millis(); scrMenu = false;
     } else if (pressDuration >= 1000) {
       // released between 1 and 3 s: nothing (the bar told the user to keep holding)
     } else if (pressDuration > BUTTON_DEBOUNCE_MS) {
@@ -6064,6 +6157,7 @@ void loadSettings() {
   settings.loraChannel = preferences.getUChar("loraCh", 255);
   if (settings.loraChannel > 7) settings.loraChannel = 255;
   settings.ebRelay = preferences.getBool("ebRelay", currentRole != ROLE_GATEWAY_OFFSHORE);   // v2: every hub relays by default
+  settings.buzzerPassive = preferences.getBool("buzPas", false);
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;
@@ -6092,6 +6186,7 @@ void saveSettings() {
   preferences.putUChar("transport", settings.transportMode);
   preferences.putUChar("loraCh", settings.loraChannel);
   preferences.putBool("ebRelay", settings.ebRelay);
+  preferences.putBool("buzPas", settings.buzzerPassive);
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);
 
@@ -6200,6 +6295,7 @@ void silenceAlerts() {
   alertsSilenced = !alertsSilenced;  // Toggle silence state
 
   if (alertsSilenced) {
+    buzzerStop();   // v2: the beep being played stops at once
     silenceTime = millis();
     silenceExpireTime = millis() + SILENCE_AUTO_CLEAR_MS;
     DEBUG_PRINTF("Alerts silenced for %d seconds\n", SILENCE_AUTO_CLEAR_MS / 1000);
@@ -6310,6 +6406,7 @@ static uint8_t lineStateOf(const NodeState& n, bool self) {
 
 static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   if (u.node == 0 || u.node == NODE_ID) return;
+  if (meshDemoNode(u.node) && meshDemoSim(u.node) == 0xFF) return;   // queued from a demo hole just removed
   const bool isNew = (findNodeIndexForMesh(u.node) < 0);
   NodeState* n = findOrCreateNode(u.node);
   if (n == nullptr) return;

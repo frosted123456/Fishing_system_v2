@@ -95,7 +95,7 @@ The test holes above are made by a hub, so a powered hub was needed. The demo ne
 | How | each fake hub is a real `HubRole` (line table, sonar outbox, hub packet); its packet enters the chalet through the backbone entry `onEbHubPacket`, and the chalet's backbone beacon is fed back to it (acks, FOCUS, `CMD_SET_SIM`). Pages, alerts, web, glance and FOCUS see it like a real pocket |
 | Sonar | non-focus holes: light BASE summary every 2 s (bottom, bait, 0-3 wandering fish); the FOCUS hole: the full fake fish finder (`SonarSource`, ~15 KB, only one) |
 | Marks | hubs: **DEMO** on the home page, "H121 SIM" on Network; holes: SIM flag, names "Demo A1"… |
-| IDs | hubs 121-124 (own hole = hub ID), other holes 200-226 (`meshSonarVirtualId`). Keep these IDs free in a real network |
+| IDs | hubs 121-124 (own hole = hub ID), other holes 101-112 (never a real hub's test-hole ID, 128-255). Keep these IDs free in a real network |
 | Not saved | off after every reboot (never left running on the ice). Turning it off removes the demo holes from the pages |
 | Not simulated | LoRa airtime / slots (the demo hubs never join the LoRa plan), radio range, battery |
 | Host test | `test/test_demo_net` (holes appear with pocket + SIM, acks clear, BASE reaches the store, SET_SIM reaches the hubs, forget) |

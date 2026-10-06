@@ -1470,8 +1470,8 @@ uint8_t meshHubLinks(MeshHubLink* out, uint8_t max) {
 // through the backbone entry (onEbHubPacket) and the chalet's backbone beacon is fed back to it (acks,
 // focus, CMD_SET_SIM). Fake sonar: a light BASE summary every 2 s per hole, and the full fake fish
 // finder (SonarSource, ~15 KB, one only) for the FOCUS hole. Fake Hall trips per hole when asked.
-// IDs (keep them free in a real network): hubs 121-124, their own hole = hub ID, other holes =
-// meshSonarVirtualId(hub, 0..2) (200-226). Not saved: off after every reboot.
+// IDs (keep them free in a real network): hubs 121-124, their own hole = hub ID, other holes 101-112
+// (never produced by meshSonarVirtualId, 128-255). Not saved: off after every reboot.
 // Threads: the demo state is used from loop() only; the lock is taken only around the chalet objects
 // (g_ch, g_paths), never around the fake sonar work, so the radio task keeps its timing.
 // =============================================================================================
@@ -1492,7 +1492,10 @@ static uint32_t g_demo_rng = 0x1234567u;
 
 static uint32_t demoRand() { g_demo_rng ^= g_demo_rng << 13; g_demo_rng ^= g_demo_rng >> 17; g_demo_rng ^= g_demo_rng << 5; return g_demo_rng; }
 
-static uint8_t demoHoleId(uint8_t hub, uint8_t k) { return k == 0 ? hub : meshSonarVirtualId(hub, static_cast<uint8_t>(k - 1)); }
+// Other holes 101-112: below 128, so never an ID a real hub gives its test holes (meshSonarVirtualId: 128-255)
+static uint8_t demoHoleId(uint8_t hub, uint8_t k) {
+  return k == 0 ? hub : static_cast<uint8_t>(101 + (hub - DEMO_HUB0) * 3 + (k - 1));
+}
 
 bool meshDemoNode(uint8_t id) {
   for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)

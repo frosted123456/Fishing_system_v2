@@ -16,8 +16,8 @@ void setUp(void) {}
 void tearDown(void) {}
 
 static const uint8_t HUB0 = 121;   // same rule as mesh_radio.cpp
-static uint8_t vid(uint8_t hub, uint8_t k) { return static_cast<uint8_t>(128 + (hub & 0x0F) * 8 + (k & 7)); }
-static uint8_t holeId(uint8_t hub, uint8_t k) { return k == 0 ? hub : vid(hub, static_cast<uint8_t>(k - 1)); }
+static uint8_t vid(uint8_t hub, uint8_t k) { return static_cast<uint8_t>(128 + (hub & 0x0F) * 8 + (k & 7)); }   // real hubs' test holes
+static uint8_t holeId(uint8_t hub, uint8_t k) { return k == 0 ? hub : static_cast<uint8_t>(101 + (hub - HUB0) * 3 + (k - 1)); }
 
 static void pushBase(HubRole<8>& r, uint8_t node, uint16_t bottom, uint16_t bait, uint16_t fish) {
   sonar::Summary s; memset(&s, 0, sizeof(s));
@@ -41,6 +41,9 @@ static void test_ids_distinct(void) {
       TEST_ASSERT_EQUAL(0, seen[id]);
       seen[id] = 1;
     }
+  // no real hub's test hole (any hub ID, any k) and not the chalet (100) can be a demo ID
+  for (int hub = 1; hub < 255; hub++) for (uint8_t k = 0; k < 8; k++) TEST_ASSERT_EQUAL(0, seen[vid(static_cast<uint8_t>(hub), k)]);
+  TEST_ASSERT_EQUAL(0, seen[100]);
 }
 
 static void test_demo_chain(void) {
