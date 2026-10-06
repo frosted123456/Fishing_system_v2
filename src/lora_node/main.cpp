@@ -3265,6 +3265,11 @@ body.has-alert{padding-bottom:84px}
 details.adv{margin-top:6px}details.adv>summary{cursor:pointer;color:var(--muted);font-weight:600;padding:6px 0}details.adv[open]>summary{margin-bottom:10px}
 .rl{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.rl .sm{color:var(--muted);font-size:.86rem}
 .node.low .bat .bar i{background:#E0A43A}
+.gl{display:block;width:100%;height:58px;border-radius:8px;background:var(--chip);margin-top:4px}
+.glt{display:grid;gap:1px;font-size:.86rem}.glt small{color:var(--muted)}
+.badge.sim{background:#E0A43A;color:#1b1b1b}
+.simt{width:100%;border-collapse:collapse;font-size:.92rem}.simt td,.simt th{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left}.simt th{color:var(--muted);font-weight:600}
+.btnrow{display:flex;flex-wrap:wrap;gap:8px}
 .son{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid var(--line);font-size:.9rem}
 .linkbtn{border:0;background:transparent;color:var(--accent);font-weight:600;padding:4px 0;cursor:pointer;justify-self:start;min-height:32px}
 .btn.small{min-height:34px;padding:4px 10px}
@@ -3453,10 +3458,13 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       </div>
     </section>
     <section class="card">
-      <h2>Sonar</h2>
+      <h2>Test &amp; simulation</h2>
       <div class="form">
-        <span class="tog"><span id="lblSim2">Sonar test mode (fake data on every hub and node)</span><button type="button" class="switch" role="switch" id="fSim" aria-labelledby="lblSim2" aria-checked="false"></button></span>
-        <p class="hint" style="margin:0">Nodes stay awake while it is on (battery). The setting is kept after a reboot: turn it off after testing.</p>
+        <div class="btnrow"><button class="btn" type="button" id="simAllOn">Everything ON</button><button class="btn" type="button" id="simAllOff">Everything OFF</button></div>
+        <span class="tog"><span id="lblSim2">Test holes on the hubs (virtual tip-ups)</span><button type="button" class="switch" role="switch" id="fSim" aria-labelledby="lblSim2" aria-checked="false"></button></span>
+        <label class="f">Fake fish (flag up) per hole<select id="simRate"><option value="2">about 2 per hour</option><option value="6">about 6 per hour</option><option value="12">about 12 per hour</option><option value="30">about 30 per hour</option><option value="60">about 1 per minute</option></select><small>Applies to the next switch you turn on</small></label>
+        <div class="tablewrap"><table class="simt" id="simTable"></table></div>
+        <p class="hint" style="margin:0">Fake sonar keeps a tip-up awake (battery). Fake fish go through the real alert path (buzzer, phone) and are marked SIM everywhere. The settings stay after a reboot: turn them off after testing.</p>
       </div>
     </section>
     <section class="card">
@@ -3833,7 +3841,7 @@ function showTab(t) {
   if (t === 'sonar' && SON()) SON().show();
   if (t === 'radio') loadRadio();
   if (t === 'settings') { loadSettings(); renderAbout(); loadRadio(); }
-  if (t === 'holes') renderNodes();
+  if (t === 'holes') { renderNodes(); loadGlance(); }
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
 function initialTab() {
@@ -3918,10 +3926,12 @@ function renderNodes() {
   let h = '';
   nodes.forEach(n => {
     const off = n.online === false, low = !!n.lowbat, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
-    const badge = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : low ? '<span class="badge">LOW BATT</span>' : '<span class="badge on">OK</span>';
+    const badge = (n.sim ? '<span class="badge sim">SIM</span> ' : '') + (off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : low ? '<span class="badge">LOW BATT</span>' : '<span class="badge on">OK</span>');
     const via = n.via_lora ? 'via LoRa' : (n.via_espnow ? 'ESP-NOW' : '');
     const s = sonar[n.id];
-    const sonarLine = s ? `<div class="son"><span>${s.fish ? s.fish + ' fish · nearest ' + son.fmtD(s.near / 100) : 'Sonar: no fish'}</span><button class="btn small" type="button" data-watch="${n.id}">Watch</button></div>` : '';
+    const g = glance.nodes[n.id];
+    const sonarLine = (s || g) ? `<canvas class="gl" data-glance="${n.id}" title="last 3 min: bottom, fish, bait line"></canvas>` +
+      `<div class="son"><span class="glt" data-glt="${n.id}">${s && s.fish ? s.fish + ' fish · nearest ' + son.fmtD(s.near / 100) : 'Sonar: no fish'}</span><button class="btn small" type="button" data-watch="${n.id}">Watch</button></div>` : '';
     h += `<div class="node${n.fish && !off ? ' fish' : ''}${off ? ' off' : ''}${low ? ' low' : ''}">` +
       `<div class="hd"><span>${esc(nodeName(n))}</span>${badge}</div>` +
       `<div class="sm">#${n.id}${n.role ? ' · ' + esc(n.role) : ''}${via ? ' · ' + via : ''}</div>` +
@@ -3930,7 +3940,60 @@ function renderNodes() {
       sonarLine + `<button class="linkbtn" type="button" data-rename="${n.id}">Rename</button></div>`;
   });
   $('ngrid').innerHTML = h || '<p class="empty">No hole heard yet.</p>';
+  drawGlances();
 }
+
+/* ---------- Sonar at a glance: last ~3 min of every hole (summaries every 2 s) ---------- */
+const glance = { frame: 0, nodes: {} };
+function loadGlance() {
+  api('/api/sonar/glance?since=' + glance.frame).then(d => {
+    if (glance.frame && ((d.frame - glance.frame) & 0xFFFF) > 0x8000) { glance.frame = 0; glance.nodes = {}; return; }   // chalet restarted
+    (d.nodes || []).forEach(x => {
+      const g = glance.nodes[x.node] || (glance.nodes[x.node] = { recs: [] });
+      g.hub = x.hub; g.hard = x.hard; g.act = x.act;
+      g.recs = g.recs.concat(x.recs || []).slice(-90);
+    });
+    glance.frame = d.frame;
+    drawGlances();
+  }).catch(() => {});
+}
+function cssVar(n, f) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || f; }
+function drawGlances() {
+  const cs = document.querySelectorAll('canvas[data-glance]');
+  if (!cs.length) return;
+  let maxB = 300;   // common depth scale (cm): deepest bottom + 15 %
+  Object.values(glance.nodes).forEach(g => g.recs.forEach(r => { if (r[1] && r[1] < 2047 && r[1] * 1.15 > maxB) maxB = r[1] * 1.15; }));
+  const acc = cssVar('--accent', '#2a9d8f'), mut = cssVar('--muted', '#888'), al = cssVar('--alert', '#e63946');
+  const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(1) + ' m';
+  cs.forEach(c => {
+    const id = +c.dataset.glance, g = glance.nodes[id];
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (!w) return;
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    const x = c.getContext('2d'); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+    const t = document.querySelector(`[data-glt="${id}"]`);
+    if (!g || !g.recs.length) { x.fillStyle = mut; x.font = '11px system-ui'; x.fillText('waiting for sonar…', 8, h / 2 + 4); if (t) t.textContent = ''; return; }
+    const N = 90, cw = w / N, y = cm => 2 + (h - 4) * cm / maxB;
+    g.recs.forEach((r, i) => {
+      const x0 = w - (g.recs.length - i) * cw;
+      if (r[1] && r[1] < 2047) { x.fillStyle = mut; x.globalAlpha = 0.35; x.fillRect(x0, y(r[1]), cw + 0.5, h - y(r[1])); x.globalAlpha = 1; x.fillRect(x0, y(r[1]), cw + 0.5, 1.5); }
+      for (let k = 2; k < r.length; k++) {
+        const d = r[k] & 0x7FF, lv = (r[k] >> 11) & 3, bait = (r[k] >> 13) & 1;
+        if (bait) { x.fillStyle = mut; x.fillRect(x0, y(d), cw + 0.5, 1); continue; }
+        x.fillStyle = acc; x.globalAlpha = lv >= 3 ? 1 : lv === 2 ? 0.75 : 0.45;   // stronger echo = bigger, darker
+        const s = 2 + lv; x.fillRect(x0 + cw / 2 - s / 2, y(d) - s / 2, Math.max(s, cw), s); x.globalAlpha = 1;
+      }
+    });
+    if (t) {
+      const last = g.recs[g.recs.length - 1], fish = last.slice(2).filter(v => !((v >> 13) & 1));
+      const HN = ['', 'soft', 'medium', 'hard'];
+      const ds = fish.map(v => (v & 0x7FF) / 100).sort((a, b) => a - b);
+      const where = !ds.length ? '' : ds.length === 1 ? ' at ' + fmt(ds[0]) : ' · ' + fmt(ds[0]) + '–' + fmt(ds[ds.length - 1]);
+      t.innerHTML = `<span>${ds.length ? ds.length + ' fish' + where : 'no fish'}</span><small>bottom ${last[1] && last[1] < 2047 ? fmt(last[1] / 100) : '–'}${HN[g.hard] ? ' · ' + HN[g.hard] : ''}</small>`;
+    }
+  });
+}
+window.addEventListener('resize', drawGlances);
 $('ngrid').addEventListener('click', e => {
   const w = e.target.closest('[data-watch]');
   if (w) { if (SON()) SON().focus(+w.dataset.watch); showTab('sonar'); return; }
@@ -4034,7 +4097,7 @@ function loadSettings() {
     $('fBuzzer').setAttribute('aria-checked', String(!!d.buzzerEnabled)); $('fReed').setAttribute('aria-checked', String(!!d.reedActiveHigh));
     $('fHold').value = d.alertHoldSec; $('fHeart').value = d.heartbeatSec;
   }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
-  const son = SON(); if (son) $('fSim').setAttribute('aria-checked', String(!!son.list().sim));
+  loadSim();
 }
 ['fBuzzer', 'fReed'].forEach(id => $(id).addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); }));
 $('setForm').addEventListener('submit', e => {
@@ -4044,7 +4107,37 @@ $('setForm').addEventListener('submit', e => {
   api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
   setTimeout(() => { $('setMsg').textContent = ''; }, 4000);
 });
-$('fSim').addEventListener('click', () => { const son = SON(); if (!son) return; son.setSim(!son.list().sim).then(() => loadSettings()); });
+/* ---------- Test & simulation ---------- */
+let sim = null;
+function loadSim() { api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }
+function postSim(o) { api('/api/sim', o).then(d => { sim = d; renderSim(); }).catch(() => {}); }
+function renderSim() {
+  if (!sim) return;
+  $('fSim').setAttribute('aria-checked', String(!!sim.virtual));
+  if (document.activeElement !== $('simRate')) $('simRate').value = String([2, 6, 12, 30, 60].reduce((a, b) => Math.abs(b - sim.rate) < Math.abs(a - sim.rate) ? b : a, 6));
+  let h = '<tr><th>Hole</th><th>Fake sonar</th><th>Fake fish</th><th></th></tr>';
+  (sim.holes || []).forEach(x => {
+    const r = x.req || 0, so = r ? !!(r & 1) : !!(x.virtual && x.on), ha = !!(r & 2);   // test holes: fake sonar by default
+    const st = x.on ? '<span class="badge sim">SIM</span>' : ((r && !x.on) ? '<span class="sm">sent…</span>' : '');
+    h += `<tr><td>${esc(x.name || ((x.virtual ? 'Test hole ' : 'Hole ') + x.id))}</td>` +
+      `<td><button type="button" class="switch" role="switch" aria-checked="${so}" aria-label="Fake sonar ${x.id}" data-simh="${x.id}" data-k="sonar"></button></td>` +
+      `<td><button type="button" class="switch" role="switch" aria-checked="${ha}" aria-label="Fake fish ${x.id}" data-simh="${x.id}" data-k="hall"></button></td><td>${st}</td></tr>`;
+  });
+  if (!(sim.holes || []).length) h += '<tr><td colspan="4">No hole heard yet.</td></tr>';
+  $('simTable').innerHTML = h;
+}
+$('simTable').addEventListener('click', e => {
+  const b = e.target.closest('[data-simh]'); if (!b || !sim) return;
+  const id = +b.dataset.simh, x = (sim.holes || []).find(y => y.id === id) || { req: 0 };
+  const r = x.req || 0;
+  let so = r ? !!(r & 1) : !!(x.virtual && x.on), ha = !!(r & 2);
+  if (b.dataset.k === 'sonar') so = !so; else ha = !ha;
+  postSim({ hole: id, sonar: so, hall: ha });
+});
+$('fSim').addEventListener('click', () => postSim({ virtual: !(sim && sim.virtual) }));
+$('simAllOn').addEventListener('click', () => postSim({ all: true }));
+$('simAllOff').addEventListener('click', () => postSim({ all: false }));
+$('simRate').addEventListener('change', e => postSim({ rate: +e.target.value }));
 function renderAbout() {
   if (!st) return;
   const w = st.wifi || {}, l = st.lora || {};
@@ -4059,7 +4152,8 @@ showTab(initialTab());
 loadStatus();
 setInterval(loadStatus, 2000);
 setInterval(() => { if (tab === 'radio') loadRadio(); }, 2000);
-setInterval(() => { if (tab === 'settings') loadRadio(); }, 5000);
+setInterval(() => { if (tab === 'settings') { loadRadio(); loadSim(); } }, 5000);
+setInterval(() => { if (tab === 'holes') loadGlance(); }, 2000);
 })();
 </script>
 </body>

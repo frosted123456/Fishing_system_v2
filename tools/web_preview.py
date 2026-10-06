@@ -30,12 +30,33 @@ frames = json.load(open(TRACE))
 t0 = time.time()
 state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "sil_until": 0,
          "names": {3: "Pointe", 4: "Baie"}, "test": 0, "adaptive": False,
+         "simreq": {}, "simrate": 6,
          "transport": 0, "ch_setting": "auto", "ch": 0, "moves": 0, "relay_req": {}, "lr_only": False,
          "settings": {"buzzerEnabled": True, "alertHoldSec": 30, "heartbeatSec": 60, "reedActiveHigh": True}}
 TESTS = ["off", "rotate", "SF9/500", "SF8/500", "SF7/500"]
 
 def now_index():
     return int(time.time() - t0) % len(frames)
+
+import math, random
+_glance = {}
+def glance(since):
+    """Fake per-hole sonar summaries (every 2 s, ~3 min kept), shaped like the firmware's /api/sonar/glance."""
+    el = time.time() - t0; frame = int(el) + 1000
+    out = []
+    ids = [n["node"] for n in frames[0]["list"]["nodes"]] + [2, 3, 4]
+    for i, nid in enumerate(ids):
+        g = _glance.setdefault(nid, {"recs": [], "last": 0, "bottom": 300 + 90 * i, "fish": []})
+        while g["last"] < frame:
+            g["last"] = (g["last"] or frame - 180) + 2
+            f = g["last"]; g["bottom"] = max(150, min(1100, g["bottom"] + random.randint(-4, 4)))
+            g["fish"] = [d + random.randint(-15, 15) for d in g["fish"] if random.random() > 0.05 and 50 < d < g["bottom"] - 20]
+            if random.random() < 0.08 * (1 + i % 3): g["fish"].append(random.randint(80, g["bottom"] - 40))
+            bait = int(g["bottom"] * 0.6)
+            t = [bait | (2 << 11) | (1 << 13)] + [min(d, 2046) | (random.choice([1, 2, 2, 3]) << 11) for d in g["fish"][:4]]
+            g["recs"] = (g["recs"] + [[f, g["bottom"]] + t])[-90:]
+        out.append({"node": nid, "hub": 1 + i // 3, "hard": 1 + i % 3, "act": len(g["fish"]), "recs": [r for r in g["recs"] if r[0] > since]})
+    return {"frame": frame, "nodes": out}
 
 def status():
     el = time.time() - t0
@@ -48,6 +69,7 @@ def status():
         nodes.append({"id": n["node"], "role": "Sensor", "online": True, "fish": False, "lowbat": False, "battery": 4500, "via_lora": True, "last_seen_sec": 1})
     for n in nodes:
         n["name"] = state["names"].get(n["id"], "")
+        n["sim"] = state["simreq"].get(n["id"], 0) != 0 or n["id"] >= 128
     if state["silenced"] and time.time() > state["sil_until"]:
         state["silenced"] = False
     return {"network_id": 66, "node_count": len(nodes), "uptime": int(el) + 7380, "role": "Chalet", "node_id": 100, "fw": "v2",
@@ -95,6 +117,11 @@ class H(BaseHTTPRequestHandler):
         d = dict(frames[now_index()]["list"]); d["focus"] = state["focus"]; d["sim"] = state["sim"]
         return json.dumps(d)
 
+    def simj(self):
+        hs = [{"id": n["id"], "name": n.get("name", ""), "req": state["simreq"].get(n["id"], 0),
+               "on": n["sim"], "virtual": n["id"] >= 128} for n in status()["nodes"]]
+        return {"virtual": state["sim"], "rate": state["simrate"], "all": -1, "holes": hs}
+
     def body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
         try:
@@ -119,6 +146,10 @@ class H(BaseHTTPRequestHandler):
                 if k < 2: out = list(frames[k]["pings"])
             out = out[-mx:]
             return self.send(200, json.dumps({"node": node, "last": out[-1][0] if out else since, "pings": out}))
+        if u.path == "/api/sonar/glance":
+            return self.send(200, json.dumps(glance(int(q.get("since", ["0"])[0]))))
+        if u.path == "/api/sim":
+            return self.send(200, json.dumps(self.simj()))
         if u.path == "/api/sonar/bg":
             return self.send(200, json.dumps(frames[now_index()]["bg"]))
         if u.path == "/api/radio":
@@ -133,6 +164,15 @@ class H(BaseHTTPRequestHandler):
             if "focus" in b: state["focus"] = int(b["focus"])
             if "sim" in b: state["sim"] = bool(b["sim"])
             return self.send(200, self.listing())
+        if u.path == "/api/sim":
+            if "rate" in b: state["simrate"] = int(b["rate"])
+            if "virtual" in b: state["sim"] = bool(b["virtual"])
+            if "all" in b:
+                state["sim"] = bool(b["all"]); v = (3 | (state["simrate"] << 2)) if b["all"] else 0
+                for n in status()["nodes"]: state["simreq"][n["id"]] = v
+            if "hole" in b:
+                state["simreq"][int(b["hole"])] = ((1 if b.get("sonar") else 0) | (2 if b.get("hall") else 0)) | ((state["simrate"] << 2) if (b.get("sonar") or b.get("hall")) else 0)
+            return self.send(200, json.dumps(self.simj()))
         if u.path == "/api/silence":
             state["silenced"] = not state["silenced"]; state["sil_until"] = time.time() + 300
             return self.send(200, json.dumps({"silenced": state["silenced"]}))
