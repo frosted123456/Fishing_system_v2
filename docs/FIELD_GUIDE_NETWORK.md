@@ -10,7 +10,6 @@ follow by radio: nothing to reflash on the ice. Protocol details: protocol_v2.md
 | Hub ↔ chalet link | Auto / LoRa / ESP-NOW | Auto | Auto = LoRa, and a hub that loses the LoRa beacon for 10 s also sends over ESP-NOW until LoRa is back |
 | LoRa channel | Auto / 1-8 | Auto | Auto = start on the last channel (915.0 MHz first), move when it gets > 25 % busy and another is clearly quieter |
 | Relay (per device) | on / off | off | Device rebroadcasts ESP-NOW backbone frames; max 2 relays in a row. A tip-up relay stays awake (battery) |
-| Chalet ESP-NOW receiver LR only | on / off | off | Only if the chalet hears no hub on ESP-NOW at all (reboot to apply) |
 
 ## On the ice: what to do when…
 | Situation | You see | Do |
@@ -37,12 +36,12 @@ follow by radio: nothing to reflash on the ice. Protocol details: protocol_v2.md
 | `CHANNEL AUTO\|1-8\|SCAN` | LoRa channel; SCAN = re-evaluate now (on a hub: shows the channel) |
 | `RELAY <id> ON\|OFF` | relay on a hub or tip-up (beacon command) |
 | `RELAY ON\|OFF` | (any LoRa board) relay on this device |
-| `EBMODE MIXED\|LRONLY` | chalet ESP-NOW receiver mode, reboot to apply |
+| `EBMODE NORMAL\|LR` | chalet ESP-NOW rate, reboot to apply. **LR removes the phone hotspot** (bench only) |
 | `RADIO` | status incl. `[net]` lines: transport, channel, activity %, backbone counters |
 
 ## Bench tests before the first outing (in this order)
 1. **Chalet hears hubs on ESP-NOW**: `TRANSPORT ESPNOW`; Radio → Links: "ESP-NOW heard" must count up for each hub.
-   If not: `EBMODE LRONLY`, reboot, retry. If still not: report — this is the main untested assumption (O9).
+   Needs hubs/tip-ups built with `ESPNOW_LONG_RANGE_MODE false` (LR and a phone hotspot cannot share a board, D27).
 2. **Phone hotspot still works** with LR on the chalet (connect, open the suite, trip a tip-up).
 3. **Back to LoRa**: `TRANSPORT AUTO`; hubs back on LoRa within ~1 min (Links: "backbone no").
 4. **Channel move**: `CHANNEL 3` → every hub follows within ~6-12 s (`RADIO` on a hub shows the channel); `CHANNEL AUTO` after.

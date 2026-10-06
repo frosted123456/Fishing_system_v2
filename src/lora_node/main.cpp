@@ -157,7 +157,7 @@ struct DeviceSettings {
   uint8_t transportMode;      // v2 chalet: 0 Auto, 1 LoRa only, 2 ESP-NOW only (hubs follow the beacon)
   uint8_t loraChannel;        // v2 chalet: 0-7 fixed, 255 = Auto (scan + move when busy)
   bool ebRelay;               // v2 any device: rebroadcast ESP-NOW backbone frames
-  bool ebLrOnly;              // v2 chalet: station in LR only (fallback if mixed b/g/n+LR does not hear the hubs)
+  bool ebChaletLr;            // v2 chalet: LR on for ESP-NOW. Kills the phone hotspot (Espressif: no per-interface LR) - bench only
   uint8_t lastLoraCh;         // v2: LoRa channel last used (start point after a reboot)
 };
 
@@ -176,7 +176,7 @@ DeviceSettings settings = {
   .transportMode = 0,
   .loraChannel = 255,
   .ebRelay = false,
-  .ebLrOnly = false,
+  .ebChaletLr = false,
   .lastLoraCh = 0
 };
 
@@ -1765,10 +1765,11 @@ void setupEspNow() {
 
 // =============================================================================================
 // v2 ESP-NOW BACKBONE (lib/IceMesh/src/eb_link.h, docs/protocol_v2.md §6c)
-// Hubs and tip-ups already run ESP-NOW in LR only (ESPNOW_LONG_RANGE_MODE). The chalet joins with
-// b/g/n + LR on its station interface (the phone AP stays b/g/n) and sends at the LR rate.
-// UNTESTED on hardware: that a mixed b/g/n+LR station receives LR-only senders. If the chalet hears
-// no hub on the backbone, set EBMODE LRONLY (station in LR only) and reboot.
+// Espressif (esp-idf #4554): "currently we don't support to set softAP and STA in LR mode separately" -
+// with LR enabled on either interface the AP beacons in LR and phones cannot find the hotspot.
+// So the chalet (phone hotspot) never enables LR by default: its ESP-NOW runs at the normal rate
+// (802.11b 1 Mbps) and only reaches devices that are NOT LR-only (ESPNOW_LONG_RANGE_MODE false on the
+// ice side). EBMODE LR turns LR on for bench tests only: the phone hotspot then disappears.
 // =============================================================================================
 static wifi_interface_t ebIf = WIFI_IF_STA;
 
@@ -1780,13 +1781,13 @@ void setupEbChalet() {
   // interface only, so an AP-only chalet gets its (unconnected) station interface added.
   if (m == WIFI_MODE_AP) { WiFi.mode(WIFI_AP_STA); delay(100); }
   ebIf = WIFI_IF_STA;
-  uint8_t proto = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
-  #if ESPNOW_LONG_RANGE_MODE
-  proto = settings.ebLrOnly ? (uint8_t)WIFI_PROTOCOL_LR : (uint8_t)(proto | WIFI_PROTOCOL_LR);
-  #endif
+  esp_err_t e = ESP_OK;
   // order matters (esp-idf #9933 / #11751): protocol after Wi-Fi start, ESP-NOW rate after esp_now_init
-  esp_err_t e = esp_wifi_set_protocol(ebIf, proto);
-  if (e != ESP_OK) DEBUG_PRINTF("Backbone: set protocol failed: %d\n", e);
+  if (settings.ebChaletLr) {
+    e = esp_wifi_set_protocol(ebIf, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_LR);
+    if (e != ESP_OK) DEBUG_PRINTF("Backbone: set protocol failed: %d\n", e);
+    Serial.println(F("WARNING backbone: LR on - the phone hotspot is expected to disappear (EBMODE NORMAL to undo)"));
+  }
   uint8_t primary; wifi_second_chan_t secondary;
   esp_wifi_get_channel(&primary, &secondary);
   if (primary != ESPNOW_CHANNEL) {
@@ -1800,13 +1801,15 @@ void setupEbChalet() {
   peer.ifidx = ebIf;
   peer.encrypt = false;
   if (esp_now_add_peer(&peer) != ESP_OK) { Serial.println(F("Backbone: broadcast peer failed")); return; }
-  #if ESPNOW_LONG_RANGE_MODE
-  e = esp_wifi_config_espnow_rate(ebIf, WIFI_PHY_RATE_LORA_250K);
-  if (e != ESP_OK) Serial.printf("Backbone: LR rate not set (%d)\n", e);
-  #endif
+  if (settings.ebChaletLr) {
+    e = esp_wifi_config_espnow_rate(ebIf, WIFI_PHY_RATE_LORA_250K);
+    if (e != ESP_OK) Serial.printf("Backbone: LR rate not set (%d)\n", e);
+  }
   espNowReady = true;
-  Serial.printf("Backbone: ESP-NOW on the station interface, %s (phone AP stays b/g/n)\n",
-                settings.ebLrOnly ? "LR only" : "b/g/n + LR");
+  Serial.printf("Backbone: ESP-NOW on the station interface, %s\n", settings.ebChaletLr ? "LR (bench test)" : "normal rate");
+  #if ESPNOW_LONG_RANGE_MODE
+  if (!settings.ebChaletLr) Serial.println(F("NOTE backbone: hubs/tip-ups built with ESPNOW_LONG_RANGE_MODE (LR only) cannot hear the chalet"));
+  #endif
 }
 
 static bool ebSend(const uint8_t* frame, size_t len) {
@@ -2756,11 +2759,12 @@ void checkSerialWifiConfig() {
     }
   } else if (line.startsWith("EBMODE")) {
     String a = line.substring(6); a.trim(); a.toUpperCase();
-    if (currentRole == ROLE_GATEWAY_OFFSHORE && (a == "MIXED" || a == "LRONLY")) {
-      settings.ebLrOnly = (a == "LRONLY"); saveSettings();
-      Serial.printf("Backbone receiver: %s - reboot to apply\n", settings.ebLrOnly ? "LR only" : "b/g/n + LR");
+    if (currentRole == ROLE_GATEWAY_OFFSHORE && (a == "NORMAL" || a == "LR")) {
+      settings.ebChaletLr = (a == "LR"); saveSettings();
+      Serial.printf("Chalet ESP-NOW: %s - reboot to apply%s\n", settings.ebChaletLr ? "LR" : "normal rate",
+                    settings.ebChaletLr ? " (the phone hotspot will disappear: bench test only)" : "");
     } else {
-      Serial.println(F("Usage (chalet only): EBMODE MIXED|LRONLY  (reboot to apply)"));
+      Serial.println(F("Usage (chalet only): EBMODE NORMAL|LR  (reboot; LR removes the phone hotspot)"));
     }
   } else if (line == "RADIO") {
     meshPrintStatus(Serial);
@@ -3350,7 +3354,6 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
         <div><span class="hint">Activity heard by the chalet per channel (other LoRa users, %)</span><div class="busy" id="nBusy"></div></div>
         <div><button class="btn" id="nScan" type="button">Check channels now</button></div>
         <div><span class="hint">ESP-NOW relays (rebroadcast between hubs and the chalet, max 2 in a row)</span><div id="nRelays"></div></div>
-        <span class="tog"><span id="lblLro">Chalet ESP-NOW receiver in LR only (after reboot; try if no hub is heard on ESP-NOW)</span><button type="button" class="switch" role="switch" id="nLro" aria-labelledby="lblLro" aria-checked="false"></button></span>
         <p class="hint" style="margin:0">Hubs follow these settings through the beacon: nothing to reprogram on the ice. A channel change is announced 6 beacons ahead.</p>
       </div>
     </section>
@@ -3903,7 +3906,6 @@ function renderNetwork() {
     const b = c.busy;
     return `<div class="bat${c.ch === d.channel ? ' cur' : ''}"><span>${c.ch + 1} · ${f1(c.mhz, 1)}${c.ch === d.channel ? ' (in use)' : ''}</span><span class="bar"><i style="width:${b == null ? 0 : b}%"></i></span>${b == null ? '–' : b + ' %'}</div>`;
   }).join('');
-  $('nLro').setAttribute('aria-checked', String(!!d.eb_lr_only));
   const req = {}, rep = {}, devs = [];
   (d.relay_req || []).forEach(r => { req[r.dev] = r.on; });
   (d.paths || []).forEach(p => { rep[p.id] = p.relay; devs.push({ id: p.id, hub: true }); });
@@ -3921,7 +3923,6 @@ function renderNetwork() {
 $('nTr').addEventListener('click', e => { const b = e.target.closest('[data-tr]'); if (b) postRadio({ transport: +b.dataset.tr }); });
 $('nCh').addEventListener('change', e => postRadio({ channel: e.target.value === 'auto' ? 'auto' : +e.target.value }));
 $('nScan').addEventListener('click', () => postRadio({ rescan: true }));
-$('nLro').addEventListener('click', () => postRadio({ ebLrOnly: !(radio && radio.eb_lr_only) }));
 $('nRelays').addEventListener('click', e => {
   const b = e.target.closest('[data-relay]'); if (!b) return;
   const on = b.getAttribute('aria-checked') !== 'true';
@@ -5026,7 +5027,7 @@ void loadSettings() {
   settings.loraChannel = preferences.getUChar("loraCh", 255);
   if (settings.loraChannel > 7) settings.loraChannel = 255;
   settings.ebRelay = preferences.getBool("ebRelay", false);
-  settings.ebLrOnly = preferences.getBool("ebLrOnly", false);
+  settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;
 
@@ -5054,7 +5055,7 @@ void saveSettings() {
   preferences.putUChar("transport", settings.transportMode);
   preferences.putUChar("loraCh", settings.loraChannel);
   preferences.putBool("ebRelay", settings.ebRelay);
-  preferences.putBool("ebLrOnly", settings.ebLrOnly);
+  preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);
 
   preferences.end();
@@ -5457,7 +5458,7 @@ static String radioJsonFull() {
   String s = meshRadioJson();
   s.remove(s.length() - 1);   // closing brace
   s += ",\"eb_ready\":"; s += espNowReady ? "true" : "false";
-  s += ",\"eb_lr_only\":"; s += settings.ebLrOnly ? "true" : "false";
+  s += ",\"eb_chalet_lr\":"; s += settings.ebChaletLr ? "true" : "false";
   s += ",\"relay_req\":[";
   bool first = true;
   for (const auto& r : relayReqs) {
@@ -5507,7 +5508,6 @@ void handleWebApiRadioPost() {
     const int dev = doc["relay"]["dev"] | 0;
     if (dev > 0 && dev < 255) relayRequest((uint8_t)dev, doc["relay"]["on"] | false);
   }
-  if (doc.containsKey("ebLrOnly")) settings.ebLrOnly = doc["ebLrOnly"].as<bool>();   // applied after a reboot
   saveSettings();
   server.send(200, "application/json", radioJsonFull());
 }

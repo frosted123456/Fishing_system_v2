@@ -117,8 +117,8 @@ A move is announced with SET CHANNEL in 6 beacons (also on the backbone); everyo
 A hub without beacon hops to the next channel every 2.5 s unless it heard the network (or a backbone beacon naming
 the channel) in the last 10 s. Every device saves the channel it last used (NVS) and starts there after a reboot.
 
-**ESP-NOW backbone (EB)**: ESP-NOW broadcast, Wi-Fi channel `ESPNOW_CHANNEL`, LR rate (the ice side already runs
-ESP-NOW in LR only, `ESPNOW_LONG_RANGE_MODE`). Frame = 7 B header {net, sender (this hop), type, hops, origin, origin seq u16} + payload ≤ 243 B.
+**ESP-NOW backbone (EB)**: ESP-NOW broadcast, Wi-Fi channel `ESPNOW_CHANNEL`, **normal rate (802.11b 1 Mbps)**: a device with a phone hotspot
+cannot enable LR (D27), so the backbone only reaches hubs built with `ESPNOW_LONG_RANGE_MODE false`. Frame = 7 B header {net, sender (this hop), type, hops, origin, origin seq u16} + payload ≤ 243 B.
 | Type | Payload | Sent by / when |
 |---|---|---|
 | 0x70 EB beacon | the chalet beacon without slots (acks, flags, commands, net_cfg, frame no.) | chalet, every frame, in Auto / ESP-NOW (in LoRa only: 2 min after a change and while a hub talks on the backbone) |
@@ -146,5 +146,5 @@ node's next 3 messages (a sleeping node only listens ~120 ms after it transmits)
 | O6 | ESP-NOW RSSI is not available with core 2.x callbacks — node-to-hub link quality is not used yet. |
 | O7 | Capacity (calc., est.): a 96 B slot at SF9/500 reserves ≈ 139 ms → about 6 direct hubs per 1 s frame (beacon ≈ 72 ms, join ≈ 30 ms, margin 40 ms). Allowances: 96 B per hub, 180 B for the FOCUS hub (est.); not yet sized from each hub's queue. |
 | O8 | To verify on hardware: TX start latency (log nowUs() around startTransmit), RadioLib 7.7.1 RX IRQ defaults (HeaderValid enabled, DIO1 = RxDone), TCXO delay. A settings save (NVS write) can shift one frame's timing — harmless, only when settings change. |
-| O9 | ESP-NOW backbone untested: (a) that the chalet's mixed b/g/n+LR station receives LR-only hubs (fallback setting: EBMODE LRONLY), (b) real LR range on ice (sim: ~170-390 m per hop, est.), (c) LR traffic next to the phone hotspot. First bench tests: docs/FIELD_GUIDE_NETWORK.md. |
+| O9 | LR vs hotspot: confirmed incompatible on one ESP32 (D27). Open: switch the ice side to the normal rate (range cost to measure: walk test LR vs 1 Mbps, tip-up ↔ hub), real ESP-NOW range on ice (sim: est. only). |
 | O10 | Channel activity threshold (−100 dBm) and the 25 / 15 % rule are sim values; check the activity % on the Settings page against a known busy channel. |

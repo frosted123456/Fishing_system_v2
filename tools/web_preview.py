@@ -76,7 +76,7 @@ def radio():
             "channel_setting": state["ch_setting"], "channel_moves": state["moves"],
             "channels": [{"ch": i, "mhz": mhz[i], "busy": busy[i]} for i in range(8)], "paths": paths,
             "allowance": 96, "dropped_slots": 0, "hubs": hubs,
-            "eb_ready": True, "eb_lr_only": state["lr_only"],
+            "eb_ready": True, "eb_chalet_lr": state["lr_only"],
             "relay_req": [{"dev": k, "on": v} for k, v in state["relay_req"].items()]}
 
 class H(BaseHTTPRequestHandler):
@@ -145,7 +145,6 @@ class H(BaseHTTPRequestHandler):
                     state["ch_setting"] = int(b["channel"]) - 1
                     if state["ch"] != state["ch_setting"]: state["ch"] = state["ch_setting"]; state["moves"] += 1
             if "relay" in b: state["relay_req"][int(b["relay"]["dev"])] = bool(b["relay"]["on"])
-            if "ebLrOnly" in b: state["lr_only"] = bool(b["ebLrOnly"])
             return self.send(200, json.dumps(radio()))
         if u.path == "/api/settings":
             state["settings"].update({k: v for k, v in b.items() if k in state["settings"]}); return self.send(200, '{"success":true}')
