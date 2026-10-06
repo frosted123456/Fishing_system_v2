@@ -122,6 +122,14 @@ static void test_channel_and_relay_commands(void) {
   ch.cmd = CMD_SET_RELAY; ch.cmd_seq = 10; ch.cmd_target = 4; ch.cmd_value = 1; ch.startFrame(22, b, sizeof b);
   TEST_ASSERT_TRUE(hub.onEbBeacon(b, ch.buildEbBeacon(b, sizeof b), cmd));
   TEST_ASSERT_EQUAL(CMD_SET_RELAY, cmd); TEST_ASSERT_EQUAL(4, hub.last_cmd_target); TEST_ASSERT_EQUAL(1, hub.last_cmd_value);
+  // simulation of one hole (fake sonar + fake trips, 12 per hour)
+  const uint8_t v = simValue(true, true, 12);
+  TEST_ASSERT_EQUAL(SIM_SONAR | SIM_HALL | (12 << 2), v); TEST_ASSERT_EQUAL(12, simTripsPerHour(v));
+  TEST_ASSERT_EQUAL(6, simTripsPerHour(simValue(false, true, 0)));            // 0 = default rate
+  TEST_ASSERT_EQUAL(63, simTripsPerHour(simValue(false, true, 200)));         // clamped
+  ch.cmd = CMD_SET_SIM; ch.cmd_seq = 11; ch.cmd_target = 41; ch.cmd_value = v; ch.startFrame(23, b, sizeof b);
+  TEST_ASSERT_TRUE(hub.onEbBeacon(b, ch.buildEbBeacon(b, sizeof b), cmd));
+  TEST_ASSERT_EQUAL(CMD_SET_SIM, cmd); TEST_ASSERT_EQUAL(41, hub.last_cmd_target); TEST_ASSERT_EQUAL(v, hub.last_cmd_value);
 }
 
 static void test_planner_frame_length(void) {

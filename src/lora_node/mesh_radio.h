@@ -98,7 +98,10 @@ void meshEbTick();                                       // loop(): hub sends it
 void meshSetEbRelay(bool on);                            // this device rebroadcasts backbone frames
 bool meshEbRelay();
 void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
-bool meshPollRelayCmd(uint8_t& dev, bool& on);           // hub: CMD_SET_RELAY received (dev may be self or a node)
+bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value);   // hub: SET_RELAY / SET_SIM received (MESH_CMD_*)
+void meshSetHoleSim(uint8_t hole, uint8_t value);       // chalet: CMD_SET_SIM in the beacon (hole ID or 255 = all)
+enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4 };   // = icemesh::tdma::BeaconCmd
+enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02 };
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)
 
@@ -112,3 +115,4 @@ bool meshHubPushSonar(const uint8_t* blk, uint8_t len);   // hub: queue one bloc
 String meshSonarListJson();                  // chalet: /api/sonar (one summary per sonar node)
 String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings);   // chalet: /api/sonar/pings
 String meshSonarBgJson(uint8_t node);        // chalet: /api/sonar/bg (2-bit background profile)
+String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glance (every hole, ~3 min of summaries)

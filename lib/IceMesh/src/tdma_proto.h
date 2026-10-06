@@ -38,7 +38,17 @@ enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0
 //   CMD_RESET_ALL     reboot every node
 //   CMD_SET_CHANNEL   target = beacons left before the switch, value = LoRa channel index
 //   CMD_SET_RELAY     target = device ID, value = 1 relay on / 0 off (ESP-NOW backbone)
-enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1, CMD_SET_CHANNEL = 2, CMD_SET_RELAY = 3 };
+//   CMD_SET_SIM       target = hole ID (255 = every hole), value = simValue(): test data for that hole
+enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1, CMD_SET_CHANNEL = 2, CMD_SET_RELAY = 3, CMD_SET_SIM = 4 };
+// Simulation of one hole: bit0 fake sonar, bit1 fake Hall-sensor trips, bits 2-7 trips per hour (0 = 6)
+enum : uint8_t { SIM_SONAR = 0x01, SIM_HALL = 0x02 };
+inline uint8_t simValue(bool sonar, bool hall, uint8_t trips_per_hour) {
+  const uint8_t r = trips_per_hour > 63 ? 63 : trips_per_hour;
+  return static_cast<uint8_t>((sonar ? SIM_SONAR : 0) | (hall ? SIM_HALL : 0) | (r << 2));
+}
+inline uint8_t simTripsPerHour(uint8_t v) { const uint8_t r = static_cast<uint8_t>(v >> 2); return r ? r : 6; }
+// LINE record flags (3 bits): low battery, hole running a simulation (shown as SIM everywhere)
+enum : uint8_t { LF_LOWBAT = 0x01, LF_SIM = 0x02 };
 
 // Network configuration byte, in every beacon (LoRa and ESP-NOW backbone):
 //   bits 0-1 transport (TR_*), bit 2 ESP-NOW long-range rate, bits 4-7 current LoRa channel index

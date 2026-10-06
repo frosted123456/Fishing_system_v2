@@ -25,7 +25,7 @@ inline uint8_t staticLevel(float v) { return v < 0.06f ? 0 : (v < 0.20f ? 1 : (v
 //          every BG_EVERY pings; a new BG version when the static scene changed in > BG_CHANGE bins.
 class SonarSource {
  public:
-  enum { BASE_EVERY = 16, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12 };
+  enum { BASE_EVERY = 8, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12 };   // BASE every 2 s at 4 pings/s
   SonarScene scene;
   SonarProc proc;
   uint32_t blocks_out = 0, pings_dropped = 0;
@@ -97,16 +97,13 @@ class SonarSource {
     uint8_t a = 0;
     for (uint16_t b = act_bits_; b; b >>= 1) a = static_cast<uint8_t>(a + (b & 1u));
     s.activity = a > 15 ? 15 : a;
-    s.nearest_cm = DEPTH_NONE;
-    int32_t best = 1 << 30;
-    const int32_t bait_cm = static_cast<int32_t>(proc.bait_m * 100.0f + 0.5f);
-    for (uint8_t i = 0; i < last_.n_targets; i++) {
+    for (uint8_t i = 0; i < last_.n_targets && s.n_list < MAX_TARGETS; i++) {
       const Target& t = last_.t[i];
-      if (t.track == 0) continue;
-      s.n_targets++;
-      const int32_t d = t.depth_cm > bait_cm ? t.depth_cm - bait_cm : bait_cm - t.depth_cm;
-      if (d < best) { best = d; s.nearest_cm = t.depth_cm; s.nearest_level = t.level; }
+      if (t.track != 0) s.n_targets++;
+      Target& o = s.list[s.n_list++];
+      o.depth_cm = t.depth_cm; o.level = t.level ? t.level : 1; o.track = t.track == 0 ? 0 : 1;
     }
+    summaryNearest(s);   // same rule as the chalet decoder
     return s;
   }
   uint8_t node() const { return node_; }

@@ -6,7 +6,7 @@
 //   - no pixel layer yet (deferred); residual cells are the strongest moving cells, absolute per ping.
 //
 // Block types (byte 0 = node, byte 1 = type<<4 | x):
-//   BT_BASE  summary every few seconds (x = activity 0-15)          ~7-8 B
+//   BT_BASE  summary every 2 s (x = activity 0-15): bottom + EVERY target of the latest ping   ~9-16 B
 //   BT_DATA  N = 1..15 processed pings (x = N-1), + optional track info (echo character)
 //   BT_BG    1/8 of the 2-bit static-scene profile (x = bg version)
 // Depths in cm (11 bit, 2047 = none). Target strength 0-31 = the display value of the prototype
@@ -64,10 +64,25 @@ struct Summary {
   uint16_t bottom_cm;
   uint8_t hard;             // BottomHard
   uint8_t n_targets;        // fish (not the bait), 0-7
-  uint16_t nearest_cm;      // valid when n_targets > 0
+  uint16_t nearest_cm;      // valid when n_targets > 0 (derived from the list: fish closest to the bait)
   uint8_t nearest_level;
   uint8_t bg_ver;
+  uint8_t n_list;           // targets of the latest ping (fish and bait), for the per-hole sonar glance
+  Target list[MAX_TARGETS]; // track 0 = bait, else 1; depth_cm and level only (strength/width not sent)
 };
+
+// nearest fish to the bait line (or the shallowest fish when no bait echo), from the list
+inline void summaryNearest(Summary& s) {
+  s.nearest_cm = DEPTH_NONE; s.nearest_level = 0;
+  uint16_t bait = DEPTH_NONE, best = 0xFFFF;
+  for (uint8_t i = 0; i < s.n_list; i++) if (s.list[i].track == 0) bait = s.list[i].depth_cm;
+  for (uint8_t i = 0; i < s.n_list; i++) {
+    const Target& t = s.list[i];
+    if (t.track == 0) continue;
+    const uint16_t d = bait == DEPTH_NONE ? t.depth_cm : static_cast<uint16_t>(t.depth_cm > bait ? t.depth_cm - bait : bait - t.depth_cm);
+    if (d < best) { best = d; s.nearest_cm = t.depth_cm; s.nearest_level = t.level; }
+  }
+}
 
 struct DataHeader {
   uint8_t node;
@@ -109,8 +124,15 @@ inline size_t encodeSummary(const Summary& s, uint8_t* out, size_t cap) {
   w.put(s.hard & 3u, 2);
   const uint8_t nt = s.n_targets > 7 ? 7 : s.n_targets;
   w.put(nt, 3);
-  if (nt > 0) { w.put(s.nearest_cm > DEPTH_MAX ? DEPTH_MAX : s.nearest_cm, 11); w.put(s.nearest_level & 3u, 2); }
   w.put(s.bg_ver & 15u, 4);
+  // v3: every target of the latest ping: depth 11 b, level 2 b, bait 1 b (14 b each)
+  const uint8_t nl = s.n_list > MAX_TARGETS ? MAX_TARGETS : s.n_list;
+  w.put(nl, 3);
+  for (uint8_t i = 0; i < nl; i++) {
+    w.put(s.list[i].depth_cm > DEPTH_MAX ? DEPTH_MAX : s.list[i].depth_cm, 11);
+    w.put(s.list[i].level & 3u, 2);
+    w.put(s.list[i].track == 0 ? 1u : 0u, 1);
+  }
   return w.overflow() ? 0 : w.bytes();
 }
 
@@ -124,9 +146,16 @@ inline bool decodeSummary(const uint8_t* in, size_t len, Summary& s) {
   s.bottom_cm = static_cast<uint16_t>(r.get(11));
   s.hard = static_cast<uint8_t>(r.get(2));
   s.n_targets = static_cast<uint8_t>(r.get(3));
-  if (s.n_targets > 0) { s.nearest_cm = static_cast<uint16_t>(r.get(11)); s.nearest_level = static_cast<uint8_t>(r.get(2)); }
-  else s.nearest_cm = DEPTH_NONE;
   s.bg_ver = static_cast<uint8_t>(r.get(4));
+  s.n_list = static_cast<uint8_t>(r.get(3));
+  if (s.n_list > MAX_TARGETS) return false;
+  for (uint8_t i = 0; i < s.n_list; i++) {
+    Target& t = s.list[i];
+    t.depth_cm = static_cast<uint16_t>(r.get(11));
+    t.level = static_cast<uint8_t>(r.get(2));
+    t.track = r.get(1) ? 0 : 1;
+  }
+  summaryNearest(s);
   return !r.bad() && r.bitsLeft() < 8;
 }
 

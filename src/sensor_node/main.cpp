@@ -78,6 +78,17 @@
 #define EB_RELAY_FORCE 0
 #endif
 RTC_DATA_ATTR bool ebRelayOn = false;       // copy of the NVS setting, read again on power-on only
+
+// v2 SIMULATION of this hole (set from the chalet, delivered by the hub as MSG_DEV_CMD DEVCMD_SIM, kept in NVS):
+// bit0 fake sonar (stays awake while the hub's sonar control says test mode), bit1 fake Hall-sensor trips:
+// the flag "goes up" at random (rate = trips per hour), stays up 20-90 s, through the normal alert path.
+// Messages carry FLAG_SIM so every screen marks the hole SIM.
+RTC_DATA_ATTR uint8_t simBits = 0;
+RTC_DATA_ATTR uint32_t simTripEnd = 0, simNextTrip = 0;   // in totalUptimeSec time
+volatile int16_t devCmdSim = -1;
+void simLoadSetting(bool power_on);
+void simApplyCmd();
+bool simTripActive();
 volatile int8_t devCmdRelay = -1;           // relay command received (-1 none, 0 off, 1 on)
 static icemesh::RxRing<8, 250> ebRing;
 static uint32_t ebRelayed = 0;
@@ -235,6 +246,9 @@ void setup() {
   lastWakeReason = wakeReason;
   ebRelayLoadSetting(wakeReason != ESP_SLEEP_WAKEUP_EXT0 && wakeReason != ESP_SLEEP_WAKEUP_GPIO &&
                      wakeReason != ESP_SLEEP_WAKEUP_TIMER);
+  simLoadSetting(wakeReason != ESP_SLEEP_WAKEUP_EXT0 && wakeReason != ESP_SLEEP_WAKEUP_GPIO &&
+                 wakeReason != ESP_SLEEP_WAKEUP_TIMER);
+  if (simBits) SET_FLAG(currentFlags, FLAG_SIM);
 
   // Check if we're in FISH_ON monitor mode (fast heartbeat)
   if (fishOnMonitorMode) {
@@ -341,6 +355,7 @@ void setup() {
   if (SONAR_SIM_ALLOWED && SONAR_SIM_FORCE) sonarSimOn = true;
   else sonarListenCtrl(SONAR_CTRL_WAIT_MS);
   ebRelayApplyCmd();
+  simApplyCmd();
   if (SONAR_SIM_ALLOWED && sonarSimOn && SLEEP_ENABLED) {
     DEBUG_PRINTLN(F("Sonar test mode ON - staying awake (fake sonar)"));
     return;
@@ -391,6 +406,7 @@ void loop() {
   sonarLoop();
   #endif
   ebRelayLoop();
+  simApplyCmd();
 
   // Update uptime every second
   if (millis() - lastUptimeUpdate >= 1000) {
@@ -729,7 +745,10 @@ void readBattery() {
   #endif
 }
 
-bool readReedSwitch() {
+static bool readReedHw();
+bool readReedSwitch() { return readReedHw() || simTripActive(); }   // v2: a simulated trip looks like the real flag
+
+static bool readReedHw() {
   int reading1 = digitalRead(REED_PIN);
   delay(DEBOUNCE_MS);
   int reading2 = digitalRead(REED_PIN);
@@ -909,6 +928,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   if (msgType == MSG_DEV_CMD && len >= (int)sizeof(DevCmdMessage)) {
     const DevCmdMessage* c = (const DevCmdMessage*)data;
     if (c->target == NODE_ID && c->cmd == DEVCMD_RELAY) devCmdRelay = c->value ? 1 : 0;
+    if (c->target == NODE_ID && c->cmd == DEVCMD_SIM) devCmdSim = c->value;
     return;
   }
 
@@ -1152,7 +1172,55 @@ uint32_t estimateActualSleepDuration(esp_sleep_wakeup_cause_t wakeReason) {
 void sonarListenCtrl(uint32_t wait_ms) {
   const unsigned long t0 = millis();
   while (!sonarCtrlSeen && millis() - t0 < wait_ms) delay(5);
-  if (sonarCtrlSeen) { sonarCtrlSeen = false; if (SONAR_SIM_ALLOWED) sonarSimOn = sonarCtrlSim; }
+  if (sonarCtrlSeen) { sonarCtrlSeen = false; if (SONAR_SIM_ALLOWED) sonarSimOn = sonarCtrlSim && (simBits & 0x01); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 SIMULATION OF THIS HOLE
+// ═══════════════════════════════════════════════════════════════════════════
+void simLoadSetting(bool power_on) {
+  if (!power_on) return;
+  Preferences p;
+  p.begin("node", true);
+  simBits = p.getUChar("sim", 0);
+  p.end();
+  simTripEnd = 0; simNextTrip = 0;
+  if (simBits) DEBUG_PRINTF("Simulation: sonar %s, Hall trips %s\n", (simBits & 1) ? "on" : "off", (simBits & 2) ? "on" : "off");
+}
+
+void simApplyCmd() {
+  const int16_t c = devCmdSim;
+  if (c < 0) return;
+  devCmdSim = -1;
+  const uint8_t v = static_cast<uint8_t>(c);
+  if (v == simBits) return;
+  simBits = v; simTripEnd = 0; simNextTrip = 0;
+  if (v) SET_FLAG(currentFlags, FLAG_SIM); else CLEAR_FLAG(currentFlags, FLAG_SIM);
+  if (!(v & 0x01)) sonarSimOn = false;
+  Preferences p;
+  p.begin("node", false);
+  p.putUChar("sim", v);
+  p.end();
+  DEBUG_PRINTF("Simulation set by the chalet: sonar %s, Hall trips %s\n", (v & 1) ? "on" : "off", (v & 2) ? "on" : "off");
+}
+
+// Simulated Hall trip: random start (mean 3600 / rate s apart), flag up for 20-90 s.
+bool simTripActive() {
+  if (!(simBits & 0x02)) return false;
+  const uint32_t now = totalUptimeSec + millis() / 1000;
+  if (simTripEnd != 0) {
+    if (now < simTripEnd) return true;
+    simTripEnd = 0; simNextTrip = 0;
+  }
+  const uint32_t rate = (simBits >> 2) ? (simBits >> 2) : 6;
+  const uint32_t mean = 3600UL / rate;
+  if (simNextTrip == 0) simNextTrip = now + mean / 2 + esp_random() % (mean + 1);
+  if (now >= simNextTrip) {
+    simTripEnd = now + 20 + esp_random() % 71;
+    DEBUG_PRINTLN(F("Simulation: Hall trip (fake fish)"));
+    return true;
+  }
+  return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1221,7 +1289,7 @@ void sonarLoop() {
     sonarCtrlSeen = false;
     lastCtrl = millis();
     focus = sonarCtrlFocus;
-    sonarSimOn = sonarCtrlSim || SONAR_SIM_FORCE;
+    sonarSimOn = (sonarCtrlSim && (simBits & 0x01)) || SONAR_SIM_FORCE;
   }
   if (sonarSimOn && !started) {
     src.begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());

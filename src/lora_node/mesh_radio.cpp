@@ -104,7 +104,7 @@ static volatile uint16_t g_ch_moves = 0;
 static uint8_t g_ch_switch_after = 0xFF;        // chalet: retune at the end of this frame
 static volatile uint32_t g_eb_beacon_until_ms = 0;
 struct QueuedCmd { uint8_t cmd, target, value; };
-static QueuedCmd g_cmdq[8];                     // chalet, under lock
+static QueuedCmd g_cmdq[16];                    // chalet, under lock
 static uint8_t g_cmdq_n = 0;
 static uint8_t g_cmd_beacons_left = 0;
 // backbone
@@ -120,9 +120,10 @@ static volatile uint32_t g_eb_rx = 0, g_eb_tx = 0, g_eb_relayed = 0, g_eb_dup = 
 static volatile uint32_t g_eb_beacon_ms = 0;    // hub: last backbone beacon
 static volatile bool g_eb_beacon_seen = false;
 static volatile uint32_t g_eb_hub_last_ms = 0;  // chalet: last hub packet over the backbone
-static volatile bool g_relay_event = false;
-static volatile uint8_t g_relay_dev = 0;
-static volatile bool g_relay_on = false;
+// device commands from the chalet beacon for loop() (SET_RELAY, SET_SIM), small queue
+struct DevCmdEvt { uint8_t cmd, target, value; };
+static DevCmdEvt g_devq[4];
+static volatile uint8_t g_devq_n = 0;   // under lock
 struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; };
 static HubPath g_paths[12];                     // chalet, under lock: how each hub was last heard
 // Setup phase (chalet): no automatic channel move until a hub has been in the network for 5 min, or
@@ -335,6 +336,10 @@ static void cmdQueue(uint8_t cmd, uint8_t target, uint8_t value) {   // under lo
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == CMD_SET_CHANNEL) { g_cmdq[i].value = value; return; }   // newest choice wins
   }
+  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY) {   // same device: the newest value replaces the queued one
+    for (uint8_t i = 0; i < g_cmdq_n; i++)
+      if (g_cmdq[i].cmd == cmd && g_cmdq[i].target == target) { g_cmdq[i].value = value; return; }
+  }
   if (g_cmdq_n < sizeof(g_cmdq) / sizeof(g_cmdq[0])) { g_cmdq[g_cmdq_n].cmd = cmd; g_cmdq[g_cmdq_n].target = target; g_cmdq[g_cmdq_n].value = value; g_cmdq_n++; }
 }
 
@@ -539,7 +544,10 @@ static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
     g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
   }
   if (cmd == CMD_SET_CHANNEL) g_pending_since_ms = millis();
-  if (cmd == CMD_SET_RELAY) { g_relay_dev = g_hub->last_cmd_target; g_relay_on = g_hub->last_cmd_value != 0; g_relay_event = true; }
+  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM) && g_devq_n < 4) {
+    g_devq[g_devq_n].cmd = cmd; g_devq[g_devq_n].target = g_hub->last_cmd_target; g_devq[g_devq_n].value = g_hub->last_cmd_value;
+    g_devq_n = static_cast<uint8_t>(g_devq_n + 1);
+  }
   const bool s = g_hub->silenced();   // beacon or backbone beacon
   if (s != g_silence_state) { g_silence_state = s; g_silence_event = true; }
 }
@@ -923,11 +931,20 @@ void meshSetDeviceRelay(uint8_t dev, bool on) {
   cmdQueue(CMD_SET_RELAY, dev, on ? 1 : 0);
 }
 
-bool meshPollRelayCmd(uint8_t& dev, bool& on) {
-  if (!g_relay_event) return false;
-  g_relay_event = false;
-  dev = g_relay_dev; on = g_relay_on;
+bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value) {
+  if (g_hub == nullptr || g_devq_n == 0) return false;
+  Lock l;
+  if (g_devq_n == 0) return false;
+  cmd = g_devq[0].cmd; target = g_devq[0].target; value = g_devq[0].value;
+  for (uint8_t i = 1; i < g_devq_n; i++) g_devq[i - 1] = g_devq[i];
+  g_devq_n = static_cast<uint8_t>(g_devq_n - 1);
   return true;
+}
+
+void meshSetHoleSim(uint8_t hole, uint8_t value) {
+  if (g_ch == nullptr || hole == 0) return;
+  Lock l;
+  cmdQueue(CMD_SET_SIM, hole, value);
 }
 
 // One backbone frame (ESP-NOW type 0x70 / 0x71) from loop(): drop copies, relay, then use it.
@@ -1351,5 +1368,44 @@ String meshSonarBgJson(uint8_t node) {
   s += ",\"bin_mm\":"; s += sonar::BIN_MM; s += ",\"levels\":\"";
   if (found) for (uint16_t i = 0; i < sonar::BINS; i++) s += static_cast<char>('0' + (lv[i] & 3));
   s += "\"}";
+  return s;
+}
+
+// Per-hole sonar history for the "at a glance" views: summaries newer than `since` (frame number,
+// 0 = everything kept, ~3 min). {"frame":F,"nodes":[{"node":n,"hub":h,"hard":x,"act":a,
+//   "recs":[[frame,bottom_cm,t,..],..]}]} with t = depth_cm | level << 11 | bait << 13 (sonar_link.h).
+String meshSonarGlanceJson(uint16_t since) {
+  if (g_sonar == nullptr) return F("{\"frame\":0,\"nodes\":[]}");
+  static sonar::BaseRec recs[90];
+  uint8_t ids[16], hubs[16], hards[16], acts[16]; uint8_t nn = 0;
+  {
+    Lock l;
+    for (uint8_t i = 0; i < g_sonar->capacity() && nn < 16; i++) {
+      const sonar::NodeSonar* ns = g_sonar->at(i);
+      if (ns == nullptr) continue;
+      ids[nn] = ns->node; hubs[nn] = ns->hub; hards[nn] = ns->sum.hard; acts[nn] = ns->sum.activity; nn++;
+    }
+  }
+  String s;
+  s.reserve(256 + nn * (since ? 200 : 2200));
+  s = "{\"frame\":"; s += g_frame; s += ",\"nodes\":[";
+  for (uint8_t k = 0; k < nn; k++) {
+    uint8_t n;
+    { Lock l; n = g_sonar->history(ids[k], recs, 90); }
+    if (k) s += ",";
+    s += "{\"node\":"; s += ids[k]; s += ",\"hub\":"; s += hubs[k]; s += ",\"hard\":"; s += hards[k];
+    s += ",\"act\":"; s += acts[k]; s += ",\"recs\":[";
+    bool first = true;
+    for (uint8_t r = 0; r < n; r++) {
+      if (since != 0 && seqDiff(recs[r].frame, since) <= 0) continue;
+      if (!first) s += ",";
+      first = false;
+      s += "["; s += recs[r].frame; s += ","; s += recs[r].bottom_cm;
+      for (uint8_t t = 0; t < recs[r].n; t++) { s += ","; s += recs[r].t[t]; }
+      s += "]";
+    }
+    s += "]}";
+  }
+  s += "]}";
   return s;
 }

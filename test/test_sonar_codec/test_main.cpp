@@ -47,17 +47,24 @@ static void test_bitstream(void) {
 
 static void test_summary_roundtrip(void) {
   Summary s; memset(&s, 0, sizeof s);
-  s.node = 137; s.activity = 9; s.ping = 65530; s.bottom_cm = 612; s.hard = BH_MEDIUM; s.n_targets = 6; s.nearest_cm = 540; s.nearest_level = 3; s.bg_ver = 7;
-  uint8_t b[16];
+  s.node = 137; s.activity = 9; s.ping = 65530; s.bottom_cm = 612; s.hard = BH_MEDIUM; s.n_targets = 4; s.bg_ver = 7;
+  // v3: every target of the latest ping (bait first here), nearest is derived on decode
+  const uint16_t dep[5] = {400, 540, 120, 590, 300}; const uint8_t lv[5] = {2, 3, 1, 2, 1};
+  for (int k = 0; k < 5; k++) { s.list[k].depth_cm = dep[k]; s.list[k].level = lv[k]; s.list[k].track = k == 0 ? 0 : 1; }
+  s.n_list = 5;
+  uint8_t b[24];
   const size_t n = encodeSummary(s, b, sizeof b);
-  TEST_ASSERT_EQUAL(9, n);   // 65 bits
+  TEST_ASSERT_EQUAL(16, n);   // 55 + 5 x 14 = 125 bits
   Summary d;
   TEST_ASSERT_TRUE(decodeSummary(b, n, d));
   TEST_ASSERT_EQUAL(137, d.node); TEST_ASSERT_EQUAL(9, d.activity); TEST_ASSERT_EQUAL(65530, d.ping);
-  TEST_ASSERT_EQUAL(612, d.bottom_cm); TEST_ASSERT_EQUAL(BH_MEDIUM, d.hard); TEST_ASSERT_EQUAL(6, d.n_targets); TEST_ASSERT_EQUAL(540, d.nearest_cm);
-  TEST_ASSERT_EQUAL(3, d.nearest_level); TEST_ASSERT_EQUAL(7, d.bg_ver);
-  s.n_targets = 0;
+  TEST_ASSERT_EQUAL(612, d.bottom_cm); TEST_ASSERT_EQUAL(BH_MEDIUM, d.hard); TEST_ASSERT_EQUAL(4, d.n_targets); TEST_ASSERT_EQUAL(7, d.bg_ver);
+  TEST_ASSERT_EQUAL(5, d.n_list);
+  for (int k = 0; k < 5; k++) { TEST_ASSERT_EQUAL(dep[k], d.list[k].depth_cm); TEST_ASSERT_EQUAL(lv[k], d.list[k].level); TEST_ASSERT_EQUAL(k == 0 ? 0 : 1, d.list[k].track); }
+  TEST_ASSERT_EQUAL(300, d.nearest_cm); TEST_ASSERT_EQUAL(1, d.nearest_level);   // closest fish to the bait at 400 cm
+  s.n_targets = 0; s.n_list = 0;
   const size_t n0 = encodeSummary(s, b, sizeof b);
+  TEST_ASSERT_EQUAL(7, n0);   // 55 bits: no target
   TEST_ASSERT_TRUE(decodeSummary(b, n0, d));
   TEST_ASSERT_EQUAL(DEPTH_NONE, d.nearest_cm);
   TEST_ASSERT_FALSE(decodeSummary(b, n0 - 1, d));   // truncated
@@ -184,7 +191,7 @@ static void test_bg_roundtrip(void) {
 
 static void test_source_cadence_and_sizes(void) {
   Block out[2];
-  // BASE: one summary per 16 pings (plus one when a fish shows up)
+  // BASE: one summary per 8 pings = 2 s (plus one when a fish shows up)
   SonarSource s; s.begin(130, 42);
   int base_blocks = 0; size_t base_bytes = 0;
   for (int k = 0; k < 4 * 300; k++) {
@@ -194,7 +201,8 @@ static void test_source_cadence_and_sizes(void) {
       TEST_ASSERT_EQUAL(BT_BASE, type); base_blocks++; base_bytes += out[i].len;
     }
   }
-  TEST_ASSERT_TRUE(base_blocks >= 300 / 4 && base_blocks <= 300 / 4 * 2);
+  TEST_ASSERT_TRUE(base_blocks >= 300 / 2 && base_blocks <= 300 / 2 * 2);
+  TEST_ASSERT_TRUE(base_bytes / base_blocks <= 16);
   // FOCUS: DATA every 4 pings (track info every 2nd), BG every 8 pings
   size_t data_bytes = 0, bg_bytes = 0; int data_blocks = 0, bg_blocks = 0, max_block = 0, info_blocks = 0, versions = 0;
   const int secs = 300, holes = 4;

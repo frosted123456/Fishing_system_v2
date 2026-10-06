@@ -119,13 +119,32 @@ struct StoredPing {
   uint8_t n_info; TrackInfo info[MAX_TARGETS];   // echo character, on the last ping of a block that carried it
 };
 
-template <uint8_t MAXN = 16, uint16_t RING = 128>
+// Per-hole history of summaries for the "at a glance" views (web Holes tab, OLED): one record per BASE
+// (every 2 s) and, for the FOCUS hole, one per frame derived from its pings. Packed target: depth 11 b,
+// level 2 b (<< 11), bait 1 b (<< 13).
+struct BaseRec { uint16_t frame; uint16_t bottom_cm; uint8_t n; uint16_t t[MAX_TARGETS]; };
+inline uint16_t packTarget(const Target& t) {
+  return static_cast<uint16_t>((t.depth_cm > DEPTH_MAX ? DEPTH_MAX : t.depth_cm) | ((t.level & 3u) << 11) | (t.track == 0 ? (1u << 13) : 0u));
+}
+
+template <uint8_t MAXN = 16, uint16_t RING = 128, uint8_t HIST = 90>
 class SonarStore : public SonarSink {
  public:
   uint32_t blocks_ok = 0, blocks_bad = 0, old_pings = 0;
 
   SonarStore() { clear(); }
-  void clear() { memset(nodes_, 0, sizeof(nodes_)); head_ = 0; count_ = 0; seq_ = 0; }
+  void clear() { memset(nodes_, 0, sizeof(nodes_)); head_ = 0; count_ = 0; seq_ = 0; memset(hn_, 0, sizeof(hn_)); memset(hh_, 0, sizeof(hh_)); }
+
+  // Summaries of `node`, oldest first (up to HIST, ~3 min at one per 2 s). Returns the count.
+  uint8_t history(uint8_t node, BaseRec* out, uint8_t max) const {
+    for (uint8_t i = 0; i < MAXN; i++) {
+      if (!nodes_[i].used || nodes_[i].node != node) continue;
+      const uint8_t n = hn_[i] < max ? hn_[i] : max;
+      for (uint8_t k = 0; k < n; k++) out[k] = hist_[i][(hh_[i] + HIST - n + k) % HIST];
+      return n;
+    }
+    return 0;
+  }
 
   void onSonarBlock(uint8_t hub, const uint8_t* blk, uint8_t len, uint16_t frame) override {
     uint8_t node, type;
@@ -139,6 +158,7 @@ class SonarStore : public SonarSink {
         if (ns->has_sum && isOld(s.ping, ns->sum.ping) && s.ping != ns->sum.ping && ++ns->old_run < 2) { old_pings++; return; }
         ns->old_run = 0;
         ns->sum = s; ns->has_sum = true;
+        record(ns, frame, true);
         break;
       }
       case BT_DATA: {
@@ -157,6 +177,7 @@ class SonarStore : public SonarSink {
           if (count_ < RING) count_++;
           deriveSummary(*ns, p, d.bg_ver, d.hard);
         }
+        record(ns, frame, false);
         break;
       }
       case BT_BG: {
@@ -202,6 +223,16 @@ class SonarStore : public SonarSink {
   }
   enum { RESTART_GAP = 256, RESTART_RUN = 8 };   // a duplicate block is 1-15 pings; 8+ old pings in a row = restart
 
+  void record(NodeSonar* ns, uint16_t frame, bool always) {
+    const uint8_t i = static_cast<uint8_t>(ns - nodes_);
+    if (!always && hn_[i] > 0 && hist_[i][(hh_[i] + HIST - 1) % HIST].frame == frame) return;   // one per frame from DATA
+    BaseRec& r = hist_[i][hh_[i]];
+    r.frame = frame; r.bottom_cm = ns->sum.bottom_cm; r.n = ns->sum.n_list;
+    for (uint8_t k = 0; k < r.n; k++) r.t[k] = packTarget(ns->sum.list[k]);
+    hh_[i] = static_cast<uint8_t>((hh_[i] + 1) % HIST);
+    if (hn_[i] < HIST) hn_[i]++;
+  }
+
   NodeSonar* slot(uint8_t node, uint16_t frame) {
     for (uint8_t i = 0; i < MAXN; i++) if (nodes_[i].used && nodes_[i].node == node) return &nodes_[i];
     int oldest = -1;
@@ -212,6 +243,7 @@ class SonarStore : public SonarSink {
     if (oldest < 0) return nullptr;
     NodeSonar& ns = nodes_[oldest];
     memset(&ns, 0, sizeof(ns));
+    hn_[oldest] = 0; hh_[oldest] = 0;
     ns.used = true; ns.node = node; ns.frame = frame; ns.bg_ver = 0xFF;
     return &ns;
   }
@@ -225,22 +257,20 @@ class SonarStore : public SonarSink {
     for (uint16_t b = ns.act_bits; b; b >>= 1) act = static_cast<uint8_t>(act + (b & 1u));
     memset(&s, 0, sizeof(s));
     s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.hard = hard; s.activity = act > 15 ? 15 : act;
-    s.nearest_cm = DEPTH_NONE;
-    uint16_t bait = DEPTH_NONE;
-    for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track == 0) bait = p.t[i].depth_cm;
-    uint16_t best = 0xFFFF;
-    for (uint8_t i = 0; i < p.n_targets; i++) {
+    for (uint8_t i = 0; i < p.n_targets && s.n_list < MAX_TARGETS; i++) {
       const Target& t = p.t[i];
-      if (t.track == 0) continue;
-      s.n_targets++;
-      const uint16_t d = bait == DEPTH_NONE ? t.depth_cm : static_cast<uint16_t>(t.depth_cm > bait ? t.depth_cm - bait : bait - t.depth_cm);
-      if (d < best) { best = d; s.nearest_cm = t.depth_cm; s.nearest_level = t.level; }
+      if (t.track != 0) s.n_targets++;
+      Target& o = s.list[s.n_list++];
+      o.depth_cm = t.depth_cm; o.level = t.level ? t.level : 1; o.track = t.track == 0 ? 0 : 1;
     }
+    summaryNearest(s);
     ns.has_sum = true;
   }
 
   NodeSonar nodes_[MAXN];
   StoredPing ring_[RING];
+  BaseRec hist_[MAXN][HIST];
+  uint8_t hn_[MAXN], hh_[MAXN];
   uint16_t head_, count_;
   uint32_t seq_;
 };

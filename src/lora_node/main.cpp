@@ -358,6 +358,8 @@ void sendSilenceSyncEspNow();
 void drawRadioTest();
 void handleWebApiRadio();
 void handleWebApiRadioPost();
+void handleWebApiSim();
+void handleWebApiSimPost();
 
 void processEspNowMessage(const uint8_t* data, int len, int rssi);
 void setupEbChalet();
@@ -365,6 +367,12 @@ static bool ebSend(const uint8_t* frame, size_t len);
 static void devCmdOnNodeHeard(uint8_t node);
 static void devCmdQueue(uint8_t node, uint8_t cmd, uint8_t value);
 static void relayRequest(uint8_t dev, bool on);
+void simRequest(uint8_t node, bool sonar, bool hall);
+void simAll(bool on);
+bool simAnyOn();
+static inline uint8_t simValueOf(bool sonar, bool hall, uint8_t tph) {
+  return static_cast<uint8_t>((sonar ? MESH_SIM_SONAR : 0) | (hall ? MESH_SIM_HALL : 0) | ((tph > 63 ? 63 : tph) << 2));
+}
 
 // Deduplication functions
 bool shouldAcceptMessage(uint8_t nodeId, uint16_t seq, uint32_t uptime, uint8_t newFlags);
@@ -382,6 +390,9 @@ void handleWebApiSonarPost();
 void handleWebApiSonarPings();
 void handleWebApiSonarBg();
 void sonarHubLoop();
+static uint8_t hubHoleSim(uint8_t node);
+static bool hubSimTripped(uint8_t node);
+static void hubSimApply(uint8_t target, uint8_t value);
 void handleWebWifiConfig();
 void handleWebApiSettingsGet();
 void handleWebApiSettingsPost();
@@ -1857,6 +1868,45 @@ static void relayRequest(uint8_t dev, bool on) {
   meshSetDeviceRelay(dev, on);
 }
 
+// Chalet: simulation requested per hole (the hole reports what it really runs with LF_SIM -> FLAG_SIM).
+struct SimReq { uint8_t node; uint8_t value; };
+static SimReq simReqs[48];
+static bool chSimAllSet = false;
+static uint8_t chSimAllValue = 0;
+static uint8_t simRate = 6;                  // fake trips per hour (Hall simulation)
+
+static uint8_t simRequested(uint8_t node) {
+  for (const auto& r : simReqs) if (r.node == node) return r.value;
+  return chSimAllSet ? chSimAllValue : 0;
+}
+
+void simRequest(uint8_t node, bool sonar, bool hall) {
+  const uint8_t v = (sonar || hall) ? simValueOf(sonar, hall, simRate) : 0;
+  if (node == 255) {
+    chSimAllSet = true; chSimAllValue = v;
+    memset(simReqs, 0, sizeof(simReqs));
+  } else {
+    SimReq* slot = nullptr;
+    for (auto& r : simReqs) if (r.node == node) slot = &r;
+    for (auto& r : simReqs) if (slot == nullptr && r.node == 0) slot = &r;
+    if (slot == nullptr) slot = &simReqs[0];
+    slot->node = node; slot->value = v;
+  }
+  meshSetHoleSim(node, v);
+}
+
+// OLED / serial: everything on (test holes on the hubs + fake sonar and trips on every hole) or off
+void simAll(bool on) {
+  settings.sonarSim = on; saveSettings(); meshSetSonarSim(on);
+  simRequest(255, on, on);
+}
+
+bool simAnyOn() {
+  if (settings.sonarSim) return true;
+  for (int i = 1; i < network.node_count; i++) if (HAS_FLAG(network.nodes[i].flags, FLAG_SIM)) return true;
+  return false;
+}
+
 // v2 (C9): the ESP-NOW callback runs in the Wi-Fi task. It only copies the frame into a
 // lock-free ring; processEspNowMessage() runs from loop() (loopEspNowRx). This removes the
 // v1 race where LoRa was driven from the Wi-Fi task while loop() used the radio too.
@@ -2766,6 +2816,27 @@ void checkSerialWifiConfig() {
     else if (a == "ON") hubHotspotOn();
     else if (a == "OFF") hubHotspotOff();
     else Serial.printf("Hotspot %s. Usage: HOTSPOT ON|OFF\n", wifiApActive ? "ON" : "off");
+  } else if (line.startsWith("SIM")) {
+    // v2 simulation (chalet): SIM ALL ON|OFF, SIM <hole> SONAR|HALL|BOTH|OFF, SIM RATE <trips/hour>, SIM
+    String a = line.substring(3); a.trim(); a.toUpperCase();
+    const int sp = a.indexOf(' ');
+    String w1 = sp > 0 ? a.substring(0, sp) : a, w2 = sp > 0 ? a.substring(sp + 1) : "";
+    w2.trim();
+    if (currentRole != ROLE_GATEWAY_OFFSHORE) {
+      Serial.println(F("Simulation is set on the chalet"));
+    } else if (w1 == "ALL" && (w2 == "ON" || w2 == "OFF")) {
+      simAll(w2 == "ON"); Serial.printf("Simulation of every hole: %s\n", w2.c_str());
+    } else if (w1 == "RATE" && w2.toInt() >= 1 && w2.toInt() <= 63) {
+      simRate = (uint8_t)w2.toInt(); Serial.printf("Fake trips: %u per hour (applies to the next SIM command)\n", simRate);
+    } else if (w1.toInt() > 0 && (w2 == "SONAR" || w2 == "HALL" || w2 == "BOTH" || w2 == "OFF")) {
+      simRequest((uint8_t)w1.toInt(), w2 == "SONAR" || w2 == "BOTH", w2 == "HALL" || w2 == "BOTH");
+      Serial.printf("Simulation hole %d: %s (sent in the beacon)\n", w1.toInt(), w2.c_str());
+    } else {
+      Serial.println(F("Usage (chalet): SIM ALL ON|OFF | SIM <hole> SONAR|HALL|BOTH|OFF | SIM RATE <1-63>"));
+      Serial.print(F("Holes running a simulation:"));
+      for (int i = 1; i < network.node_count; i++) if (HAS_FLAG(network.nodes[i].flags, FLAG_SIM)) Serial.printf(" %u", network.nodes[i].node_id);
+      Serial.println();
+    }
   } else if (line == "NETRESET") {
     resetNetworkSettings();   // same as holding PRG 10 s
   } else if (line.startsWith("EBMODE")) {
@@ -3011,6 +3082,12 @@ void setupWebServer() {
   server.on("/sonar", HTTP_GET, handleWebRoot);
   server.on("/api/sonar", HTTP_GET, handleWebApiSonar);
   server.on("/api/sonar", HTTP_POST, handleWebApiSonarPost);
+  server.on("/api/sonar/glance", HTTP_GET, []() {   // v2: every hole, ~3 min of sonar summaries (since = frame)
+    const uint16_t since = (uint16_t)strtoul(server.arg("since").c_str(), nullptr, 10);
+    server.send(200, "application/json", meshSonarGlanceJson(since));
+  });
+  server.on("/api/sim", HTTP_GET, handleWebApiSim);
+  server.on("/api/sim", HTTP_POST, handleWebApiSimPost);
   server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
   server.on("/api/sonar/bg", HTTP_GET, handleWebApiSonarBg);
 
@@ -4033,6 +4110,7 @@ void handleWebApi() {
     n["online"] = network.nodes[i].online;
     n["fish"] = HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON);
     n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
+    n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
     n["battery"] = network.nodes[i].battery_mv;
     n["rssi"] = network.nodes[i].rssi;
     // IMPROVEMENT 2: Include via tracking
@@ -5427,7 +5505,8 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
     n->online = true;
     n->last_seen = millis();
   }
-  if (u.flags & 0x01) SET_FLAG(n->flags, FLAG_LOW_BATTERY); else CLEAR_FLAG(n->flags, FLAG_LOW_BATTERY);
+  if (u.flags & MESH_LF_LOWBAT) SET_FLAG(n->flags, FLAG_LOW_BATTERY); else CLEAR_FLAG(n->flags, FLAG_LOW_BATTERY);
+  if (u.flags & MESH_LF_SIM) SET_FLAG(n->flags, FLAG_SIM); else CLEAR_FLAG(n->flags, FLAG_SIM);
   if (u.new_state == MESH_LS_FAULT) SET_FLAG(n->flags, FLAG_SENSOR_ERROR); else CLEAR_FLAG(n->flags, FLAG_SENSOR_ERROR);
   if (fish && !wasFish) {
     SET_FLAG(n->flags, FLAG_FISH_ON);
@@ -5474,23 +5553,32 @@ void meshLoop() {
       for (int i = 0; i < network.node_count; i++) {
         const NodeState& n = network.nodes[i];
         const bool self = (i == 0);
-        if (self && !HAS_LOCAL_SENSOR) continue;
+        const uint8_t own_sim = self ? hubHoleSim(NODE_ID) : 0;
+        if (self && !HAS_LOCAL_SENSOR && !own_sim) continue;
         if (!self && !n.initialized) continue;
         const uint16_t mv = self ? localBatteryMv : n.battery_mv;
-        meshHubObserveNode(n.node_id, lineStateOf(n, self), 0,
-                           HAS_FLAG(n.flags, FLAG_LOW_BATTERY) ? 0x01 : 0x00, batteryMvToPercent(mv));
+        uint8_t st = lineStateOf(n, self);
+        uint8_t fl = HAS_FLAG(n.flags, FLAG_LOW_BATTERY) ? MESH_LF_LOWBAT : 0;
+        if (self) { if (own_sim) fl |= MESH_LF_SIM; if (hubSimTripped(NODE_ID)) st = MESH_LS_TRIPPED; }
+        else if (HAS_FLAG(n.flags, FLAG_SIM)) fl |= MESH_LF_SIM;
+        meshHubObserveNode(n.node_id, st, 0, fl, batteryMvToPercent(mv));
       }
     }
     if (meshPollReset()) networkResetFromChalet();
     sonarHubLoop();
     meshEbTick();   // v2: hub packet on the ESP-NOW backbone when the transport policy says so
-    uint8_t dev; bool on;
-    if (meshPollRelayCmd(dev, on)) {   // CMD_SET_RELAY from the chalet: this hub, or one of its tip-ups
-      if (dev == NODE_ID) {
-        settings.ebRelay = on; saveSettings(); meshSetEbRelay(on);
-        Serial.printf("Backbone relay %s (set by the chalet)\n", on ? "ON" : "off");
-      } else {
-        devCmdQueue(dev, DEVCMD_RELAY, on ? 1 : 0);
+    uint8_t cmd, dev, val;
+    while (meshPollDevCmd(cmd, dev, val)) {   // from the chalet beacon: this hub, its holes, or its tip-ups
+      if (cmd == MESH_CMD_SET_RELAY) {
+        const bool on = val != 0;
+        if (dev == NODE_ID) {
+          settings.ebRelay = on; saveSettings(); meshSetEbRelay(on);
+          Serial.printf("Backbone relay %s (set by the chalet)\n", on ? "ON" : "off");
+        } else {
+          devCmdQueue(dev, DEVCMD_RELAY, on ? 1 : 0);
+        }
+      } else if (cmd == MESH_CMD_SET_SIM) {
+        hubSimApply(dev, val);
       }
     }
   } else {
@@ -5512,7 +5600,8 @@ void meshLoop() {
           const bool fish = (snap[i].state == MESH_LS_TRIPPED || snap[i].state == MESH_LS_RUNNING);
           mismatch = (fish != (bool)HAS_FLAG(n0.flags, FLAG_FISH_ON)) ||
                      ((snap[i].state == MESH_LS_OFFLINE) == n0.online) ||
-                     ((snap[i].state == MESH_LS_FAULT) != (bool)HAS_FLAG(n0.flags, FLAG_SENSOR_ERROR));
+                     ((snap[i].state == MESH_LS_FAULT) != (bool)HAS_FLAG(n0.flags, FLAG_SENSOR_ERROR)) ||
+                     (((snap[i].flags & MESH_LF_SIM) != 0) != (bool)HAS_FLAG(n0.flags, FLAG_SIM));
         }
         if (mismatch) {
           MeshNodeUpdate fix = {snap[i].node, snap[i].owner, 0xFF, snap[i].state, snap[i].turns, snap[i].flags};
@@ -5663,21 +5752,104 @@ static void sendSonarCtrl(bool sim, uint8_t focus) {
   esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
 }
 
+// =============================================================================================
+// v2 SIMULATION PER HOLE (hub side, docs/SONAR_SIM.md)
+// The chalet sends CMD_SET_SIM (hole, value) in the beacon. The hub applies it to its own hole and to its
+// virtual holes, and forwards it to a real tip-up (MSG_DEV_CMD DEVCMD_SIM) after that tip-up's next message.
+// value: bit0 fake sonar, bit1 fake Hall trips, bits 2-7 trips per hour (0 = 6). Fake holes report LF_SIM.
+// =============================================================================================
+struct HoleSim { uint8_t node; uint8_t value; bool tripped; uint32_t until_ms, next_ms; };
+static HoleSim hubSims[8];                   // own hole + virtual holes
+static bool simAllSet = false;
+static uint8_t simAllValue = 0;              // last "every hole" value (applies to holes that appear later)
+static bool realSonarSim = false;            // a real tip-up of this pocket was asked for fake sonar
+
+static HoleSim* hubSimSlot(uint8_t node, bool create) {
+  for (auto& s : hubSims) if (s.node == node) return &s;
+  if (!create) return nullptr;
+  for (auto& s : hubSims) if (s.node == 0) { memset(&s, 0, sizeof(s)); s.node = node; s.value = simAllSet ? simAllValue : 0; return &s; }
+  return nullptr;
+}
+
+static uint8_t hubHoleSim(uint8_t node) {
+  const HoleSim* s = hubSimSlot(node, false);
+  return s ? s->value : (simAllSet ? simAllValue : 0);
+}
+
+static bool isMyVirtualHole(uint8_t node) {
+  for (uint8_t k = 0; k < 8; k++) if (meshSonarVirtualId(NODE_ID, k) == node) return true;
+  return false;
+}
+
+static void hubSimApply(uint8_t target, uint8_t value) {
+  if (target == 255) {
+    simAllSet = true; simAllValue = value;
+    for (auto& s : hubSims) if (s.node) { s.value = value; s.tripped = false; s.next_ms = 0; }
+    for (int i = 1; i < network.node_count; i++) {
+      const NodeState& n = network.nodes[i];
+      if (n.initialized && n.node_id != 0 && n.node_id < 128) devCmdQueue(n.node_id, DEVCMD_SIM, value);
+    }
+    realSonarSim = (value & MESH_SIM_SONAR) != 0;
+  } else if (target == NODE_ID || isMyVirtualHole(target)) {
+    HoleSim* s = hubSimSlot(target, true);
+    if (s) { s->value = value; s->tripped = false; s->next_ms = 0; }
+  } else {
+    devCmdQueue(target, DEVCMD_SIM, value);
+    if (value & MESH_SIM_SONAR) realSonarSim = true;
+  }
+  Serial.printf("Simulation: hole %u -> sonar %s, Hall trips %s (%u/h)\n", target, (value & 1) ? "on" : "off",
+                (value & 2) ? "on" : "off", (unsigned)((value >> 2) ? (value >> 2) : 6));
+}
+
+// Simulated Hall trip of the hub's own hole or a virtual hole: random start, flag up 20-90 s.
+static bool hubSimTripped(uint8_t node) {
+  const uint8_t v = hubHoleSim(node);
+  HoleSim* s = hubSimSlot(node, (v & MESH_SIM_HALL) != 0);
+  if (!(v & MESH_SIM_HALL) || s == nullptr) { if (s) s->tripped = false; return false; }
+  const uint32_t now = millis();
+  const uint32_t mean = 3600000UL / ((v >> 2) ? (v >> 2) : 6);
+  if (s->tripped && static_cast<int32_t>(now - s->until_ms) >= 0) { s->tripped = false; s->next_ms = 0; }
+  if (!s->tripped) {
+    if (s->next_ms == 0) { s->next_ms = now + mean / 2 + esp_random() % (mean + 1); if (s->next_ms == 0) s->next_ms = 1; }
+    if (static_cast<int32_t>(now - s->next_ms) >= 0) { s->tripped = true; s->until_ms = now + 20000UL + esp_random() % 70001UL; }
+  }
+  return s->tripped;
+}
+
 void sonarHubLoop() {
   static unsigned long lastTick = 0, lastCtrl = 0, lastObserve = 0, simOffSince = 0;
   static bool wasSim = false;
   static uint8_t activeVirt = 0;
-  const bool sim = meshSonarSim();
+  static icemesh::sonar::SonarSource* ownSonar = nullptr;   // fake sonar of the hub's own hole
+  const bool global = meshSonarSim();                       // chalet: test holes (virtual) on
+  const bool sim = global || realSonarSim;                  // tip-ups may run fake sonar
   const uint8_t focus = meshFocusNode();
+
+  // own hole: fake sonar when asked (independent of the virtual holes)
+  if (hubHoleSim(NODE_ID) & MESH_SIM_SONAR) {
+    static unsigned long ownTick = 0;
+    if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); ownTick = millis(); }
+    if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
+    while (millis() - ownTick >= 250UL) {
+      ownTick += 250UL;
+      icemesh::sonar::Block out[2];
+      const uint8_t n = ownSonar->tick(focus == NODE_ID, out, 2);
+      for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
+    }
+  }
 
   // control for the tip-up nodes: every second while on, at once after a node transmitted,
   // and for 10 s after the test mode is turned off (so awake nodes go back to deep sleep)
-  if (sim != wasSim) {
-    if (!sim) {
-      simOffSince = millis();
+  static bool wasGlobal = false;
+  if (global != wasGlobal) {   // test holes off: report them gone
+    if (!global) {
       for (uint8_t k = 0; k < activeVirt; k++) meshHubObserveNode(meshSonarVirtualId(NODE_ID, k), MESH_LS_OFFLINE, 0, 0, 0);
       activeVirt = 0;
     }
+    wasGlobal = global;
+  }
+  if (sim != wasSim) {
+    if (!sim) simOffSince = millis();
     wasSim = sim;
   }
   const bool recentOff = !sim && simOffSince != 0 && millis() - simOffSince < 10000UL;
@@ -5687,22 +5859,27 @@ void sonarHubLoop() {
     lastCtrl = millis();
   }
   sonarCtrlKick = false;
-  if (!sim) return;
+  if (!global) return;
 
-  // virtual sonar nodes
+  // virtual holes (test holes generated by this hub): fake sonar by default, fake trips when asked
   const uint8_t want = settings.sonarVirtualNodes > 4 ? 4 : settings.sonarVirtualNodes;
   if (want > 0 && sonarVirt == nullptr) sonarVirt = new icemesh::sonar::SonarSource[4];
   while (activeVirt > want) { activeVirt--; meshHubObserveNode(meshSonarVirtualId(NODE_ID, activeVirt), MESH_LS_OFFLINE, 0, 0, 0); }
   while (activeVirt < want) {
     const uint8_t id = meshSonarVirtualId(NODE_ID, activeVirt);
     sonarVirt[activeVirt].begin(id, (uint32_t)id * 7919UL + NODE_ID, (uint16_t)esp_random());
-    meshHubObserveNode(id, MESH_LS_IDLE, 0, 0, 100);
+    HoleSim* hs = hubSimSlot(id, true);
+    if (hs && !simAllSet) hs->value = MESH_SIM_SONAR;   // a test hole has fake sonar unless told otherwise
+    meshHubObserveNode(id, MESH_LS_IDLE, 0, MESH_LF_SIM, 100);
     activeVirt++;
   }
   if (activeVirt == 0) return;
   if (millis() - lastObserve >= 1000UL) {
     lastObserve = millis();
-    for (uint8_t k = 0; k < activeVirt; k++) meshHubObserveNode(meshSonarVirtualId(NODE_ID, k), MESH_LS_IDLE, 0, 0, 100);
+    for (uint8_t k = 0; k < activeVirt; k++) {
+      const uint8_t id = meshSonarVirtualId(NODE_ID, k);
+      meshHubObserveNode(id, hubSimTripped(id) ? MESH_LS_TRIPPED : MESH_LS_IDLE, 0, MESH_LF_SIM, 100);
+    }
   }
   if (millis() - lastTick > 1000UL) lastTick = millis() - 250UL;   // loop() was busy: don't burst
   uint8_t budget = 2;
@@ -5711,6 +5888,7 @@ void sonarHubLoop() {
     for (uint8_t k = 0; k < activeVirt; k++) {
       icemesh::sonar::Block out[2];
       const uint32_t t0 = micros();
+      if (!(hubHoleSim(sonarVirt[k].node()) & MESH_SIM_SONAR)) continue;
       const uint8_t n = sonarVirt[k].tick(focus == sonarVirt[k].node(), out, 2);
       const uint32_t dt = micros() - t0;
       if (dt > sonarTickUsMax) sonarTickUsMax = dt;
@@ -5722,6 +5900,48 @@ void sonarHubLoop() {
 
 void handleWebApiSonar() {
   server.send(200, "application/json", meshSonarListJson());
+}
+
+// v2 simulation per hole. GET: {"virtual":bool,"rate":n,"all":v|-1,"holes":[{"id","name","req","on"}]}
+// POST: {"hole":id|255,"sonar":bool,"hall":bool} | {"all":bool} | {"virtual":bool} | {"rate":1-63}
+static String simJson() {
+  String s;
+  s.reserve(160 + network.node_count * 48);
+  s = "{\"virtual\":"; s += settings.sonarSim ? "true" : "false";
+  s += ",\"rate\":"; s += simRate;
+  s += ",\"all\":"; s += chSimAllSet ? String(chSimAllValue) : String(-1);
+  s += ",\"holes\":[";
+  bool first = true;
+  for (int i = 0; i < network.node_count; i++) {
+    const NodeState& n = network.nodes[i];
+    if (n.node_id == NODE_ID || n.node_id == 0 || !n.initialized) continue;
+    if (!first) s += ",";
+    first = false;
+    s += "{\"id\":"; s += n.node_id;
+    s += ",\"name\":\""; for (const char* c = n.name; *c; c++) if (*c != '"' && *c != '\\') s += *c; s += "\"";
+    s += ",\"req\":"; s += simRequested(n.node_id);
+    s += ",\"on\":"; s += HAS_FLAG(n.flags, FLAG_SIM) ? "true" : "false";
+    s += ",\"virtual\":"; s += n.node_id >= 128 ? "true" : "false";
+    s += "}";
+  }
+  s += "]}";
+  return s;
+}
+
+void handleWebApiSim() { server.send(200, "application/json", simJson()); }
+
+void handleWebApiSimPost() {
+  StaticJsonDocument<192> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { server.send(400, "application/json", "{\"error\":\"simulation is set on the chalet\"}"); return; }
+  if (doc.containsKey("rate")) { const int r = doc["rate"].as<int>(); if (r >= 1 && r <= 63) simRate = (uint8_t)r; }
+  if (doc.containsKey("virtual")) { settings.sonarSim = doc["virtual"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
+  if (doc.containsKey("all")) simAll(doc["all"].as<bool>());
+  if (doc.containsKey("hole")) {
+    const int h = doc["hole"].as<int>();
+    if (h > 0 && h <= 255) simRequest((uint8_t)h, doc["sonar"] | false, doc["hall"] | false);
+  }
+  server.send(200, "application/json", simJson());
 }
 
 void handleWebApiSonarPost() {

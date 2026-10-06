@@ -123,6 +123,28 @@ static void test_store_dedup_restart_bg(void) {
   TEST_ASSERT_EQUAL(bad_before + 1, st.blocks_bad);
 }
 
+static void test_store_history(void) {
+  SonarStore<4, 32, 10> st;
+  SonarSource src; src.begin(140, 7);
+  Block out[2];
+  uint16_t frame = 1; int bases = 0;
+  for (int k = 0; k < 4 * 60; k++) {            // 60 s of BASE blocks (one per 2 s + fish onsets)
+    const uint8_t n = src.tick(false, out, 2);
+    for (uint8_t i = 0; i < n; i++) { st.onSonarBlock(3, out[i].data, out[i].len, frame); bases++; }
+    if (k % 4 == 3) frame++;
+  }
+  BaseRec h[16];
+  const uint8_t n = st.history(140, h, 16);
+  TEST_ASSERT_EQUAL(10, n);                     // capped to HIST, newest kept
+  for (uint8_t k = 1; k < n; k++) TEST_ASSERT_TRUE(seqDiff(h[k].frame, h[k - 1].frame) >= 0);   // oldest first
+  TEST_ASSERT_TRUE(bases >= 30);
+  const Summary& s = st.find(140)->sum;
+  TEST_ASSERT_EQUAL(s.bottom_cm, h[n - 1].bottom_cm);
+  TEST_ASSERT_EQUAL(s.n_list, h[n - 1].n);
+  for (uint8_t k = 0; k < s.n_list; k++) TEST_ASSERT_EQUAL(packTarget(s.list[k]), h[n - 1].t[k]);
+  TEST_ASSERT_EQUAL(0, st.history(99, h, 16));
+}
+
 static void test_relay_keeps_whole_sonar_blocks(void) {
   // remote hub 7: 10 line records + 3 sonar blocks; relay room too small for all of it
   LineTable<24> t7;
@@ -186,6 +208,7 @@ int main(int, char**) {
   RUN_TEST(test_outbox_whole_blocks_and_expiry);
   RUN_TEST(test_outbox_eviction);
   RUN_TEST(test_store_dedup_restart_bg);
+  RUN_TEST(test_store_history);
   RUN_TEST(test_relay_keeps_whole_sonar_blocks);
   RUN_TEST(test_planner_focus_allowance);
   return UNITY_END();

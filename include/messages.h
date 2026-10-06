@@ -29,7 +29,8 @@ enum NodeRole : uint8_t {
 #define FLAG_FISH_ON        (1 << 0)
 #define FLAG_LOW_BATTERY    (1 << 1)
 #define FLAG_FIRST_BOOT     (1 << 2)
-#define FLAG_CONFIG_MODE    (1 << 3)
+#define FLAG_SIM            (1 << 3)   // v2: this node runs a simulation (fake sonar / fake trips); was FLAG_CONFIG_MODE, never used
+#define FLAG_CONFIG_MODE    FLAG_SIM   // legacy name
 #define FLAG_LORA_OK        (1 << 4)
 #define FLAG_ESPNOW_OK      (1 << 5)
 #define FLAG_SENSOR_ERROR   (1 << 6)
@@ -231,14 +232,14 @@ typedef struct __attribute__((packed)) {
 
 // v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
 // (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
-enum : uint8_t { DEVCMD_RELAY = 1 };
+enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2 };   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;
   uint8_t  msg_type;        // MSG_DEV_CMD
   uint8_t  target;          // node ID
   uint8_t  cmd;             // DEVCMD_*
-  uint8_t  value;           // relay: 1 on, 0 off
+  uint8_t  value;           // relay: 1 on, 0 off; sim: see DEVCMD_SIM
 } DevCmdMessage;
 
 // Reset command message (8 bytes) - broadcast to all nodes
