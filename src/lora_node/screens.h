@@ -75,7 +75,7 @@ struct ScreenModel {
   bool menu;                 // CardKB menu open: opt holds the list of pages
 };
 
-// Draws one frame. `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).
+// Draws one frame into the buffer (the caller sends it: the firmware skips unchanged frames). `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).
 // `blink` toggles every 500 ms. `sub` = sub-page (holes list paging).
 void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool blink);
 uint8_t screenHolesPages(const ScreenModel& m);

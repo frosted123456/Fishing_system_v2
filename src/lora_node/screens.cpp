@@ -474,8 +474,8 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
   u8g2_SetFontMode(u, 1);
   bool fish = false;
   for (uint8_t i = 0; i < m.n_holes; i++) fish |= m.holes[i].state == SH_FISH;
-  if (fish && !m.silenced) { drawAlert(u, m, blink); u8g2_SendBuffer(u); return; }
-  if (m.menu) { optionsPage(u, m, blink, 255); u8g2_SendBuffer(u); return; }   // CardKB menu (list of pages)
+  if (fish && !m.silenced) { drawAlert(u, m, blink); return; }
+  if (m.menu) { optionsPage(u, m, blink, 255); return; }   // CardKB menu (list of pages)
   switch (page) {
     case PG_HOLES: holesPage(u, m, sub, blink); footer(u, m, page); break;
     case PG_SONAR: sonarPage(u, m, sub, blink); break;
@@ -489,5 +489,4 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
       if (homeRows(m) <= 4) footer(u, m, PG_HOME); else pageDots(u, PG_HOME);   // 5 pocket rows: no room for the footer
       break;
   }
-  u8g2_SendBuffer(u);
 }

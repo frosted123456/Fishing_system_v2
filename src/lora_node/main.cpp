@@ -113,8 +113,20 @@
 // HARDWARE OBJECTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Use software I2C for reliable custom pin operation on Heltec V3
+// v2: hardware I2C for the OLED (v1 used software I2C: one full screen took tens of ms of bit-banging
+// in loop(), 5 times a second, which slowed the web page). Set OLED_HW_I2C to 0 to go back to software
+// I2C if a board shows a blank screen. OLED_I2C_HZ: 400 kHz = SSD1306 fast mode (spec).
+#ifndef OLED_HW_I2C
+#define OLED_HW_I2C 1
+#endif
+#ifndef OLED_I2C_HZ
+#define OLED_I2C_HZ 400000UL
+#endif
+#if OLED_HW_I2C
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, OLED_RST, OLED_SCL, OLED_SDA);
+#else
 U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, OLED_SCL, OLED_SDA, OLED_RST);
+#endif
 // LoRa radio (SX1262) is owned by mesh_radio.cpp (TDMA radio task)
 WebServer server(WEB_SERVER_PORT);
 Preferences preferences;
@@ -338,6 +350,7 @@ void readBattery();
 // Display sleep/wake functions
 void wakeDisplay();
 void sleepDisplay();
+extern bool scrDirty;
 void registerActivity();
 
 void loopLocalSensor();
@@ -635,7 +648,31 @@ void setup() {
 // MAIN LOOP
 // ═══════════════════════════════════════════════════════════════════════════
 
+// v2 loop timing (serial PERF): where loop() spends its time, to find what makes the page or screen slow
+enum PerfSlot : uint8_t { PF_LOOP = 0, PF_DISPLAY, PF_WEB, PF_DEMO, PF_MESH, PF_COUNT };
+struct PerfAcc { uint32_t sum_us, max_us, n; };
+static PerfAcc perfAcc[PF_COUNT];
+static uint32_t perfSince = 0;
+struct PerfScope {
+  uint8_t i; uint32_t t0;
+  explicit PerfScope(uint8_t k) : i(k), t0(micros()) {}
+  ~PerfScope() { const uint32_t d = micros() - t0; PerfAcc& a = perfAcc[i]; a.sum_us += d; if (d > a.max_us) a.max_us = d; a.n++; }
+};
+void perfPrint() {
+  static const char* const NAMES[PF_COUNT] = {"loop", "display", "web", "demo", "mesh"};
+  const uint32_t ms = millis() - perfSince;
+  Serial.printf("Loop timing over %lu s (avg / max per call, share of time):\n", (unsigned long)(ms / 1000));
+  for (uint8_t i = 0; i < PF_COUNT; i++) {
+    const PerfAcc& a = perfAcc[i];
+    Serial.printf("  %-8s %6lu calls  %7.2f ms / %7.2f ms  %5.1f %%\n", NAMES[i], (unsigned long)a.n,
+                  a.n ? a.sum_us / 1000.0f / a.n : 0.0f, a.max_us / 1000.0f, ms ? a.sum_us / 10.0f / ms : 0.0f);
+  }
+  Serial.printf("  free heap %u B, min %u B\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+  memset(perfAcc, 0, sizeof(perfAcc)); perfSince = millis();
+}
+
 void loop() {
+  PerfScope perfLoop(PF_LOOP);
   // BUG FIX #8: Feed hardware watchdog to prevent reset
   esp_task_wdt_reset();
 
@@ -659,7 +696,7 @@ void loop() {
   if (espNowReady) loopEspNowRx();
 
   // v2: TDMA mesh <-> node table, silence, commands, counters (the radio runs in its own task)
-  meshLoop();
+  { PerfScope p(PF_MESH); meshLoop(); }
 
   // Check for auto-unsilence timeout
   loopAutoUnsilence();
@@ -702,8 +739,8 @@ void loop() {
       break;
 
     case ROLE_GATEWAY_OFFSHORE:
-      meshDemoTick();   // v2: demo network (fake hubs inside this box), when on
-      if (settings.webServerEnabled) loopWebServer();
+      { PerfScope p(PF_DEMO); meshDemoTick(); }   // v2: demo network (fake hubs inside this box), when on
+      if (settings.webServerEnabled) { PerfScope p(PF_WEB); loopWebServer(); }
       checkWiFiStatus();
       checkSerialWifiConfig();
 
@@ -736,7 +773,7 @@ void loop() {
   }
   
   // Display current screen
-  loopDisplay();
+  { PerfScope p(PF_DISPLAY); loopDisplay(); }
   loopBuzzer();
   loopNodeTimeout();
 
@@ -763,7 +800,10 @@ void setupDisplay() {
   digitalWrite(VEXT_PIN, LOW);  // LOW = power ON
   delay(100);  // Let power stabilize
 
-  // Initialize display (software I2C handles pins internally)
+  // Initialize display (I2C pins from the constructor; hardware I2C: bus clock first)
+#if OLED_HW_I2C
+  display.setBusClock(OLED_I2C_HZ);
+#endif
   display.begin();
   // v2 boot screen: firmware generation, role and build date, so the board says what it runs
   display.clearBuffer();
@@ -784,6 +824,7 @@ void setupDisplay() {
 
 void wakeDisplay() {
   if (!displaySleeping) return;
+  scrDirty = true;
 
   DEBUG_PRINTLN(F("Waking display..."));
 
@@ -872,6 +913,7 @@ void drawCurrentScreen() {
  * Used for: "Saved!", "Sent!", "Silenced", etc.
  */
 void showOverlayMessage(const char* message, uint16_t delayMs) {
+  scrDirty = true;
   display.clearBuffer();
   display.setFont(u8g2_font_6x10_tr);
 
@@ -2901,6 +2943,8 @@ void checkSerialWifiConfig() {
     } else {
       Serial.println(F("Usage (chalet only): EBMODE NORMAL|LR  (reboot; LR removes the phone hotspot)"));
     }
+  } else if (line == "PERF") {
+    perfPrint();   // v2: loop timing since the last PERF
   } else if (line == "RADIO") {
     meshPrintStatus(Serial);
   } else if (line == "RADIO RESET") {
@@ -3663,15 +3707,18 @@ function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of 
 
 /* ---------- Server ---------- */
 function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
-function loadList() { fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+// v2: one request of each kind at a time (the ESP32 serves one request at a time; overlapping polls piled up)
+let listBusy = false, pingBusy = false;
+function loadList() { if (listBusy) return; listBusy = true; fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}).then(() => { listBusy = false; }); }
 function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }   // called by the suite with /api/status
 function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
 function loadPings() {
-  if (!focus) return; const n = focus;
+  if (!focus || pingBusy) return; const n = focus;
+  pingBusy = true;
   fetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
     if (n !== focus) return;
     (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
-  }).catch(() => {});
+  }).catch(() => {}).then(() => { pingBusy = false; });
 }
 
 /* ---------- Holes ---------- */
@@ -3957,7 +4004,8 @@ setInterval(() => {
   while (n-- && queue.length) addPing(queue.shift());
   render();
 }, 250);
-setInterval(() => { if (visible()) loadPings(); }, 700); setInterval(loadList, 2000);
+setInterval(() => { if (visible() && !document.hidden) loadPings(); }, 700);
+setInterval(() => { if (visible() && !document.hidden) loadList(); }, 2000);   // v2: only while the Sonar tab is shown
 let rz = null;
 new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length && visible()) render(); }); }).observe(document.body);
 window.sonarApi = {
@@ -3973,6 +4021,9 @@ syncControls(); loadList();
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const api = (url, body) => fetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+// v2: a poll is skipped while the same one is still waiting, and nothing polls while the page is hidden
+const busy = {};
+const poll = (key, fn) => () => { if (busy[key] || document.hidden) return; busy[key] = true; Promise.resolve(fn()).catch(() => {}).then(() => { busy[key] = false; }); };
 const SON = () => window.sonarApi;
 let st = null, tab = 'holes', soundOn = true, actx = null, lastFish = {}, radio = null;
 try { soundOn = localStorage.getItem('alertSound') !== 'false'; } catch (e) { /* private mode */ }
@@ -4027,7 +4078,7 @@ document.addEventListener('pointerdown', () => { if (soundOn) { audio(); setTime
 const fmtUp = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; };
 const nodeName = n => n.name || ('Hole ' + n.id);
 function loadStatus() {
-  api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') renderNetwork(); }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+  return api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') renderNetwork(); }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
 }
 function onStatus() {
   const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
@@ -4092,7 +4143,7 @@ function renderNodes() {
 /* ---------- Sonar at a glance: last ~3 min of every hole (summaries every 2 s) ---------- */
 const glance = { frame: 0, nodes: {} };
 function loadGlance() {
-  api('/api/sonar/glance?since=' + glance.frame).then(d => {
+  return api('/api/sonar/glance?since=' + glance.frame).then(d => {
     if (glance.frame && ((d.frame - glance.frame) & 0xFFFF) > 0x8000) { glance.frame = 0; glance.nodes = {}; return; }   // chalet restarted
     (d.nodes || []).forEach(x => {
       const g = glance.nodes[x.node] || (glance.nodes[x.node] = { recs: [] });
@@ -4154,7 +4205,7 @@ $('ngrid').addEventListener('click', e => {
 /* ---------- Radio tab ---------- */
 const TM = { off: 0, rotate: 1, 'SF9/500': 2, 'SF8/500': 3, 'SF7/500': 4 };
 const f1 = (x, d) => x === undefined || x === null ? '–' : (+x).toFixed(d || 0);
-function loadRadio() { api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+function loadRadio() { return api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
 function postRadio(o) { api('/api/radio', o).then(d => { radio = d; renderRadio(); }).catch(() => {}); }
 function renderRadio() {
   const d = radio; if (!d) return;
@@ -4255,7 +4306,7 @@ $('setForm').addEventListener('submit', e => {
 });
 /* ---------- Test & simulation ---------- */
 let sim = null;
-function loadSim() { api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }
+function loadSim() { return api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }
 function postSim(o) { api('/api/sim', o).then(d => { sim = d; renderSim(); }).catch(() => {}); }
 function renderSim() {
   if (!sim) return;
@@ -4298,10 +4349,11 @@ function renderAbout() {
 syncSound();
 showTab(initialTab());
 loadStatus();
-setInterval(loadStatus, 2000);
-setInterval(() => { if (tab === 'radio') loadRadio(); }, 2000);
-setInterval(() => { if (tab === 'settings') { loadRadio(); loadSim(); } }, 5000);
-setInterval(() => { if (tab === 'holes') loadGlance(); }, 2000);
+const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance);
+setInterval(pStatus, 2000);
+setInterval(() => { if (tab === 'radio') pRadio(); }, 2000);
+setInterval(() => { if (tab === 'settings') { pRadio(); pSim(); } }, 5000);
+setInterval(() => { if (tab === 'holes') pGlance(); }, 2000);
 })();
 </script>
 </body>
@@ -4854,6 +4906,7 @@ void loopCardKB() {
 // =============================================================================================
 static ScreenModel scr;
 static uint8_t scrPage = PG_HOME, scrSub = 0;
+bool scrDirty = true;                  // another screen used the display: resend the next frame
 static bool scrMenu = false;           // CardKB menu (list of pages) open
 static uint8_t scrMenuSel = 0;
 static uint32_t scrLastInput = 0;
@@ -5373,6 +5426,15 @@ static void scrDraw() {
   if (!scrPageAvailable(scrPage)) scrPage = PG_HOME;
   if (scrPage == PG_NETWORK && scr.radio_test) { drawRadioTest(); return; }   // radio test: detailed per-hub stats
   screenDraw(display.getU8g2(), scr, scrPage, scrSub, ((millis() / 500) % 2) == 0);
+  // v2: send only when the picture changed (or every 2 s, or after another screen used the display)
+  uint32_t h = 2166136261u;
+  const uint8_t* b = display.getBufferPtr();
+  for (int i = 0; i < 1024; i++) { h ^= b[i]; h *= 16777619u; }
+  static uint32_t lastSent = 0, lastHash = 0;
+  if (h != lastHash || scrDirty || millis() - lastSent > 2000UL) {
+    display.sendBuffer();
+    lastHash = h; lastSent = millis(); scrDirty = false;
+  }
 }
 
 // =============================================================================================
@@ -5438,6 +5500,7 @@ void resetNetworkSettings() {
 
 // Hold bar: 0..10 s, marks at 3 s and 10 s, label of what releasing now does.
 static void drawHoldBar(uint32_t held) {
+  scrDirty = true;
   display.clearBuffer();
   display.setFont(u8g2_font_6x10_tr);
   const bool hub = currentRole != ROLE_GATEWAY_OFFSHORE;
@@ -6406,6 +6469,7 @@ void meshLoop() {
 
 // OLED screen shown instead of the live status while the radio test mode is on.
 void drawRadioTest() {
+  scrDirty = true;
   display.clearBuffer();
   display.setFont(u8g2_font_5x7_tr);
   char line[32];
