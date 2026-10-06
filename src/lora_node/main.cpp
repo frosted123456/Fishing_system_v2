@@ -60,6 +60,7 @@
 #include "messages.h"
 #include <rx_ring.h>
 #include "mesh_radio.h"
+#include "screens.h"
 #include <sonar_sim.h>             // v2: fake sonar for the test mode (virtual sonar nodes on hubs)
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -341,6 +342,11 @@ void registerActivity();
 
 void loopLocalSensor();
 void loopDisplay();
+static void scrDraw();
+static void apName(char* out, size_t n);
+void drawRadioTest();
+static void scrStep(int dir);
+static void scrAction();
 void loopWebServer();
 void loopBuzzer();
 void loopNodeTimeout();
@@ -817,8 +823,7 @@ void loopDisplay() {
   if (millis() - lastDisplayUpdate < 200) return;
   lastDisplayUpdate = millis();
 
-  if (connectInfoUntil != 0 && static_cast<int32_t>(connectInfoUntil - millis()) > 0 && !activeAlerts) { drawConnectInfo(); return; }
-  drawCurrentScreen();
+  scrDraw();   // v2 screens (the v1 menu screens below are no longer reached)
 }
 
 // Route to appropriate screen drawing function
@@ -4600,6 +4605,156 @@ void loopCardKB() {
  * - Long press (2+ seconds): Wake display if sleeping
  */
 // =============================================================================================
+// v2 OLED (src/lora_node/screens.cpp, docs/SCREENS.md): the model is built from the live state at
+// each redraw (5 Hz); the drawing code is the one rendered on the PC for the mockups.
+// Short press / CardKB right = next page, double press / Enter = the page's action (written at the
+// bottom), during an alert the button silences. Pages return to Home after 60 s.
+// =============================================================================================
+static ScreenModel scr;
+static uint8_t scrPage = PG_HOME, scrSub = 0;
+static uint32_t scrLastInput = 0;
+static MeshPingLite scrPings[118];
+
+static uint8_t holeStateOf(const NodeState& n) {
+  if (!n.online) return SH_OFFLINE;
+  if (HAS_FLAG(n.flags, FLAG_FISH_ON)) return SH_FISH;
+  if (HAS_FLAG(n.flags, FLAG_SENSOR_ERROR)) return SH_FAULT;
+  if (HAS_FLAG(n.flags, FLAG_LOW_BATTERY)) return SH_LOWBAT;
+  return SH_OK;
+}
+
+static void buildScreenModel() {
+  ScreenModel& m = scr;
+  const bool chalet = currentRole == ROLE_GATEWAY_OFFSHORE;
+  const uint32_t now = millis();
+  m.chalet = chalet; m.self_id = NODE_ID; m.feet = true; m.uptime_s = now / 1000;
+  // holes, grouped by pocket (owner hub), the hub's own hole first
+  static MeshNodeSnapshot snap[48];
+  const uint8_t ns = chalet ? meshNodeSnapshot(snap, 48) : 0;
+  m.n_holes = 0;
+  for (int i = 0; i < network.node_count && m.n_holes < 48; i++) {
+    const NodeState& n = network.nodes[i];
+    if (n.node_id == 0 || !n.initialized) continue;
+    if (n.node_id == NODE_ID && (chalet || (!HAS_LOCAL_SENSOR && !hubHoleSim(NODE_ID)))) continue;
+    ScrHole& h = m.holes[m.n_holes];
+    memset(&h, 0, sizeof(h));
+    h.id = n.node_id; h.hub = chalet ? 0 : NODE_ID;
+    for (uint8_t k = 0; k < ns; k++) if (snap[k].node == n.node_id) h.hub = snap[k].owner;
+    if (h.hub == 0) h.hub = n.node_id;
+    snprintf(h.name, sizeof(h.name), "%s", n.name);
+    h.state = holeStateOf(n);
+    if (n.node_id == NODE_ID && hubSimTripped(NODE_ID)) h.state = SH_FISH;
+    h.batt = n.battery_mv ? batteryMvToPercent(n.battery_mv) : 255;
+    h.since_s = (h.state == SH_FISH && n.fish_on_time) ? (now - n.fish_on_time) / 1000 : 0;
+    h.sim = HAS_FLAG(n.flags, FLAG_SIM) ? 1 : 0;
+    h.fish = -1;
+    MeshSonarLite sl;
+    if (chalet && meshSonarSummary(n.node_id, sl)) {
+      h.son.valid = true; h.son.bottom_cm = sl.bottom_cm; h.son.hard = sl.hard; h.son.activity = sl.activity; h.son.n = 0; h.fish = 0;
+      for (uint8_t k = 0; k < sl.n && k < 5; k++) {
+        ScrTarget& t = h.son.t[h.son.n++];
+        t.depth_cm = sl.t[k] & 0x7FF; t.level = (sl.t[k] >> 11) & 3; t.bait = (sl.t[k] >> 13) & 1;
+        if (!t.bait) h.fish++;
+      }
+    }
+    m.n_holes++;
+  }
+  // sort by pocket, the hub's own hole first, then ID
+  for (uint8_t a = 1; a < m.n_holes; a++)
+    for (uint8_t b = a; b > 0; b--) {
+      const ScrHole& x = m.holes[b - 1]; const ScrHole& y = m.holes[b];
+      const uint32_t kx = (uint32_t)x.hub << 9 | (x.id == x.hub ? 0 : 256) | x.id, ky = (uint32_t)y.hub << 9 | (y.id == y.hub ? 0 : 256) | y.id;
+      if (kx <= ky) break;
+      const ScrHole t = m.holes[b - 1]; m.holes[b - 1] = m.holes[b]; m.holes[b] = t;
+    }
+  // network
+  m.setup_s = meshSetupArmInS();
+  m.lora_ch = meshLoraChannel() + 1; m.lora_mhz_x10 = (uint16_t)(meshLoraChannelMHz(meshLoraChannel()) * 10.0f + 0.5f);
+  m.ch_auto = meshLoraChannelSetting() == MESH_CH_AUTO; m.transport = meshTransport();
+  uint8_t busy[8]; meshChannelBusy(busy); m.busy_pct = busy[meshLoraChannel() & 7];
+  m.silenced = alertsSilenced; m.silence_s = (alertsSilenced && silenceExpireTime > now) ? (silenceExpireTime - now) / 1000 : 0;
+  m.n_hubs = 0;
+  if (chalet) {
+    MeshHubLink hl[10];
+    const uint8_t nh = meshHubLinks(hl, 10);
+    for (uint8_t k = 0; k < nh; k++) {
+      ScrHubLink& o = m.hubs[m.n_hubs++];
+      o.id = hl[k].id; o.lora_rssi = hl[k].rssi; o.eb_hops = hl[k].hops;
+      o.lora_ok = hl[k].lora_age_s >= 0 && hl[k].lora_age_s < 30; o.eb_ok = hl[k].eb_age_s >= 0 && hl[k].eb_age_s < 30;
+    }
+  } else {
+    MeshHubView v; meshHubView(v);
+    m.master_heard = v.synced; m.beacon_rssi = v.beacon_rssi; m.via_echo = v.from_echo; m.on_backup = v.eb_on;
+    m.hotspot = wifiApActive; m.hotspot_min = hubHotspotUntil ? (hubHotspotUntil - now) / 60000UL + 1 : 0;
+  }
+  // focus (chalet)
+  m.focus_node = meshFocusNode(); m.n_cols = 0; m.bait_cm = 0;
+  if (chalet && m.focus_node && scrPage == PG_FOCUS) {
+    const uint8_t np = meshFocusPings(m.focus_node, scrPings, 118);
+    for (uint8_t k = 0; k < np; k++) {
+      ScrPingCol& c = m.cols[m.n_cols++];
+      c.bottom_cm = scrPings[k].bottom_cm; c.n = scrPings[k].n;
+      for (uint8_t t = 0; t < c.n; t++) { c.d[t] = scrPings[k].d[t]; c.lv[t] = scrPings[k].lv[t]; if (scrPings[k].bait_mask & (1u << t)) m.bait_cm = c.d[t]; }
+    }
+  }
+  // connect
+  char ssid[32]; apName(ssid, sizeof(ssid));
+  snprintf(m.ssid, sizeof(m.ssid), "%s", ssid); snprintf(m.pass, sizeof(m.pass), "%s", WIFI_PASSWORD);
+  m.sta = wifiStaConnected;
+  snprintf(m.url, sizeof(m.url), "http://%s", wifiStaConnected ? staIpAddress.c_str() : apIpAddress.c_str());
+  m.radio_test = meshTestMode(); m.radio_test_name = meshTestModeName(m.radio_test);
+}
+
+static bool scrPageAvailable(uint8_t p) {
+  const bool chalet = currentRole == ROLE_GATEWAY_OFFSHORE;
+  if (!chalet && (p == PG_SONAR || p == PG_FOCUS || p == PG_TEST)) return false;   // the hub has no sonar store
+  if (p == PG_SONAR || p == PG_FOCUS) { for (uint8_t i = 0; i < scr.n_holes; i++) if (scr.holes[i].son.valid) return true; return false; }
+  return true;
+}
+
+static void scrStep(int dir) {
+  for (uint8_t k = 0; k < PG_COUNT; k++) {
+    scrPage = (uint8_t)((scrPage + PG_COUNT + dir) % PG_COUNT);
+    if (scrPageAvailable(scrPage)) break;
+  }
+  scrSub = 0;
+  scrLastInput = millis();
+}
+
+// double press / Enter: the action written at the bottom of the page
+static void scrAction() {
+  scrLastInput = millis();
+  switch (scrPage) {
+    case PG_HOME: if (alertsSilenced) { silenceAlerts(); showOverlayMessage("Unsilenced", 800); } break;
+    case PG_HOLES: scrSub = (uint8_t)((scrSub + 1) % screenHolesPages(scr)); break;
+    case PG_SONAR: scrSub = (uint8_t)((scrSub + 1) % screenSonarPages(scr)); break;
+    case PG_FOCUS: {
+      if (currentRole != ROLE_GATEWAY_OFFSHORE) break;
+      int cur = -1, first = -1, next = -1;
+      for (uint8_t i = 0; i < scr.n_holes; i++) {
+        if (!scr.holes[i].son.valid) continue;
+        if (first < 0) first = scr.holes[i].id;
+        if (cur >= 0 && next < 0) next = scr.holes[i].id;
+        if (scr.holes[i].id == scr.focus_node) cur = i;
+      }
+      const int pick = next >= 0 ? next : first;
+      if (pick > 0) meshSetFocusNode((uint8_t)pick);
+      break;
+    }
+    case PG_TEST: if (currentRole == ROLE_GATEWAY_OFFSHORE) { const bool on = !simAnyOn(); simAll(on); showOverlayMessage(on ? "Simulation ON" : "Simulation OFF", 1000); } break;
+    default: break;
+  }
+}
+
+static void scrDraw() {
+  if (scrPage != PG_HOME && millis() - scrLastInput > 60000UL) { scrPage = PG_HOME; scrSub = 0; }
+  buildScreenModel();
+  if (!scrPageAvailable(scrPage)) scrPage = PG_HOME;
+  if (scrPage == PG_NETWORK && scr.radio_test) { drawRadioTest(); return; }   // radio test: detailed per-hub stats
+  screenDraw(display.getU8g2(), scr, scrPage, scrSub, ((millis() / 500) % 2) == 0);
+}
+
+// =============================================================================================
 // v2 PRG BUTTON (one button, same on chalet and hubs; docs/FIELD_GUIDE_NETWORK.md)
 //   short press        : during an alert (or while silenced) silence on/off, otherwise wake / next page
 //   hold 3 s, release  : hub = hotspot on/off (30 min, kept while a phone is connected); chalet = show
@@ -4714,6 +4869,7 @@ void loopButton() {
   static uint8_t buttonPressCount = 0;
   static unsigned long lastButtonRelease = 0;
   static unsigned long lastBarDraw = 0;
+  static bool wasAsleep = false, screenWasAsleep = false;
 
   loopHubHotspot();
   bool pressed = (digitalRead(USER_BUTTON) == LOW);
@@ -4721,6 +4877,7 @@ void loopButton() {
 
   if (pressed && buttonPressStart == 0) {
     buttonPressStart = now;
+    wasAsleep = displaySleeping;
   } else if (pressed) {
     const uint32_t held = now - buttonPressStart;
     if (held >= 1000) {                       // show the hold bar from 1 s on
@@ -4738,11 +4895,11 @@ void loopButton() {
       showOverlayMessage("Network reset", 1500);
     } else if (pressDuration >= HOLD_CONNECT_MS) {
       if (currentRole != ROLE_GATEWAY_OFFSHORE) { if (wifiApActive) hubHotspotOff(); else hubHotspotOn(); }
-      connectInfoUntil = millis() + 30000UL;
+      scrPage = PG_CONNECT; scrSub = 0; scrLastInput = millis();
     } else if (pressDuration >= 1000) {
       // released between 1 and 3 s: nothing (the bar told the user to keep holding)
     } else if (pressDuration > BUTTON_DEBOUNCE_MS) {
-      connectInfoUntil = 0;
+      if (buttonPressCount == 0) screenWasAsleep = wasAsleep;
       if (now - lastButtonRelease < 500) buttonPressCount++;
       else buttonPressCount = 1;
       lastButtonRelease = now;
@@ -4752,62 +4909,33 @@ void loopButton() {
   // Process button count after settle time (500ms after last release)
   if (buttonPressCount > 0 && (now - lastButtonRelease > 500)) {
     if (buttonPressCount == 1) {
-      if (activeAlerts || alertsSilenced) {   // alert: the button is the silence button
-        DEBUG_PRINTLN(F("PRG single press - toggling silence"));
+      if (activeAlerts && !alertsSilenced) {   // alert on screen: the button is the silence button
+        DEBUG_PRINTLN(F("PRG single press - silence"));
         silenceAlerts();
-        showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 1000);
+        showOverlayMessage("Silenced", 1000);
+      } else if (!screenWasAsleep) {
+        scrStep(+1);                           // next page (a press that woke the screen only wakes it)
       }
-      // no alert: the press only woke the display (registerActivity above)
     } else if (buttonPressCount >= 2) {
-      // Double press - cycle page (on live status only)
-      if (currentScreen == SCREEN_LIVE_STATUS) {
-        int totalPages = (network.node_count + 9) / 10;
-        if (totalPages > 1) liveStatusPage = (liveStatusPage + 1) % totalPages;
-      }
+      scrAction();                             // the page's action (written at the bottom)
     }
     buttonPressCount = 0;
   }
 }
 
 void handleKeyPress(char key) {
-  registerActivity();  // Wake display on any key press
+  // v2: the CardKB is a set of extra keys for the new screens (no typing menus any more)
+  const bool wasAsleep = displaySleeping;
+  registerActivity();
+  if (wasAsleep) return;   // the first key only wakes the screen
   DEBUG_PRINTF("Key: 0x%02X\n", (uint8_t)key);
-
-  // Route input based on current screen
-  switch (currentScreen) {
-    case SCREEN_LIVE_STATUS:
-      handleLiveStatusInput(key);
-      break;
-    case SCREEN_MAIN_MENU:
-      handleMainMenuInput(key);
-      break;
-    case SCREEN_NODE_LIST:
-      handleNodeListInput(key);
-      break;
-    case SCREEN_NODE_DETAILS:
-      handleNodeDetailsInput(key);
-      break;
-    case SCREEN_ALERT_HISTORY:
-      handleAlertHistoryInput(key);
-      break;
-    case SCREEN_SETTINGS:
-      handleSettingsInput(key);
-      break;
-    case SCREEN_WIFI_CONFIG:
-      handleWifiConfigInput(key);
-      break;
-    case SCREEN_NETWORK_INFO:
-      handleNetworkInfoInput(key);
-      break;
-    case SCREEN_REBOOT_CONFIRM:
-      handleRebootConfirmInput(key);
-      break;
-    case SCREEN_SETTING_EDIT:
-      handleSettingEditInput(key);
-      break;
-    case SCREEN_RESET_ALL_CONFIRM:
-      handleResetAllConfirmInput(key);
-      break;
+  switch ((uint8_t)key) {
+    case KEY_RIGHT: case KEY_DOWN: case KEY_TAB: case ' ': case 'n': case 'N': scrStep(+1); break;
+    case KEY_LEFT: case KEY_UP: case 'p': case 'P': scrStep(-1); break;
+    case KEY_ENTER: scrAction(); break;
+    case 's': case 'S': silenceAlerts(); showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 800); break;
+    case KEY_ESC: scrPage = PG_HOME; scrSub = 0; break;
+    default: break;
   }
 }
 

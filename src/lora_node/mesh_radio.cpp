@@ -1409,3 +1409,55 @@ String meshSonarGlanceJson(uint16_t since) {
   s += "]}";
   return s;
 }
+
+// ---- raw views for the OLED screens ----
+bool meshSonarSummary(uint8_t node, MeshSonarLite& out) {
+  if (g_sonar == nullptr) return false;
+  Lock l;
+  const sonar::NodeSonar* ns = g_sonar->find(node);
+  if (ns == nullptr || !ns->has_sum) return false;
+  out.bottom_cm = ns->sum.bottom_cm >= sonar::DEPTH_NONE ? 0 : ns->sum.bottom_cm;
+  out.hard = ns->sum.hard; out.activity = ns->sum.activity; out.n = ns->sum.n_list;
+  for (uint8_t k = 0; k < out.n && k < 5; k++) out.t[k] = sonar::packTarget(ns->sum.list[k]);
+  out.age_frames = static_cast<uint16_t>(g_frame - ns->frame);
+  return true;
+}
+
+uint8_t meshFocusPings(uint8_t node, MeshPingLite* out, uint8_t max) {
+  if (g_sonar == nullptr || max == 0) return 0;
+  Lock l;
+  static const sonar::StoredPing* ptr[128];
+  const uint16_t n = g_sonar->pingsSince(node, 0, ptr, 128);
+  const uint16_t skip = n > max ? static_cast<uint16_t>(n - max) : 0;
+  uint8_t k = 0;
+  for (uint16_t i = skip; i < n; i++, k++) {
+    const sonar::Ping& p = ptr[i]->p;
+    MeshPingLite& o = out[k];
+    o.bottom_cm = p.bottom_cm >= sonar::DEPTH_NONE ? 0 : p.bottom_cm;
+    o.n = 0; o.bait_mask = 0;
+    for (uint8_t t = 0; t < p.n_targets && o.n < 5; t++) {
+      o.d[o.n] = p.t[t].depth_cm; o.lv[o.n] = p.t[t].level ? p.t[t].level : 1;
+      if (p.t[t].track == 0) o.bait_mask = static_cast<uint8_t>(o.bait_mask | (1u << o.n));
+      o.n++;
+    }
+  }
+  return k;
+}
+
+uint8_t meshHubLinks(MeshHubLink* out, uint8_t max) {
+  if (g_ch == nullptr) return 0;
+  Lock l;
+  const uint32_t now = millis();
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < 12 && n < max; i++) {
+    const HubPath& p = g_paths[i];
+    if (p.id == 0) continue;
+    MeshHubLink& o = out[n++];
+    o.id = p.id; o.hops = p.hops;
+    o.lora_age_s = p.lora_ms ? static_cast<int32_t>((now - p.lora_ms) / 1000) : -1;
+    o.eb_age_s = p.eb_ms ? static_cast<int32_t>((now - p.eb_ms) / 1000) : -1;
+    const HubInfo* h = g_ch->planner.find(p.id);
+    o.rssi = h != nullptr ? h->last_rssi : 0;
+  }
+  return n;
+}
