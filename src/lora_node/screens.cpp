@@ -10,6 +10,7 @@ const uint8_t* const F_NAME = u8g2_font_helvB12_tr;     // hole name on the aler
 const uint8_t* const F_MED = u8g2_font_6x10_tr;         // normal text
 const uint8_t* const F_BOLD = u8g2_font_6x12_tr;        // headers (u8g2 has no bold 6x10; 6x12 reads stronger)
 const uint8_t* const F_SMALL = u8g2_font_5x8_tr;        // details, footer
+const uint8_t* const F_TINY = u8g2_font_tom_thumb_4x6_tr; // sonar labels
 
 void center(u8g2_t* u, int y, const char* s) {
   const int w = u8g2_GetStrWidth(u, s);
@@ -42,9 +43,15 @@ void symbol(u8g2_t* u, int x, int y, uint8_t st, bool blink, int sz = 7) {
 // page dots bottom right: which of the 4 pages is shown
 void pageDots(u8g2_t* u, uint8_t page) {
   for (uint8_t i = 0; i < PG_COUNT; i++) {
-    const int x = 128 - (PG_COUNT - i) * 6, y = 59;
-    if (i == page) u8g2_DrawBox(u, x, y, 4, 4); else u8g2_DrawFrame(u, x, y, 4, 4);
+    const int x = 128 - (PG_COUNT - i) * 5, y = 60;
+    if (i == page) u8g2_DrawBox(u, x, y, 3, 3); else u8g2_DrawPixel(u, x + 1, y + 1);
   }
+}
+
+// depth text in the user's unit
+void depthStr(char* out, size_t n, uint16_t cm, bool feet) {
+  if (feet) { const unsigned ft10 = (cm * 10u + 15u) / 30u; snprintf(out, n, "%u.%uft", ft10 / 10, ft10 % 10); }   // 1 ft = 30.48 cm
+  else snprintf(out, n, "%u.%um", cm / 100, cm % 100 / 10);
 }
 
 void mmss(char* out, size_t n, uint32_t s) {
@@ -102,11 +109,13 @@ void summary(const ScreenModel& m, char* out, size_t n, uint8_t hub_filter) {
 void footer(u8g2_t* u, const ScreenModel& m, uint8_t page) {
   u8g2_SetFont(u, F_SMALL);
   char line[40];
-  if (m.silenced) { char t[12]; mmss(t, sizeof(t), m.silence_s); snprintf(line, sizeof(line), "SILENCED %s", t); }
+  const char* act = screenPageAction(m, page);
+  if (act[0]) snprintf(line, sizeof(line), "%s", act);
+  else if (m.silenced) { char t[12]; mmss(t, sizeof(t), m.silence_s); snprintf(line, sizeof(line), "SILENCED %s", t); }
   else if (m.chalet) snprintf(line, sizeof(line), "%s", m.sta ? m.url : m.ssid);
   else if (m.hotspot) snprintf(line, sizeof(line), "Hotspot on %lu min", (unsigned long)m.hotspot_min);
   else snprintf(line, sizeof(line), "Hold 3s: hotspot");
-  fit(u, line, 104);
+  fit(u, line, 128 - PG_COUNT * 5 - 2);
   u8g2_DrawStr(u, 0, 63, line);
   pageDots(u, page);
 }
@@ -190,7 +199,7 @@ void holesPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
   snprintf(s, sizeof(s), "Holes");
   char r[12]; snprintf(r, sizeof(r), "%u/%u", sub + 1, pages);
   header(u, s, r);
-  int y = 16;
+  int y = 15;
   for (uint8_t k = 0; k < 4; k++) {
     const int i = sub * 4 + k;
     if (i >= m.n_holes) break;
@@ -207,8 +216,103 @@ void holesPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
     else if (h.batt <= 100) snprintf(d, sizeof(d), "%u%%", h.batt);
     else snprintf(d, sizeof(d), "-");
     right(u, y + 8, d);
-    y += 11;
+    y += 10;
   }
+}
+
+// ---- sonar at a glance: one depth column per sonar hole, common depth scale ----
+//   dithered = bottom, bar = fish (wider = stronger), short tick at the left = bait
+void sonarPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
+  int idx[48], n = 0;
+  for (uint8_t i = 0; i < m.n_holes; i++) if (m.holes[i].son.valid) idx[n++] = i;
+  const int per = 9, pages = n ? (n + per - 1) / per : 1;
+  if (sub >= pages) sub = 0;
+  uint16_t range = 300;
+  for (int k = 0; k < n; k++) if (m.holes[idx[k]].son.bottom_cm + 30 > range) range = m.holes[idx[k]].son.bottom_cm + 30;
+  char r[16], d[12]; depthStr(d, sizeof(d), range, m.feet); snprintf(r, sizeof(r), "0-%s", d);
+  char h[16]; if (pages > 1) snprintf(h, sizeof(h), "Sonar %d/%d", sub + 1, pages); else snprintf(h, sizeof(h), "Sonar");
+  header(u, h, r);
+  if (!n) { u8g2_SetFont(u, F_MED); center(u, 38, "No sonar hole"); return; }
+  const int y0 = 15, y1 = 55, H = y1 - y0;
+  for (int c = 0; c < per && sub * per + c < n; c++) {
+    const ScrHole& ho = m.holes[idx[sub * per + c]];
+    const ScrSonar& so = ho.son;
+    const int x = c * 14 + 1, w = 12;
+    u8g2_DrawVLine(u, x + w, y0, H);                                   // column separator
+    if (ho.state == SH_FISH && blink) u8g2_DrawFrame(u, x - 1, y0 - 1, w + 2, H + 2);
+    if (so.bottom_cm) {
+      const int yb = y0 + so.bottom_cm * H / range;
+      u8g2_DrawHLine(u, x, yb, w);
+      for (int y = yb + 1; y <= y1; y++) for (int xx = x; xx < x + w; xx++) if (((xx + y) & 1) == 0) u8g2_DrawPixel(u, xx, y);
+    }
+    for (uint8_t k = 0; k < so.n; k++) {
+      const int y = y0 + so.t[k].depth_cm * H / range;
+      if (so.t[k].bait) { u8g2_DrawHLine(u, x, y, 3); continue; }
+      const int bw = so.t[k].level >= 3 ? 10 : so.t[k].level == 2 ? 7 : 4;
+      u8g2_DrawBox(u, x + (w - bw) / 2, y - 1, bw, 2);
+    }
+    char lab[8];
+    if (ho.name[0]) snprintf(lab, sizeof(lab), "%.3s", ho.name); else snprintf(lab, sizeof(lab), "%u", ho.id);
+    u8g2_SetFont(u, F_TINY);
+    u8g2_DrawStr(u, x + (w - u8g2_GetStrWidth(u, lab)) / 2, 63, lab);
+  }
+}
+
+// ---- FOCUS: classic mono fish finder, newest ping at the right ----
+void focusPage(u8g2_t* u, const ScreenModel& m) {
+  const ScrHole* fh = nullptr;
+  for (uint8_t i = 0; i < m.n_holes; i++) if (m.holes[i].id == m.focus_node) fh = &m.holes[i];
+  char h[24], r[12];
+  if (!fh || m.n_cols == 0) {
+    header(u, "Focus", nullptr);
+    u8g2_SetFont(u, F_MED); center(u, 34, fh ? "Waiting for data" : "No focus hole");
+    u8g2_SetFont(u, F_SMALL); center(u, 50, "Double press: choose");
+    return;
+  }
+  char nm[20]; holeName(*fh, nm, sizeof(nm));
+  snprintf(h, sizeof(h), "%s", nm);
+  const ScrPingCol& last = m.cols[m.n_cols - 1];
+  depthStr(r, sizeof(r), last.bottom_cm, m.feet);
+  u8g2_SetFont(u, F_BOLD); fit(u, h, 80); u8g2_DrawStr(u, 0, 10, h);
+  u8g2_SetFont(u, F_SMALL); right(u, 9, r);
+  u8g2_DrawHLine(u, 0, 12, 128);
+  uint16_t range = 300;   // deepest bottom in view + 20 %, so the ground shows
+  for (uint8_t c = 0; c < m.n_cols; c++) if (m.cols[c].bottom_cm * 6u / 5u > range) range = static_cast<uint16_t>(m.cols[c].bottom_cm * 6u / 5u);
+  const int y0 = 14, y1 = 63, H = y1 - y0, W = 118;
+  const int x0 = W - m.n_cols;
+  for (uint8_t c = 0; c < m.n_cols; c++) {
+    const ScrPingCol& p = m.cols[c];
+    const int x = x0 + c;
+    if (p.bottom_cm) {
+      const int yb = y0 + p.bottom_cm * H / range;
+      u8g2_DrawPixel(u, x, yb); u8g2_DrawPixel(u, x, yb + 1);
+      for (int y = yb + 2; y <= y1; y++) if (((x + y) & 1) == 0 && ((y - yb) < 6 || (y & 1))) u8g2_DrawPixel(u, x, y);
+    }
+    for (uint8_t k = 0; k < p.n; k++) {
+      const int y = y0 + p.d[k] * H / range;
+      if (p.lv[k] >= 2) u8g2_DrawBox(u, x, y - 1, 1, p.lv[k] >= 3 ? 3 : 2); else u8g2_DrawPixel(u, x, y);
+    }
+  }
+  if (m.bait_cm) { const int yb = y0 + m.bait_cm * H / range; for (int x = 0; x < W; x += 6) u8g2_DrawPixel(u, x, yb); }   // bait depth: dotted
+  // depth scale at the right
+  u8g2_SetFont(u, F_TINY);
+  char d[10];
+  depthStr(d, sizeof(d), range / 2, m.feet); for (char* q = d; *q; q++) if (*q == '.') { *q = 0; break; }
+  u8g2_DrawStr(u, W + 1, y0 + H / 2 + 3, d);
+  depthStr(d, sizeof(d), range, m.feet); for (char* q = d; *q; q++) if (*q == '.') { *q = 0; break; }
+  u8g2_DrawStr(u, W + 1, y1, d);
+}
+
+// ---- test / simulation ----
+void testPage(u8g2_t* u, const ScreenModel& m) {
+  int son = 0, hall = 0, any = 0;
+  for (uint8_t i = 0; i < m.n_holes; i++) { son += (m.holes[i].sim & 1) != 0; hall += (m.holes[i].sim & 2) != 0; any += m.holes[i].sim != 0; }
+  header(u, "Test", any ? "SIM ON" : "sim off");
+  u8g2_SetFont(u, F_MED);
+  char s[40];
+  snprintf(s, sizeof(s), "Sonar sim: %d hole%s", son, son == 1 ? "" : "s"); u8g2_DrawStr(u, 0, 25, s);
+  snprintf(s, sizeof(s), "Hall sim:  %d hole%s", hall, hall == 1 ? "" : "s"); u8g2_DrawStr(u, 0, 37, s);
+  snprintf(s, sizeof(s), "Radio test: %s", m.radio_test ? (m.radio_test_name ? m.radio_test_name : "on") : "off"); u8g2_DrawStr(u, 0, 49, s);
 }
 
 // ---- network ----
@@ -281,6 +385,23 @@ uint8_t homeRows(const ScreenModel& m) {
 }  // namespace
 
 uint8_t screenHolesPages(const ScreenModel& m) { return m.n_holes ? static_cast<uint8_t>((m.n_holes + 3) / 4) : 1; }
+uint8_t screenSonarPages(const ScreenModel& m) {
+  int n = 0; for (uint8_t i = 0; i < m.n_holes; i++) n += m.holes[i].son.valid;
+  return n ? static_cast<uint8_t>((n + 8) / 9) : 1;
+}
+const char* screenPageAction(const ScreenModel& m, uint8_t page) {
+  switch (page) {
+    case PG_HOLES: return screenHolesPages(m) > 1 ? "2x: next 4 holes" : "";
+    case PG_SONAR: return "";   // no footer room; paging by double press when > 9 holes
+    case PG_FOCUS: return m.chalet ? "2x: next hole" : "";
+    case PG_TEST: {
+      if (!m.chalet) return "";
+      bool any = false; for (uint8_t i = 0; i < m.n_holes; i++) any |= m.holes[i].sim != 0;
+      return any ? "2x: sim all OFF" : "2x: sim all ON";
+    }
+    default: return "";
+  }
+}
 
 void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool blink) {
   u8g2_ClearBuffer(u);
@@ -290,8 +411,11 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
   for (uint8_t i = 0; i < m.n_holes; i++) fish |= m.holes[i].state == SH_FISH;
   if (fish && !m.silenced) { drawAlert(u, m, blink); u8g2_SendBuffer(u); return; }
   switch (page) {
-    case PG_HOLES: holesPage(u, m, sub, blink); pageDots(u, page); break;
+    case PG_HOLES: holesPage(u, m, sub, blink); footer(u, m, page); break;
+    case PG_SONAR: sonarPage(u, m, sub, blink); break;
+    case PG_FOCUS: focusPage(u, m); break;
     case PG_NETWORK: networkPage(u, m); break;
+    case PG_TEST: testPage(u, m); footer(u, m, page); break;
     case PG_CONNECT: connectPage(u, m); break;
     default:
       if (m.chalet) homeChalet(u, m, blink); else homeHub(u, m, blink);

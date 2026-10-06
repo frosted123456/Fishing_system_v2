@@ -3,6 +3,8 @@
 //   g++ -std=c++11 -I$U8G2 -Isrc/lora_node tools/screens_mock.cpp src/lora_node/screens.cpp libu8g2.a -o screens_mock
 //   ./screens_mock outdir     -> one .pbm per screen (128x64), tools/screens_sheet.py makes the PNG sheet
 #include "screens.h"
+#include <sonar_sim.h>
+using namespace icemesh;
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -27,6 +29,33 @@ static void pockets3(ScreenModel& m) {
   hole(m, 2, 2, "Drop-off", SH_OK, 88, 2); hole(m, 21, 2, "Herbier", SH_LOWBAT, 9, 0); hole(m, 22, 2, "", SH_OK, 70, 0);
   hole(m, 3, 3, "Large", SH_OK, 95, 0); hole(m, 31, 3, "Fosse", SH_OFFLINE, 255, -1); hole(m, 32, 3, "Chenal", SH_OK, 64, 3);
   hub(m, 1, -92, true, false, 0); hub(m, 2, -101, true, false, 0); hub(m, 3, -108, false, true, 1);
+}
+
+// realistic sonar data from the real fake-sonar chain (scene + processing), as the BASE/FOCUS blocks carry it
+static void toCol(const sonar::Ping& p, ScrPingCol& c) {
+  c.bottom_cm = p.bottom_cm >= sonar::DEPTH_NONE ? 0 : p.bottom_cm; c.n = 0;
+  for (uint8_t k = 0; k < p.n_targets && c.n < 5; k++) { c.d[c.n] = p.t[k].depth_cm; c.lv[c.n] = p.t[k].level ? p.t[k].level : 1; c.n++; }
+}
+static void addSonar(ScreenModel& m, uint8_t focus, int pings) {
+  for (uint8_t i = 0; i < m.n_holes; i++) {
+    ScrHole& h = m.holes[i];
+    if (h.fish < 0) continue;
+    sonar::SonarSource src; src.begin(h.id, 1000u + h.id * 7u, 0);
+    sonar::Block out[2];
+    for (int k = 0; k < pings; k++) {
+      src.tick(h.id == focus, out, 2);
+      if (h.id == focus && k >= pings - 118) { toCol(src.lastPing(), m.cols[m.n_cols++]); }
+    }
+    const sonar::Ping& p = src.lastPing();
+    h.son.valid = true; h.son.bottom_cm = p.bottom_cm >= sonar::DEPTH_NONE ? 0 : p.bottom_cm; h.son.n = 0; h.fish = 0;
+    for (uint8_t k = 0; k < p.n_targets && h.son.n < 5; k++) {
+      ScrTarget& t = h.son.t[h.son.n++];
+      t.depth_cm = p.t[k].depth_cm; t.level = p.t[k].level ? p.t[k].level : 1; t.bait = p.t[k].track == 0;
+      if (!t.bait) h.fish++;
+    }
+    if (h.id == focus) m.bait_cm = static_cast<uint16_t>(src.proc.bait_m * 100.0f + 0.5f);
+  }
+  m.focus_node = focus;
 }
 
 static void dump(u8g2_t* u, const std::string& path) {
@@ -59,6 +88,9 @@ int main(int argc, char** argv) {
   m = base(true);
   for (int h = 1; h <= 10; h++) for (int j = 0; j < 4; j++) hole(m, j ? h * 10 + j : h, h, "", (h == 7 && j == 2) ? SH_OFFLINE : SH_OK, 80, 0);
   shot("chalet_home_10hubs", m, PG_HOME, 0, true);
+  m = base(true); m.feet = true; pockets3(m); addSonar(m, 21, 400); shot("chalet_sonar_glance", m, PG_SONAR, 0, true);
+  shot("chalet_focus", m, PG_FOCUS, 0, true);
+  m.holes[0].sim = 1; m.holes[1].sim = 3; m.holes[4].sim = 1; m.holes[7].sim = 2; shot("chalet_test", m, PG_TEST, 0, true);
   m = base(false); pockets3(m); shot("hub_home", m, PG_HOME, 0, true);
   m = base(false); pockets3(m); m.master_heard = false; m.setup_s = 300; shot("hub_waiting", m, PG_HOME, 0, true);
   m = base(false); pockets3(m); m.hotspot = true; m.hotspot_min = 28; shot("hub_connect", m, PG_CONNECT, 0, true);

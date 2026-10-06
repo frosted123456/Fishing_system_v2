@@ -10,7 +10,13 @@
 #endif
 
 enum ScrHoleState : uint8_t { SH_OK = 0, SH_FISH = 1, SH_OFFLINE = 2, SH_FAULT = 3, SH_LOWBAT = 4 };
-enum ScrPage : uint8_t { PG_HOME = 0, PG_HOLES, PG_NETWORK, PG_CONNECT, PG_COUNT };
+enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, PG_TEST, PG_CONNECT, PG_COUNT };
+
+// Sonar at a glance (from the BASE block of every hole): bottom + every target, not just the nearest
+struct ScrTarget { uint16_t depth_cm; uint8_t level; bool bait; };   // level 1-3
+struct ScrSonar { bool valid; uint16_t bottom_cm; uint8_t hard; uint8_t n; ScrTarget t[5]; uint8_t activity; };
+// FOCUS hole history (one column per ping)
+struct ScrPingCol { uint16_t bottom_cm; uint8_t n; uint16_t d[5]; uint8_t lv[5]; };
 
 struct ScrHole {
   uint8_t id, hub;           // hub = pocket (owner hub ID; the hub's own hole has hub == id)
@@ -19,6 +25,8 @@ struct ScrHole {
   uint8_t batt;              // %, 255 = unknown
   int8_t fish;               // sonar fish count, -1 = no sonar
   uint32_t since_s;          // FISH: seconds since the trip
+  ScrSonar son;              // valid = this hole has a sonar
+  uint8_t sim;               // simulation on this hole: bit0 sonar, bit1 Hall sensor (trips)
 };
 
 struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; };
@@ -41,9 +49,18 @@ struct ScreenModel {
   // connect
   char ssid[28]; char pass[20]; char url[32]; bool sta;   // sta = on the cabin Wi-Fi
   uint32_t uptime_s;
+  bool feet;                 // depth units
+  // FOCUS
+  uint8_t focus_node; uint16_t bait_cm; uint8_t n_cols; ScrPingCol cols[118];
+  // test
+  uint8_t radio_test;        // 0 off, else a test mode
+  const char* radio_test_name;
 };
 
 // Draws one frame. `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).
 // `blink` toggles every 500 ms. `sub` = sub-page (holes list paging).
 void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool blink);
 uint8_t screenHolesPages(const ScreenModel& m);
+uint8_t screenSonarPages(const ScreenModel& m);
+// what a double press does on this page ("" = nothing): shown in the footer
+const char* screenPageAction(const ScreenModel& m, uint8_t page);
