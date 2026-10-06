@@ -510,6 +510,7 @@ void setup() {
   Serial.printf("Node Name:   %s\n", NODE_NAME);
   Serial.printf("Role:        %s\n", getRoleName(currentRole));
   Serial.printf("Network ID:  0x%02X\n", NETWORK_ID);
+  Serial.printf("Firmware:    v2, built %s %s\n", __DATE__, __TIME__);
   Serial.println();
 
   // BUG FIX #8: Enable hardware watchdog timer (30 second timeout)
@@ -614,9 +615,12 @@ void setup() {
 
   // Startup display
   display.clearBuffer();
+  display.setFont(u8g2_font_6x12_tr);
+  display.drawStr(0, 11, "Ice Fishing v2");
   display.setFont(u8g2_font_6x10_tr);
-  display.drawStr(10, 30, "READY");
-  display.drawStr(10, 45, getRoleName(currentRole));
+  display.drawStr(0, 27, currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet (offshore)" :
+                         currentRole == ROLE_GATEWAY_ONSHORE ? "Hub (on the ice)" : getRoleName(currentRole));
+  display.drawStr(0, 60, "Ready");
   display.sendBuffer();
   
   triggerBuzzer(1);
@@ -758,9 +762,18 @@ void setupDisplay() {
 
   // Initialize display (software I2C handles pins internally)
   display.begin();
-  display.setFont(u8g2_font_6x10_tr);
+  // v2 boot screen: firmware generation, role and build date, so the board says what it runs
   display.clearBuffer();
-  display.drawStr(10, 30, "Starting...");
+  display.setFont(u8g2_font_6x12_tr);
+  display.drawStr(0, 11, "Ice Fishing v2");
+  display.setFont(u8g2_font_6x10_tr);
+  display.drawStr(0, 27, currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet (offshore)" :
+                         currentRole == ROLE_GATEWAY_ONSHORE ? "Hub (on the ice)" : getRoleName(currentRole));
+  {
+    char b[32]; snprintf(b, sizeof(b), "built %.6s %.5s", __DATE__, __TIME__);
+    display.drawStr(0, 41, b);
+  }
+  display.drawStr(0, 60, "Starting...");
   display.sendBuffer();
 
   DEBUG_PRINTLN(F("Display ready"));
