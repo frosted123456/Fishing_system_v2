@@ -337,7 +337,7 @@ static void cmdQueue(uint8_t cmd, uint8_t target, uint8_t value) {   // under lo
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == CMD_SET_CHANNEL) { g_cmdq[i].value = value; return; }   // newest choice wins
   }
-  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY) {   // same device: the newest value replaces the queued one
+  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM) {   // same target: the newest value replaces the queued one
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == cmd && g_cmdq[i].target == target) { g_cmdq[i].value = value; return; }
   }
@@ -545,7 +545,7 @@ static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
     g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
   }
   if (cmd == CMD_SET_CHANNEL) g_pending_since_ms = millis();
-  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM) && g_devq_n < 4) {
+  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM) && g_devq_n < 4) {
     g_devq[g_devq_n].cmd = cmd; g_devq[g_devq_n].target = g_hub->last_cmd_target; g_devq[g_devq_n].value = g_hub->last_cmd_value;
     g_devq_n = static_cast<uint8_t>(g_devq_n + 1);
   }
@@ -940,6 +940,12 @@ bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value) {
   for (uint8_t i = 1; i < g_devq_n; i++) g_devq[i - 1] = g_devq[i];
   g_devq_n = static_cast<uint8_t>(g_devq_n - 1);
   return true;
+}
+
+void meshSetSonarParam(uint8_t id, uint8_t value) {   // chalet: one sonar knob for every sonar hole (beacon)
+  if (!g_chalet || g_ch == nullptr) return;
+  Lock l;
+  cmdQueue(CMD_SONAR_PARAM, id, value);
 }
 
 void meshSetHoleSim(uint8_t hole, uint8_t value) {
@@ -1487,6 +1493,7 @@ struct DemoHub { HubRole<8>* role; DemoHole holes[DEMO_MAX_HOLES]; };
 static DemoHub g_demo[DEMO_MAX_HUBS];
 static uint8_t g_demo_hubs = 0, g_demo_holes = 3;
 static sonar::SonarSource* g_demo_src = nullptr;   // full fake sonar of the FOCUS hole
+static sonar::Params g_demo_prm;                   // the chalet's sonar knobs, applied to the demo FOCUS sonar
 static uint8_t g_demo_src_node = 0;
 static uint32_t g_demo_rng = 0x1234567u;
 
@@ -1510,6 +1517,10 @@ static DemoHole* demoHole(uint8_t id) {
 }
 
 uint8_t meshDemoHubs() { return g_demo_hubs; }
+void meshDemoSetParams(const uint8_t* v, uint8_t n) {
+  for (uint8_t i = 0; i < n && i < sonar::P_COUNT; i++) g_demo_prm.v[i] = v[i];
+  if (g_demo_src != nullptr) g_demo_src->proc.prm = g_demo_prm;
+}
 uint8_t meshDemoHoles() { return g_demo_holes; }
 
 uint8_t meshDemoSim(uint8_t id) {
@@ -1645,7 +1656,7 @@ void meshDemoTick() {
   // 2. focus hole: the full fake fish finder (4 pings/s)
   DemoHole* fd = demoHole(focus);
   if (fd != nullptr && (fd->sim & MESH_SIM_SONAR)) {
-    if (g_demo_src == nullptr) g_demo_src = new sonar::SonarSource();
+    if (g_demo_src == nullptr) { g_demo_src = new sonar::SonarSource(); g_demo_src->proc.prm = g_demo_prm; }
     if (g_demo_src_node != focus) { g_demo_src->begin(focus, 7919UL * focus + 17UL, static_cast<uint16_t>(demoRand())); g_demo_src_node = focus; }
     sonar::Block out[2];
     const uint8_t n = g_demo_src->tick(true, out, 2);

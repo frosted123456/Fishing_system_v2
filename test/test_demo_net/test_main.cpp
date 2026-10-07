@@ -94,6 +94,13 @@ static void test_demo_chain(void) {
   TEST_ASSERT_TRUE(hub[1].onEbBeacon(b, ch.buildEbBeacon(b, sizeof b), cmd));
   TEST_ASSERT_EQUAL(CMD_SET_SIM, cmd);
   TEST_ASSERT_EQUAL(holeId(HUB0 + 1, 2), hub[1].last_cmd_target);
+  // a sonar knob (CMD_SONAR_PARAM: target = knob index) reaches the hubs the same way (D42)
+  ch.cmd = CMD_SONAR_PARAM; ch.cmd_seq = 8; ch.cmd_target = 0; ch.cmd_value = 14;
+  ch.startFrame(8, b, sizeof b);
+  cmd = CMD_NONE;
+  TEST_ASSERT_TRUE(hub[2].onEbBeacon(b, ch.buildEbBeacon(b, sizeof b), cmd));
+  TEST_ASSERT_EQUAL(CMD_SONAR_PARAM, cmd);
+  TEST_ASSERT_EQUAL(0, hub[2].last_cmd_target); TEST_ASSERT_EQUAL(14, hub[2].last_cmd_value);
   // demo off: holes are dropped from the chalet table
   for (uint8_t h = 0; h < 3; h++) for (uint8_t k = 0; k < 3; k++) TEST_ASSERT_TRUE(ch.nodes.forget(holeId(hub[h].self, k)));
   TEST_ASSERT_NULL(ch.nodes.find(HUB0));

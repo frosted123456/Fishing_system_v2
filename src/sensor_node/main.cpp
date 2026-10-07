@@ -129,6 +129,10 @@ RTC_DATA_ATTR bool sonarSimOn = false;              // v2 sonar test mode (survi
 volatile bool sonarCtrlSeen = false;
 volatile bool sonarCtrlSim = false;
 volatile uint8_t sonarCtrlFocus = 0;
+// v2 (D42): sonar knobs from the hub's sonar control (the chalet's set), applied by sonarLoop and saved
+volatile bool sonarKnobsNew = false;
+uint8_t sonarKnobsBuf[SONAR_CTRL_PARAMS];
+uint8_t sonarKnobsN = 0;
 
 // BUG FIX #7: Track actual sleep duration for accurate timing
 // Records expected sleep duration so we can properly decrement counters on wake
@@ -937,6 +941,9 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     const SonarCtrlMessage* c = (const SonarCtrlMessage*)data;
     sonarCtrlFocus = c->focus_node;
     sonarCtrlSim = (c->sim_on != 0);
+    if (c->n_params > 0 && c->n_params <= SONAR_CTRL_PARAMS) {
+      memcpy(sonarKnobsBuf, c->params, c->n_params); sonarKnobsN = c->n_params; sonarKnobsNew = true;
+    }
     sonarCtrlSeen = true;
     return;
   }
@@ -1285,6 +1292,25 @@ void sonarLoop() {
   static bool started = false;
   static unsigned long lastTick = 0, lastCtrl = 0;
   static uint8_t focus = 0;
+  static icemesh::sonar::Params knobs;
+  static bool knobsLoaded = false;
+  if (!knobsLoaded) {   // the last set received, kept across deep sleep / reboot
+    knobsLoaded = true;
+    Preferences p; p.begin("sonar", true);
+    uint8_t v[icemesh::sonar::P_COUNT]; const size_t n = p.getBytes("p", v, sizeof(v)); p.end();
+    for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) knobs.set(i, v[i]);
+    src.proc.prm = knobs;
+  }
+  if (sonarKnobsNew) {
+    sonarKnobsNew = false;
+    bool changed = false;
+    for (uint8_t i = 0; i < sonarKnobsN && i < icemesh::sonar::P_COUNT; i++) changed |= knobs.set(i, sonarKnobsBuf[i]);
+    if (changed) {
+      src.proc.prm = knobs;
+      Preferences p; p.begin("sonar", false); p.putBytes("p", knobs.v, icemesh::sonar::P_COUNT); p.end();
+      DEBUG_PRINTLN(F("Sonar knobs updated by the chalet"));
+    }
+  }
   if (sonarCtrlSeen) {
     sonarCtrlSeen = false;
     lastCtrl = millis();

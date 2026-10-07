@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "sonar_scene.h"
+#include "sonar_params.h"
 
 namespace icemesh {
 namespace sonar {
@@ -42,6 +43,7 @@ class SonarProc {
   };
 
   sreal bait_m = R(4.57);   // bait (lure) depth: prototype constant; real system: set per hole
+  Params prm;               // knobs (sonar_params.h); defaults = prototype
 
   SonarProc() { reset(); }
   void reset() {
@@ -73,7 +75,7 @@ class SonarProc {
     int on = pk; while (on > b0 && static_cast<sreal>(d[on - 1]) > static_cast<sreal>(d[pk]) - R(10)) on--;
     const sreal bNow = static_cast<sreal>(on) * BIN_M();
     if (!have_bottom_) { bottom_ = bNow; have_bottom_ = true; }
-    else if (std::fabs(bNow - bottom_) < R(0.3)) { bottom_ += R(0.25) * (bNow - bottom_); bj_ = 0; }
+    else if (std::fabs(bNow - bottom_) < R(0.3)) { bottom_ += R(prm[P_BOTTOM_SMOOTH] / 100.0) * (bNow - bottom_); bj_ = 0; }
     else if (++bj_ > 4) { bottom_ = bNow; bj_ = 0; }
     const int bI = roundi(bottom_ / BIN_M());
 
@@ -88,23 +90,24 @@ class SonarProc {
     const sreal nf = nf_;
 
     // Range compensation and display scaling
-    for (int i = 0; i < N; i++) c[i] = static_cast<float>(static_cast<sreal>(d[i]) + static_cast<sreal>(S.tvg[i]));
+    const bool tvg_on = prm[P_TVG] != 0;
+    for (int i = 0; i < N; i++) c[i] = static_cast<float>(static_cast<sreal>(d[i]) + (tvg_on ? static_cast<sreal>(S.tvg[i]) : R(0)));
     sreal hiNow = R(-200);
     for (int i = bI; i < std::min(N, bI + 6); i++) hiNow = std::max(hiNow, static_cast<sreal>(c[i]));
     if (!have_hi_) { hi_ = hiNow; have_hi_ = true; } else hi_ = hi_ + R(0.1) * (hiNow - hi_);
-    top_ = hi_ - R(12); lo_ = top_ - R(46);
+    top_ = hi_ - R(12); lo_ = top_ - R(prm[P_RANGE_DB]);
 
     // Peaks with sub-bin fit
     sm[0] = c[0]; sm[N - 1] = c[N - 1];
     for (int i = 1; i < N - 1; i++) sm[i] = static_cast<float>((static_cast<sreal>(c[i - 1]) + static_cast<sreal>(c[i]) + static_cast<sreal>(c[i + 1])) / R(3));
     Peak* pk_ = S.peaks; int np = 0;
-    const int i0 = roundi(R(0.9) / BIN_M()), i1 = bI - 5;
+    const int i0 = std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M())), i1 = bI - 5;
     for (int i = i0; i < i1; i++) {
       if (!(sm[i] >= sm[i - 1] && sm[i] > sm[i + 1])) continue;
-      const sreal snr = static_cast<sreal>(d[i]) - nf; if (snr < R(10)) continue;
+      const sreal snr = static_cast<sreal>(d[i]) - nf; if (snr < R(prm[P_SNR_DB])) continue;
       sreal mn = R(1e30);
       for (int k = -6; k <= 6; k++) { const int j = i + k; if (j >= 0 && j < N && static_cast<sreal>(sm[j]) < mn) mn = sm[j]; }
-      if (static_cast<sreal>(sm[i]) - mn < R(5)) continue;
+      if (static_cast<sreal>(sm[i]) - mn < R(prm[P_PROM_DB])) continue;
       const sreal A = sm[i - 1], B = sm[i], Cc = sm[i + 1], den = A - R(2) * B + Cc;
       const sreal dl = den < R(0) ? clampr(R(0.5) * (A - Cc) / den, R(-0.5), R(0.5)) : R(0);
       int l = i; while (l > 0 && static_cast<sreal>(sm[l - 1]) > B - R(3)) l--;
@@ -133,7 +136,7 @@ class SonarProc {
     int nfresh = 0;
     for (int i = 0; i < np; i++) {
       const Peak& p = pk_[i];
-      int bt = -1; sreal bd = R(0.32);
+      int bt = -1; sreal bd = R(prm[P_GATE_CM] / 100.0);
       for (int k = 0; k < n_tracks_; k++) {
         if (used[k]) continue;
         const Track& T = tracks_[k];
@@ -155,7 +158,7 @@ class SonarProc {
     }
     for (int k = 0; k < n_tracks_; k++) if (!used[k]) tracks_[k].miss++;
     int w = 0;
-    for (int k = 0; k < n_tracks_; k++) if (tracks_[k].miss <= 5) { if (w != k) tracks_[w] = tracks_[k]; w++; }
+    for (int k = 0; k < n_tracks_; k++) if (tracks_[k].miss <= prm[P_KEEP]) { if (w != k) tracks_[w] = tracks_[k]; w++; }
     for (int k = 0; k < nfresh && w < MAX_TRACKS; k++) tracks_[w++] = S.fresh[k];
     n_tracks_ = w;
     for (int k = 0; k < n_tracks_; k++) tracks_[k].label = labelOf(tracks_[k]);
@@ -172,7 +175,7 @@ class SonarProc {
     for (int i = 0; i < N; i++) {
       const sreal dev = static_cast<sreal>(d[i]) - static_cast<sreal>(static_[i]);
       if (!mask[i]) {
-        static_[i] = static_cast<float>(static_cast<sreal>(static_[i]) + R(0.012) * dev);
+        static_[i] = static_cast<float>(static_cast<sreal>(static_[i]) + R(prm[P_STATIC_LEARN] / 1000.0) * dev);
         sig_[i] = static_cast<float>(static_cast<sreal>(sig_[i]) + R(0.02) * (std::fabs(dev) - static_cast<sreal>(sig_[i])));
       }
       S.dyn[i] = static_cast<float>(dev - (R(2.2) * static_cast<sreal>(sig_[i]) + R(2)));
@@ -209,7 +212,7 @@ class SonarProc {
     out.n = 0;
     for (int k = 0; k < n_tracks_; k++) {
       const Track& T = tracks_[k];
-      if (T.age < 3) continue;
+      if (T.age < prm[P_CONFIRM]) continue;
       TrackOut& o = out.t[out.n++];
       const Hist& h = T.last();
       o.id = T.id; o.depth = T.depth; o.vel = T.vel; o.label = T.label; o.v = h.v; o.s = h.s; o.miss = T.miss;

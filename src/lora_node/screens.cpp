@@ -50,7 +50,7 @@ void pageDots(u8g2_t* u, uint8_t page) {
 
 // depth text in the user's unit
 void depthStr(char* out, size_t n, uint16_t cm, bool feet) {
-  if (feet) { const unsigned ft10 = (cm * 10u + 15u) / 30u; snprintf(out, n, "%u.%uft", ft10 / 10, ft10 % 10); }   // 1 ft = 30.48 cm
+  if (feet) { const unsigned ft10 = (cm * 1000u + 1524u) / 3048u; snprintf(out, n, "%u.%uft", ft10 / 10, ft10 % 10); }   // 1 ft = 30.48 cm
   else snprintf(out, n, "%u.%um", cm / 100, cm % 100 / 10);
 }
 
@@ -231,9 +231,8 @@ void sonarPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
   for (uint8_t i = 0; i < m.n_holes; i++) if (m.holes[i].son.valid) idx[n++] = i;
   const int per = 9, pages = n ? (n + per - 1) / per : 1;
   if (sub >= pages) sub = 0;
-  uint16_t range = 300;
-  for (int k = 0; k < n; k++) if (m.holes[idx[k]].son.bottom_cm + 30 > range) range = m.holes[idx[k]].son.bottom_cm + 30;
-  char r[16], d[12]; depthStr(d, sizeof(d), range, m.feet); snprintf(r, sizeof(r), "0-%s", d);
+  const uint16_t range = m.son_range_cm ? m.son_range_cm : screenSonarAutoRange(m);
+  char r[16], d[12]; depthStr(d, sizeof(d), range, m.feet); snprintf(r, sizeof(r), "%s0-%s", m.son_range_cm ? "" : "A ", d);
   char h[24]; if (pages > 1) snprintf(h, sizeof(h), "Sonar %d/%d", sub + 1, pages); else snprintf(h, sizeof(h), "Sonar");
   header(u, h, r);
   if (!n) { u8g2_SetFont(u, F_MED); center(u, 38, "No sonar hole"); return; }
@@ -244,12 +243,14 @@ void sonarPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
     const int x = c * 14 + 1, w = 12;
     u8g2_DrawVLine(u, x + w, y0, H);                                   // column separator
     if (ho.state == SH_FISH && blink) u8g2_DrawFrame(u, x - 1, y0 - 1, w + 2, H + 2);
-    if (so.bottom_cm) {
+    if (so.bottom_cm && so.bottom_cm < range) {
       const int yb = y0 + so.bottom_cm * H / range;
       u8g2_DrawHLine(u, x, yb, w);
       for (int y = yb + 1; y <= y1; y++) for (int xx = x; xx < x + w; xx++) if (((xx + y) & 1) == 0) u8g2_DrawPixel(u, xx, y);
     }
     for (uint8_t k = 0; k < so.n; k++) {
+      if (so.t[k].depth_cm >= range) continue;                         // below the chosen scale
+      if (m.hide_weak && !so.t[k].bait && so.t[k].level < 2) continue;
       const int y = y0 + so.t[k].depth_cm * H / range;
       if (so.t[k].bait) { u8g2_DrawHLine(u, x, y, 3); continue; }
       const int bw = so.t[k].level >= 3 ? 10 : so.t[k].level == 2 ? 7 : 4;
@@ -280,24 +281,24 @@ void focusPage(u8g2_t* u, const ScreenModel& m) {
   u8g2_SetFont(u, F_BOLD); fit(u, h, 80); u8g2_DrawStr(u, 0, 10, h);
   u8g2_SetFont(u, F_SMALL); right(u, 9, r);
   u8g2_DrawHLine(u, 0, 12, 128);
-  uint16_t range = 300;   // deepest bottom in view + 20 %, so the ground shows
-  for (uint8_t c = 0; c < m.n_cols; c++) if (m.cols[c].bottom_cm * 6u / 5u > range) range = static_cast<uint16_t>(m.cols[c].bottom_cm * 6u / 5u);
+  const uint16_t range = m.focus_range_cm ? m.focus_range_cm : screenFocusAutoRange(m);
   const int y0 = 14, y1 = 63, H = y1 - y0, W = 118;
   const int x0 = W - m.n_cols;
   for (uint8_t c = 0; c < m.n_cols; c++) {
     const ScrPingCol& p = m.cols[c];
     const int x = x0 + c;
-    if (p.bottom_cm) {
+    if (p.bottom_cm && p.bottom_cm < range) {
       const int yb = y0 + p.bottom_cm * H / range;
       u8g2_DrawPixel(u, x, yb); u8g2_DrawPixel(u, x, yb + 1);
       for (int y = yb + 2; y <= y1; y++) if (((x + y) & 1) == 0 && ((y - yb) < 6 || (y & 1))) u8g2_DrawPixel(u, x, y);
     }
     for (uint8_t k = 0; k < p.n; k++) {
+      if (p.d[k] >= range || (m.hide_weak && p.lv[k] < 2)) continue;
       const int y = y0 + p.d[k] * H / range;
       if (p.lv[k] >= 2) u8g2_DrawBox(u, x, y - 1, 1, p.lv[k] >= 3 ? 3 : 2); else u8g2_DrawPixel(u, x, y);
     }
   }
-  if (m.bait_cm) { const int yb = y0 + m.bait_cm * H / range; for (int x = 0; x < W; x += 6) u8g2_DrawPixel(u, x, yb); }   // bait depth: dotted
+  if (m.bait_cm && m.bait_cm < range) { const int yb = y0 + m.bait_cm * H / range; for (int x = 0; x < W; x += 6) u8g2_DrawPixel(u, x, yb); }   // bait depth: dotted
   // depth scale at the right
   u8g2_SetFont(u, F_TINY);
   char d[10];
@@ -449,6 +450,16 @@ uint8_t homeRows(const ScreenModel& m) {
 
 }  // namespace
 
+uint16_t screenSonarAutoRange(const ScreenModel& m) {   // deepest bottom of the sonar holes + 30 cm, at least 3 m
+  uint16_t range = 300;
+  for (uint8_t i = 0; i < m.n_holes; i++) if (m.holes[i].son.valid && m.holes[i].son.bottom_cm + 30 > range) range = m.holes[i].son.bottom_cm + 30;
+  return range;
+}
+uint16_t screenFocusAutoRange(const ScreenModel& m) {   // deepest bottom in view + 20 %, so the ground shows
+  uint16_t range = 300;
+  for (uint8_t c = 0; c < m.n_cols; c++) if (m.cols[c].bottom_cm * 6u / 5u > range) range = static_cast<uint16_t>(m.cols[c].bottom_cm * 6u / 5u);
+  return range;
+}
 uint8_t screenHolesPages(const ScreenModel& m) { return m.n_holes ? static_cast<uint8_t>((m.n_holes + 3) / 4) : 1; }
 uint8_t screenSonarPages(const ScreenModel& m) {
   int n = 0; for (uint8_t i = 0; i < m.n_holes; i++) n += m.holes[i].son.valid;

@@ -142,6 +142,18 @@ int main(int argc, char** argv) {
   m = base(false); olist(m, "Settings", 0, "OK: change");
   orow(m, "Hotspot", "OFF"); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "ESP-NOW relay", "ON"); orow(m, "Reed polarity", "HIGH");
   shot("hub_options", m, PG_OPTIONS, 0, true);
+  // ---- depth scales + display / sonar settings (D42) ----
+  m = base(true); m.feet = true; pockets3(m); addSonar(m, 21, 400);
+  m.son_range_cm = 457; shot("sonar_fixed_15ft", m, PG_SONAR, 0, true);
+  m.focus_range_cm = 305; shot("focus_fixed_10ft", m, PG_FOCUS, 0, true);
+  m.hide_weak = true; m.focus_range_cm = 0; shot("focus_auto_hide_weak", m, PG_FOCUS, 0, true);
+  m = base(true); olist(m, "Display", 1, "OK: change");
+  orow(m, "Units", "feet"); orow(m, "Sonar depth", "0-15 ft"); orow(m, "Focus depth", "auto"); orow(m, "Weak echoes", "shown");
+  shot("settings_display", m, PG_OPTIONS, 0, true);
+  m = base(true); olist(m, "Sonar (all holes)", 0, "OK: next filter");
+  orow(m, "Noise filter", "normal"); orow(m, "Detection", "10 dB"); orow(m, "Confirm", "3 pings"); orow(m, "Dead zone", "3.0 ft");
+  orow(m, "Max fish move", "32 cm"); orow(m, "Send to holes again", ""); orow(m, "Defaults", "");
+  shot("settings_sonar", m, PG_OPTIONS, 0, true);
   printf("%d screens\n", k);
   return 0;
 }

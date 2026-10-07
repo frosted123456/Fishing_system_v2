@@ -63,6 +63,8 @@
 #include "mesh_radio.h"
 #include "screens.h"
 #include <sonar_sim.h>             // v2: fake sonar for the test mode (virtual sonar nodes on hubs)
+#include <sonar_params.h>          // v2 (D42): sonar processing knobs, one set for every sonar hole
+static_assert(icemesh::sonar::P_COUNT <= SONAR_CTRL_PARAMS, "sonar knobs do not fit the sonar control message");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI LAYOUT CONSTANTS - 128x64 OLED
@@ -174,6 +176,11 @@ struct DeviceSettings {
   bool ebChaletLr;            // v2 chalet: LR on for ESP-NOW. Kills the phone hotspot (Espressif: no per-interface LR) - bench only
   uint8_t lastLoraCh;         // v2: LoRa channel last used (start point after a reboot)
   bool buzzerPassive;         // v2: passive buzzer (needs a tone) instead of an active one (sounds on DC)
+  uint8_t alarmHoldMin;       // v2: FISH ON alarm after the line resets: 0 = until silenced, else minutes
+  bool unitsMetric;           // v2 OLED: metres instead of feet
+  uint8_t sonDepthIdx;        // v2 OLED Sonar page depth scale: 0 = auto, 1-8 = fixed (DEPTH_STEPS)
+  uint8_t focusDepthIdx;      // v2 OLED Focus page depth scale: 0 = auto, 1-8 = fixed
+  bool hideWeak;              // v2 OLED: do not draw the weakest echoes
 };
 
 DeviceSettings settings = {
@@ -193,7 +200,12 @@ DeviceSettings settings = {
   .ebRelay = false,
   .ebChaletLr = false,
   .lastLoraCh = 0,
-  .buzzerPassive = false
+  .buzzerPassive = false,
+  .alarmHoldMin = 0,
+  .unitsMetric = false,
+  .sonDepthIdx = 0,
+  .focusDepthIdx = 0,
+  .hideWeak = false
 };
 
 // Remote config state
@@ -410,6 +422,20 @@ void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t
 
 void updateDisplay();
 void triggerBuzzer(uint8_t pattern);
+// v2 OLED depth scales (Sonar / Focus pages): index 0 = auto, 1-8 = fixed, in the display unit
+static const uint8_t DEPTH_FT[8] = {5, 10, 15, 20, 25, 30, 40, 60};
+static const uint8_t DEPTH_M[8] = {2, 3, 4, 5, 6, 8, 10, 12};
+uint16_t depthStepCm(uint8_t idx);
+void depthStepText(uint8_t idx, char* out, size_t n);
+// v2 (D42) sonar knobs: kept in NVS ("sonar"), chalet sends them in the beacon, hubs pass them to tip-ups
+icemesh::sonar::Params sonarPrm;
+uint32_t sonarPrmChangedMs = 0;   // hub: when the knobs last changed (sonar control repeats them for 1 min)
+uint16_t sonarPrmGen = 0;         // bumps on every change: local fake sonars re-apply
+void sonarKnobsLoad();
+void sonarKnobApply(uint8_t id, uint8_t v);   // set + save + apply here (hub: from the beacon)
+void sonarKnobSet(uint8_t id, uint8_t v);     // chalet: set + send to every sonar hole
+void sonarKnobsResend();                      // chalet: send the whole set again
+void sonarKnobsNewHubs();
 void buzzerStop();
 void buzzerTest();
 void buzzerApplyType();
@@ -417,6 +443,8 @@ void handleWebRoot();
 void handleWebApi();
 void handleWebApiSonar();
 void handleWebApiSonarPost();
+void handleWebApiKnobs();
+void handleWebApiKnobsPost();
 void handleWebApiSonarPings();
 void handleWebApiSonarBg();
 void sonarHubLoop();
@@ -486,6 +514,10 @@ void handleWebApiRemoteConfigStatus();
 
 // Prototypes the Arduino IDE generated automatically for the .ino (needed since the move to .cpp)
 void updateAlertState();
+bool nodeAlarm(const NodeState& n);
+void alarmStart(NodeState* n);
+void alarmAck();
+void loopAlarmHold();
 void handleWebApiNodeName();
 void handleWebApiSilence();
 void handleResetAllConfirmInput(char key);
@@ -547,6 +579,7 @@ void setup() {
   
   // Load persisted settings
   loadSettings();
+  sonarKnobsLoad();
   
   // BUG FIX #8: Initialize self-node completely at startup
   // Previously missing: last_seen, last_uptime, last_seq, initialized
@@ -707,6 +740,7 @@ void loop() {
 
   // Check for auto-unsilence timeout
   loopAutoUnsilence();
+  loopAlarmHold();
 
   // Check for remote config ACK timeout
   if (pendingConfigWaiting && (millis() - pendingConfigTime > CONFIG_ACK_TIMEOUT_MS)) {
@@ -747,6 +781,7 @@ void loop() {
 
     case ROLE_GATEWAY_OFFSHORE:
       { PerfScope p(PF_DEMO); meshDemoTick(); }   // v2: demo network (fake hubs inside this box), when on
+      sonarKnobsNewHubs();   // v2 (D42): a hub that shows up gets the sonar knobs
       if (settings.webServerEnabled) { PerfScope p(PF_WEB); loopWebServer(); }
       checkWiFiStatus();
       checkSerialWifiConfig();
@@ -2169,6 +2204,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
       // Apply silence state
       alertsSilenced = (msg->silence_state == 1);
       if (alertsSilenced) {
+        buzzerStop(); alarmAck();   // v2: silenced elsewhere = acknowledged here too
         silenceTime = millis();
         // BUG FIX #9: Use elapsed time calculation instead of absolute timestamps
         if (msg->expire_time > msg->timestamp) {
@@ -2442,6 +2478,7 @@ void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t
   // Track when FISH_ON started and record alert
   if (nowFishOn && !wasFishOn) {
     node->fish_on_time = millis();
+    alarmStart(node);
     node->clear_confirm_count = 0;  // Reset clear counter on new alert
     recordAlert(nodeId);  // Add to alert history
     alertsSilenced = false;  // New alert clears silence
@@ -2479,10 +2516,40 @@ void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t
   network.last_update = millis();
 }
 
+// v2 FISH ON alarm latch (D41): a trip starts an alarm that stays (screen, buzzer, phone) after the line
+// resets, until someone silences it - or, with Alarm hold = N min, N min after the trip. Silencing
+// acknowledges: holes whose line is back to normal are cleared, holes still tripped stay shown (silenced).
+// A new trip while silenced turns the sound back on. An offline hole keeps its alarm (tip-up dragged?).
+bool nodeAlarm(const NodeState& n) { return HAS_FLAG(n.flags, FLAG_FISH_ON) || n.alarm_ms != 0; }
+
+void alarmStart(NodeState* n) {
+  n->alarm_ms = millis(); if (n->alarm_ms == 0) n->alarm_ms = 1;   // (recordAlert turns the sound back on)
+}
+
+void alarmAck() {
+  for (int i = 0; i < network.node_count; i++)
+    if (!HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON)) network.nodes[i].alarm_ms = 0;
+  updateAlertState();
+}
+
+void loopAlarmHold() {
+  static uint32_t last = 0;
+  if (settings.alarmHoldMin == 0 || millis() - last < 1000) return;
+  last = millis();
+  const uint32_t hold = settings.alarmHoldMin * 60000UL;
+  bool changed = false;
+  for (int i = 0; i < network.node_count; i++) {
+    NodeState& n = network.nodes[i];
+    if (n.alarm_ms && !HAS_FLAG(n.flags, FLAG_FISH_ON) && millis() - n.alarm_ms > hold) { n.alarm_ms = 0; changed = true; }
+  }
+  if (changed) updateAlertState();
+}
+
 void updateAlertState() {
   activeAlerts = false;
   for (int i = 0; i < network.node_count; i++) {
-    if (network.nodes[i].online && HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON)) {
+    const NodeState& n = network.nodes[i];
+    if ((n.online && HAS_FLAG(n.flags, FLAG_FISH_ON)) || n.alarm_ms != 0) {
       activeAlerts = true;
       break;
     }
@@ -2652,6 +2719,7 @@ void loopLocalSensor() {
       localFishOn = true;
       SET_FLAG(network.nodes[0].flags, FLAG_FISH_ON);
       network.nodes[0].fish_on_time = millis();  // Record when FISH_ON started
+      alarmStart(&network.nodes[0]);
       DEBUG_PRINTF("LOCAL: Fish on! seq=%d\n", localSequence);
       triggerBuzzer(3);
 
@@ -3018,6 +3086,21 @@ void checkSerialWifiConfig() {
     if (line != "BUZZ") { settings.buzzerPassive = (line == "BUZZ PASSIVE"); saveSettings(); buzzerApplyType(); }
     Serial.printf("Buzzer: %s, test beeps\n", settings.buzzerPassive ? "passive (tone)" : "active (DC)");
     buzzerTest();
+  } else if (line.startsWith("KNOB")) {
+    // v2 (D42) sonar knobs (chalet): KNOBS = list, KNOB <key> <value>, KNOB DEFAULTS, KNOB RESEND
+    using namespace icemesh::sonar;
+    String a = line.substring(line.startsWith("KNOBS") ? 5 : 4); a.trim();
+    const int sp = a.indexOf(' ');
+    String k = sp > 0 ? a.substring(0, sp) : a, v = sp > 0 ? a.substring(sp + 1) : "";
+    k.toLowerCase(); v.trim();
+    if (k == "defaults") { for (uint8_t i = 0; i < P_COUNT; i++) sonarKnobSet(i, paramInfo(i).def); }
+    else if (k == "resend") { sonarKnobsResend(); }
+    else if (k.length() && v.length()) { for (uint8_t i = 0; i < P_COUNT; i++) if (k == paramInfo(i).key) sonarKnobSet(i, (uint8_t)constrain(v.toInt(), 0, 255)); }
+    for (uint8_t i = 0; i < P_COUNT; i++) {
+      const ParamInfo& f = paramInfo(i);
+      Serial.printf("  %-8s %3u %-8s (%u-%u, default %u)  %s\n", f.key, sonarPrm[i], f.unit, f.lo, f.hi, f.def, f.name);
+    }
+    Serial.println(F("Usage: KNOB <key> <value> | KNOB DEFAULTS | KNOB RESEND (chalet: sent to every sonar hole)"));
   } else if (line == "PERF") {
     perfPrint();   // v2: loop timing since the last PERF
   } else if (line == "RADIO") {
@@ -3358,6 +3441,8 @@ void setupWebServer() {
     server.send(200, "application/json", meshSonarGlanceJson(since));
   });
   server.on("/api/sim", HTTP_GET, handleWebApiSim);
+  server.on("/api/sonar/knobs", HTTP_GET, handleWebApiKnobs);       // v2 (D42): sonar processing knobs
+  server.on("/api/sonar/knobs", HTTP_POST, handleWebApiKnobsPost);
   server.on("/api/sim", HTTP_POST, handleWebApiSimPost);
   server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
   server.on("/api/sonar/bg", HTTP_GET, handleWebApiSonarBg);
@@ -3582,6 +3667,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div class="stat"><span>LoRa mesh</span><strong id="sLora">–</strong></div>
       <div class="stat"><span>Wi-Fi</span><strong id="sWifi">–</strong></div>
     </div>
+    <label class="hint" style="display:flex;gap:8px;align-items:center;margin:0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
     <div class="ngrid" id="ngrid"></div>
     <p class="hint" style="margin:0">Rename a hole with its Rename link. Holes with a sonar show their last summary; Watch opens the live sonar.</p>
   </div>
@@ -3653,6 +3739,17 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
   <section class="card ctrl" aria-label="Display">
     <h2>Display</h2>
     <ul class="toggles" id="toggles"></ul>
+    <ul class="toggles" id="vknobs">
+      <li><span class="name">Depth scale</span><select id="vDepth" aria-label="Depth scale"></select><span class="desc">Auto follows the bottom; a fixed scale zooms on the top of the water.</span></li>
+      <li><span class="name">Colour gain</span><input type="range" id="vGain" min="-6" max="6" step="1" aria-label="Colour gain"><span class="desc">Brighter or darker echoes on this screen only.</span></li>
+      <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only.</span></li>
+    </ul>
+    <details class="knobs"><summary>Processing on the holes (every sonar hole)</summary>
+      <div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low filter</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High filter</button></div>
+      <ul class="toggles" id="knobs"></ul>
+      <div class="scene"><button class="btn" id="kDefaults" type="button">Defaults</button> <button class="btn" id="kResend" type="button">Send to holes again</button></div>
+      <p class="desc" id="kNote">Guesses tuned on simulated pings: re-tune on real echoes. Saved on each hole; the "(driver)" knobs wait for the TUSS4470 driver.</p>
+    </details>
     <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
   </section>
 
@@ -3693,6 +3790,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <h2>Alerts</h2>
       <form class="form" id="setForm">
         <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
+        <label class="f">FISH ON alarm<select id="fAlarm"><option value="0">Until silenced</option><option value="1">1 min after the trip</option><option value="5">5 min after the trip</option><option value="15">15 min after the trip</option><option value="30">30 min after the trip</option></select><small>Screen, buzzer and phone keep ringing after the flag is reset, until silenced (or this time). A new trip always rings again.</small></label>
         <label class="f">Alert hold time (s)<input type="number" id="fHold" min="5" max="300"><small>Minimum time an alert stays on (5-300)</small></label>
         <label class="f">Heartbeat interval (s)<input type="number" id="fHeart" min="10" max="600"><small>Status broadcast interval (10-600)</small></label>
         <span class="tog"><span id="lblReed">Flag switch triggers on HIGH</span><button type="button" class="switch" role="switch" id="fReed" aria-labelledby="lblReed" aria-checked="false"></button></span>
@@ -3746,6 +3844,23 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
 (() => {
 'use strict';
 const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
+// v2 (D42) display knobs of this phone/PC: depth scale (auto or fixed, metres), colour gain, hide weak echoes
+const vopt = { depth: 'auto', gain: 0, weak: 0 };
+try { Object.assign(vopt, JSON.parse(localStorage.getItem('sonarView') || '{}')); } catch (e) { /* private mode */ }
+const saveV = () => { try { localStorage.setItem('sonarView', JSON.stringify(vopt)); } catch (e) { /* ignore */ } };
+const NICE = [2, 3, 4, 5, 6, 8, 10, MAXD];
+let autoVD = MAXD;
+function VD() {   // depth shown (m): fixed, or auto = recent bottom + 20 % (+0.3 m), snapped to a nice scale, with hysteresis
+  if (vopt.depth !== 'auto') return Math.min(MAXD, Math.max(1, +vopt.depth || MAXD));
+  const bs = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) if (recs[k].b != null) bs.push(recs[k].b);
+  if (!bs.length) return autoVD;
+  bs.sort((a, b) => a - b); const b = bs[bs.length - 1];
+  if (b * 1.1 > autoVD || b * 1.6 < autoVD) autoVD = NICE.find(v => v >= b * 1.2 + 0.3) || MAXD;
+  return autoVD;
+}
+const ROWS = () => Math.min(N, Math.ceil(VD() / BIN));
+const WT = [0, 0.12, 0.25, 0.4];   // hide echoes weaker than this (display value 0..1)
+const GAIN = () => Math.pow(1.15, vopt.gain || 0);
 const $ = id => document.getElementById(id);
 const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
 
@@ -3848,11 +3963,13 @@ function pixels(rec) {
   const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
   const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
   for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? GREY : PAL, BGV[l]); } }
-  for (const r of rec.r) put(r[0], PAL, RV[r[1]]);
+  const G = GAIN(), wt = WT[vopt.weak] || 0;   // v2 display knobs: colour gain, hide weak echoes
+  for (const r of rec.r) { const v = RV[r[1]]; if (v >= wt) put(r[0], PAL, v * G); }
   for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
+    if (t.slot !== 0 && t.s < wt) continue;
     const j0 = Math.round(t.d / BIN);
-    for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
-    const v = clamp(Math.max(t.s, 0.5) * 1.12, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
+    for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * G * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
+    const v = clamp(Math.max(t.s, 0.5) * 1.12 * G, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
   }
   return rec.px = px;
 }
@@ -3870,7 +3987,7 @@ function trendOf(vel) { return vel < -0.04 ? 'rising' : vel > 0.04 ? 'sinking' :
 const ARROW = { rising: '↑', sinking: '↓', holding: '' };
 
 /* ---------- Canvases ---------- */
-const fallC = $('fall'), fallX = fallC.getContext('2d'); fallC.width = HIST; fallC.height = N; const fallImg = fallX.createImageData(HIST, N);
+const fallC = $('fall'), fallX = fallC.getContext('2d'); fallC.width = HIST; fallC.height = N; let fallImg = fallX.createImageData(HIST, N);
 const zoomC = $('zoom'), zoomX = zoomC.getContext('2d'); zoomC.width = HIST; zoomC.height = ZR; const zoomImg = zoomX.createImageData(HIST, ZR);
 const ovC = $('fallOv'), ovX = ovC.getContext('2d'), zovC = $('zoomOv'), zovX = zovC.getContext('2d');
 const flC = $('flash'), flX = flC.getContext('2d');
@@ -3881,10 +3998,12 @@ function fit(cv) {
   return { w, h, dpr };
 }
 function drawFall() {
+  const R = ROWS();
+  if (fallC.height !== R) { fallC.height = R; fallImg = fallX.createImageData(HIST, R); }   // only the rows shown
   const data = fallImg.data, off = HIST - recs.length;
   for (let x = 0; x < HIST; x++) {
     const p = x >= off ? pixels(recs[x - off]) : null;
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < R; i++) {
       const o = (i * HIST + x) * 4;
       if (p) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
       data[o + 3] = 255;
@@ -3924,13 +4043,15 @@ function pill(g, text, x, y, dpr, color) {
 }
 function drawOverlay() {
   const { w, h, dpr } = fit(ovC), g = ovX; g.clearRect(0, 0, w, h);
-  const yOf = dm => dm / MAXD * h, off = HIST - recs.length, xOf = k => ((k + off) + 0.5) / HIST * w;
-  const step = units === 'ft' ? 5 / 3.28084 : 1;
+  const vd = ROWS() * BIN, yOf = dm => dm / vd * h, off = HIST - recs.length, xOf = k => ((k + off) + 0.5) / HIST * w;
+  const step = units === 'ft' ? (vd <= 3.1 ? 1 : vd <= 6.1 ? 2 : 5) / 3.28084 : (vd <= 3.1 ? 0.5 : 1);
   g.font = `${11 * dpr}px ${FONT}`; g.textBaseline = 'bottom';
-  for (let dm = step; dm < MAXD - 0.05; dm += step) {
+  g.fillStyle = 'rgba(215,230,234,0.55)';
+  { const lab = (vopt.depth === 'auto' ? 'auto ' : '') + '0-' + fmtD(vd); const lw = g.measureText(lab).width; g.fillText(lab, w - lw - 6 * dpr, 14 * dpr); }
+  for (let dm = step; dm < vd - 0.05; dm += step) {
     const y = Math.round(yOf(dm)) + 0.5;
     g.strokeStyle = 'rgba(215,230,234,0.09)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
-    g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), 6 * dpr, y - 2 * dpr);
+    g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : (step < 1 ? dm.toFixed(1) : dm.toFixed(0)), 6 * dpr, y - 2 * dpr);
   }
   g.fillStyle = 'rgba(215,230,234,0.5)';
   g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
@@ -3965,12 +4086,12 @@ function drawOverlay() {
 function drawFlash() {
   const { w, h, dpr } = fit(flC), g = flX; g.clearRect(0, 0, w, h);
   const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 4 * dpr, r1 = R * 0.95, r0 = R * 0.75;
-  const SPAN = Math.PI * 2 * 0.92, A0 = -Math.PI / 2, ang = i => A0 + (i / N) * SPAN;
+  const NV = ROWS(), VDm = NV * BIN, SPAN = Math.PI * 2 * 0.92, A0 = -Math.PI / 2, ang = i => A0 + (i / NV) * SPAN;
   g.beginPath(); g.arc(cx, cy, r1, A0, A0 + SPAN); g.arc(cx, cy, r0, A0 + SPAN, A0, true); g.closePath(); g.fillStyle = '#0F2A33'; g.fill();
   const n = recs.length;
   for (const [k, alpha] of [[n - 3, 0.22], [n - 2, 0.42], [n - 1, 1]]) {
     if (k < 0) continue; const p = pixels(recs[k]); g.globalAlpha = alpha;
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < NV; i++) {
       const Rr = p[i * 4], Gg = p[i * 4 + 1], Bb = p[i * 4 + 2]; if (Rr + Gg + Bb < 95) continue;
       g.beginPath(); g.arc(cx, cy, r1, ang(i), ang(i + 1) + 0.003); g.arc(cx, cy, r0, ang(i + 1) + 0.003, ang(i), true); g.closePath();
       g.fillStyle = `rgb(${Rr},${Gg},${Bb})`; g.fill();
@@ -3978,22 +4099,22 @@ function drawFlash() {
   }
   g.globalAlpha = 1;
   if (n) for (const t of recs[n - 1].t) {
-    if (t.s <= 0.08) continue; const i = t.d / BIN;
+    if (t.s <= 0.08 || t.d >= VDm) continue; const i = t.d / BIN;
     g.beginPath(); g.arc(cx, cy, r1 + 1 * dpr, ang(i - 2), ang(i + 2)); g.arc(cx, cy, r0 - 1 * dpr, ang(i + 2), ang(i - 2), true); g.closePath();
     g.fillStyle = palCss(clamp(Math.max(0.5, t.s) * 1.12, 0, 1)); g.fill();
   }
-  const step = units === 'ft' ? 5 / 3.28084 : 1;
+  const step = units === 'ft' ? (VDm <= 3.1 ? 1 : VDm <= 6.1 ? 2 : 5) / 3.28084 : (VDm <= 3.1 ? 0.5 : 1);
   g.font = `${11 * dpr}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (let dm = 0; dm < MAXD - 0.05; dm += step) {
-    const a = A0 + (dm / MAXD) * SPAN, ca = Math.cos(a), sa = Math.sin(a);
+  for (let dm = 0; dm < VDm - 0.05; dm += step) {
+    const a = A0 + (dm / VDm) * SPAN, ca = Math.cos(a), sa = Math.sin(a);
     g.strokeStyle = 'rgba(215,230,234,0.5)'; g.lineWidth = 1 * dpr;
     g.beginPath(); g.moveTo(cx + ca * (r0 - 2 * dpr), cy + sa * (r0 - 2 * dpr)); g.lineTo(cx + ca * (r0 - 7 * dpr), cy + sa * (r0 - 7 * dpr)); g.stroke();
     g.fillStyle = 'rgba(215,230,234,0.6)';
-    g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : dm.toFixed(0), cx + ca * (r0 - 16 * dpr), cy + sa * (r0 - 16 * dpr));
+    g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : (step < 1 ? dm.toFixed(1) : dm.toFixed(0)), cx + ca * (r0 - 16 * dpr), cy + sa * (r0 - 16 * dpr));
   }
   const bait = baitLine();
-  if (opts.overlays && bait != null) {
-    const a = A0 + (bait / MAXD) * SPAN;
+  if (opts.overlays && bait != null && bait < VDm) {
+    const a = A0 + (bait / VDm) * SPAN;
     g.strokeStyle = 'rgba(230,240,242,0.8)'; g.lineWidth = 2 * dpr; g.beginPath();
     g.moveTo(cx + Math.cos(a) * (r1 + 1 * dpr), cy + Math.sin(a) * (r1 + 1 * dpr)); g.lineTo(cx + Math.cos(a) * (r1 - 6 * dpr), cy + Math.sin(a) * (r1 - 6 * dpr)); g.stroke();
   }
@@ -4072,6 +4193,35 @@ function syncControls() {
 tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
 $('play').addEventListener('click', () => { playing = !playing; syncControls(); });
+// v2 (D42) display knobs (this phone / PC only)
+function fillDepth() {
+  const list = units === 'ft' ? [5, 10, 15, 20, 25, 30, 40] : [2, 3, 4, 5, 6, 8, 10, 12];
+  $('vDepth').innerHTML = '<option value="auto">Auto</option>' + list.map(v => { const m = units === 'ft' ? v / 3.28084 : v; return `<option value="${m.toFixed(3)}">0-${v} ${units}</option>`; }).join('');
+  const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto' && Math.abs(+o.value - +vopt.depth) < 0.01);
+  $('vDepth').value = opt ? opt.value : 'auto'; if (!opt) vopt.depth = 'auto';
+  $('vGain').value = String(vopt.gain || 0); $('vWeak').value = String(vopt.weak || 0);
+}
+const vChanged = () => { saveV(); recs.forEach(r => r.px = null); render(); };
+$('vDepth').addEventListener('change', e => { vopt.depth = e.target.value; vChanged(); });
+$('vGain').addEventListener('input', e => { vopt.gain = +e.target.value; vChanged(); });
+$('vWeak').addEventListener('change', e => { vopt.weak = +e.target.value; vChanged(); });
+fillDepth();
+document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', fillDepth));
+// processing knobs on the holes (chalet -> every sonar hole)
+let K = null;
+function renderKnobs() {
+  if (!K) return;
+  document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
+  if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#knobs')) return;
+  $('knobs').innerHTML = K.knobs.map(k => `<li><span class="name">${k.name}</span><input type="number" data-knob="${k.key}" min="${k.lo}" max="${k.hi}" value="${k.v}" style="width:5.5em" aria-label="${k.name}"><span class="desc">${k.unit}${k.v !== k.def ? ' · default ' + k.def : ''}</span></li>`).join('');
+}
+function loadKnobs() { sfetch('/api/sonar/knobs').then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
+function postKnobs(o) { sfetch('/api/sonar/knobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
+$('knobs').addEventListener('change', e => { const i = e.target.closest('[data-knob]'); if (i) postKnobs({ key: i.dataset.knob, v: +i.value }); });
+$('kPreset').addEventListener('click', e => { const b = e.target.closest('[data-preset]'); if (b) postKnobs({ preset: +b.dataset.preset }); });
+$('kDefaults').addEventListener('click', () => { if (confirm('Sonar processing back to defaults on every hole?')) postKnobs({ defaults: true }); });
+$('kResend').addEventListener('click', () => postKnobs({ resend: true }));
+document.querySelector('details.knobs').addEventListener('toggle', e => { if (e.target.open) loadKnobs(); });
 
 // playback: 4 pings/s; the radio delivers about one block per second, so catch up when the queue grows
 const visible = () => window.suiteTab === 'sonar';
@@ -4237,11 +4387,30 @@ function loadGlance() {
   }).catch(() => {});
 }
 function cssVar(n, f) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || f; }
+// v2 (D42) depth scale of the hole cards: same auto scale for all, each hole its own auto scale, or fixed
+let glScale = 'common', glUnitKey = '';
+try { glScale = localStorage.getItem('glScale') || 'common'; } catch (e) { /* private mode */ }
+function fillGlScale() {
+  const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(1) + ' m', key = fmt(1);
+  if (key === glUnitKey) return; glUnitKey = key;
+  const ft = key.indexOf('ft') >= 0, list = ft ? [5, 10, 15, 20, 30, 40].map(v => v / 3.28084) : [2, 3, 5, 8, 12];
+  $('glScale').innerHTML = '<option value="common">Auto, same for all</option><option value="each">Auto, each hole</option>' +
+    list.map(m => `<option value="${Math.round(m * 100)}">0-${fmt(m)}</option>`).join('');
+  if (![...$('glScale').options].some(o => o.value === glScale)) glScale = 'common';
+  $('glScale').value = glScale;
+}
+$('glScale').addEventListener('change', e => { glScale = e.target.value; try { localStorage.setItem('glScale', glScale); } catch (x) { /* ignore */ } drawGlances(); });
 function drawGlances() {
+  fillGlScale();
   const cs = document.querySelectorAll('canvas[data-glance]');
   if (!cs.length) return;
-  let maxB = 300;   // common depth scale (cm): deepest bottom + 15 %
-  Object.values(glance.nodes).forEach(g => g.recs.forEach(r => { if (r[1] && r[1] < 2047 && r[1] * 1.15 > maxB) maxB = r[1] * 1.15; }));
+  let maxAll = 300;   // common depth scale (cm): deepest bottom + 15 %
+  Object.values(glance.nodes).forEach(g => g.recs.forEach(r => { if (r[1] && r[1] < 2047 && r[1] * 1.15 > maxAll) maxAll = r[1] * 1.15; }));
+  const scaleOf = g => {
+    if (glScale === 'common') return maxAll;
+    if (glScale !== 'each') return +glScale || maxAll;
+    let m = 200; g.recs.forEach(r => { if (r[1] && r[1] < 2047 && r[1] * 1.15 > m) m = r[1] * 1.15; }); return m;
+  };
   const acc = cssVar('--accent', '#2a9d8f'), mut = cssVar('--muted', '#888'), al = cssVar('--alert', '#e63946');
   const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(1) + ' m';
   cs.forEach(c => {
@@ -4252,12 +4421,13 @@ function drawGlances() {
     const x = c.getContext('2d'); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
     const t = document.querySelector(`[data-glt="${id}"]`);
     if (!g || !g.recs.length) { x.fillStyle = mut; x.font = '11px system-ui'; x.fillText('waiting for sonar…', 8, h / 2 + 4); if (t) t.textContent = ''; return; }
-    const N = 90, cw = w / N, y = cm => 2 + (h - 4) * cm / maxB;
+    const maxB = scaleOf(g), N = 90, cw = w / N, y = cm => 2 + (h - 4) * Math.min(cm, maxB) / maxB;
     g.recs.forEach((r, i) => {
       const x0 = w - (g.recs.length - i) * cw;
-      if (r[1] && r[1] < 2047) { x.fillStyle = mut; x.globalAlpha = 0.35; x.fillRect(x0, y(r[1]), cw + 0.5, h - y(r[1])); x.globalAlpha = 1; x.fillRect(x0, y(r[1]), cw + 0.5, 1.5); }
+      if (r[1] && r[1] < 2047 && r[1] < maxB) { x.fillStyle = mut; x.globalAlpha = 0.35; x.fillRect(x0, y(r[1]), cw + 0.5, h - y(r[1])); x.globalAlpha = 1; x.fillRect(x0, y(r[1]), cw + 0.5, 1.5); }
       for (let k = 2; k < r.length; k++) {
         const d = r[k] & 0x7FF, lv = (r[k] >> 11) & 3, bait = (r[k] >> 13) & 1;
+        if (d >= maxB) continue;   // below the chosen scale
         if (bait) { x.fillStyle = mut; x.fillRect(x0, y(d), cw + 0.5, 1); continue; }
         x.fillStyle = acc; x.globalAlpha = lv >= 3 ? 1 : lv === 2 ? 0.75 : 0.45;   // stronger echo = bigger, darker
         const s = 2 + lv; x.fillRect(x0 + cw / 2 - s / 2, y(d) - s / 2, Math.max(s, cw), s); x.globalAlpha = 1;
@@ -4375,6 +4545,7 @@ function loadSettings() {
   api('/api/settings').then(d => {
     $('fBuzzer').setAttribute('aria-checked', String(!!d.buzzerEnabled)); $('fReed').setAttribute('aria-checked', String(!!d.reedActiveHigh));
     $('fHold').value = d.alertHoldSec; $('fHeart').value = d.heartbeatSec;
+    if (d.alarmHoldMin !== undefined) $('fAlarm').value = String(d.alarmHoldMin);
   }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
   loadSim();
 }
@@ -4382,6 +4553,7 @@ function loadSettings() {
 $('setForm').addEventListener('submit', e => {
   e.preventDefault();
   const body = { buzzerEnabled: $('fBuzzer').getAttribute('aria-checked') === 'true', alertHoldSec: parseInt($('fHold').value, 10) || 30,
+    alarmHoldMin: parseInt($('fAlarm').value, 10) || 0,
     heartbeatSec: parseInt($('fHeart').value, 10) || 60, reedActiveHigh: $('fReed').getAttribute('aria-checked') === 'true' };
   api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
   setTimeout(() => { $('setMsg').textContent = ''; }, 4000);
@@ -4493,7 +4665,8 @@ void handleWebApi() {
     n["id"] = network.nodes[i].node_id;
     n["name"] = network.nodes[i].name;
     n["online"] = network.nodes[i].online;
-    n["fish"] = HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON);
+    n["fish"] = nodeAlarm(network.nodes[i]);   // v2: the alarm (latched), not only the line state
+    n["line"] = HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON);
     n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
     n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
     n["battery"] = network.nodes[i].battery_mv;
@@ -4576,6 +4749,7 @@ void handleWebApiSettingsGet() {
   StaticJsonDocument<256> doc;
   doc["buzzerEnabled"] = settings.buzzerEnabled;
   doc["alertHoldSec"] = settings.alertHoldSec;
+  doc["alarmHoldMin"] = settings.alarmHoldMin;
   doc["heartbeatSec"] = settings.heartbeatSec;
   doc["reedActiveHigh"] = settings.reedActiveHigh;
   doc["displayBrightness"] = settings.displayBrightness;
@@ -4612,6 +4786,10 @@ void handleWebApiSettingsPost() {
   if (doc.containsKey("alertHoldSec")) {
     int val = doc["alertHoldSec"].as<int>();
     settings.alertHoldSec = constrain(val, 5, 300);
+    changed = true;
+  }
+  if (doc.containsKey("alarmHoldMin")) {   // v2: 0 = until silenced
+    settings.alarmHoldMin = (uint8_t)constrain(doc["alarmHoldMin"].as<int>(), 0, 120);
     changed = true;
   }
   if (doc.containsKey("heartbeatSec")) {
@@ -5000,7 +5178,7 @@ static MeshPingLite scrPings[118];
 
 static uint8_t holeStateOf(const NodeState& n) {
   if (!n.online) return SH_OFFLINE;
-  if (HAS_FLAG(n.flags, FLAG_FISH_ON)) return SH_FISH;
+  if (nodeAlarm(n)) return SH_FISH;
   if (HAS_FLAG(n.flags, FLAG_SENSOR_ERROR)) return SH_FAULT;
   if (HAS_FLAG(n.flags, FLAG_LOW_BATTERY)) return SH_LOWBAT;
   return SH_OK;
@@ -5010,7 +5188,9 @@ static void buildScreenModel() {
   ScreenModel& m = scr;
   const bool chalet = currentRole == ROLE_GATEWAY_OFFSHORE;
   const uint32_t now = millis();
-  m.chalet = chalet; m.self_id = NODE_ID; m.feet = true; m.uptime_s = now / 1000;
+  m.chalet = chalet; m.self_id = NODE_ID; m.feet = !settings.unitsMetric; m.uptime_s = now / 1000;
+  m.son_range_cm = depthStepCm(settings.sonDepthIdx); m.focus_range_cm = depthStepCm(settings.focusDepthIdx);
+  m.hide_weak = settings.hideWeak;
   // holes, grouped by pocket (owner hub), the hub's own hole first
   static MeshNodeSnapshot snap[48];
   const uint8_t ns = chalet ? meshNodeSnapshot(snap, 48) : 0;
@@ -5028,7 +5208,7 @@ static void buildScreenModel() {
     h.state = holeStateOf(n);
     if (n.node_id == NODE_ID && hubSimTripped(NODE_ID)) h.state = SH_FISH;
     h.batt = n.battery_mv ? batteryMvToPercent(n.battery_mv) : 255;
-    h.since_s = (h.state == SH_FISH && n.fish_on_time) ? (now - n.fish_on_time) / 1000 : 0;
+    h.since_s = h.state == SH_FISH ? (now - (n.alarm_ms ? n.alarm_ms : (n.fish_on_time ? n.fish_on_time : now))) / 1000 : 0;
     { const uint8_t dv = meshDemoSim(n.node_id); h.sim = dv != 0xFF ? (dv & 3) : (HAS_FLAG(n.flags, FLAG_SIM) ? 1 : 0); }
     h.fish = -1;
     MeshSonarLite sl;
@@ -5102,13 +5282,15 @@ static void buildScreenModel() {
 // network reset, reboot and "forget Wi-Fi". Without a CardKB the page only shows the values.
 // docs/SCREENS.md
 // =============================================================================================
-enum OptMenu : uint8_t { OM_MAIN = 0, OM_WIFI, OM_SCAN, OM_SIM };
+enum OptMenu : uint8_t { OM_MAIN = 0, OM_WIFI, OM_SCAN, OM_SIM, OM_DISPLAY, OM_SONAR };
 enum OptItem : uint8_t {
   OI_NONE = 0, OI_WIFI, OI_BUZZER, OI_HOLD, OI_LINK, OI_LORACH, OI_SIM, OI_HOTSPOT, OI_RELAY, OI_REED,
   OI_NETRESET, OI_REBOOT, OI_BUILT,
   OI_W_STATUS, OI_W_NAME, OI_W_CHOOSE, OI_W_TYPE, OI_W_ADDR, OI_W_RETRY, OI_W_CH, OI_W_AP, OI_W_APPASS, OI_W_FORGET,
   OI_SC_NET, OI_SC_AGAIN,
-  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES, OI_BUZZTEST, OI_BUZZTYPE
+  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES, OI_BUZZTEST, OI_BUZZTYPE,
+  OI_DISPLAY, OI_D_UNITS, OI_D_SONDEPTH, OI_D_FOCDEPTH, OI_D_WEAK,
+  OI_SONAR, OI_K_FILTER, OI_K_SNR, OI_K_CONFIRM, OI_K_DEAD, OI_K_GATE, OI_K_RESEND, OI_K_DEFAULTS
 };
 struct OptRow { uint8_t item, idx; };
 static const uint8_t OPT_MAX = 56;
@@ -5121,8 +5303,24 @@ static int8_t optScanN = -1;                 // -1 not yet, -2 scanning, -3 fail
 static char optScanSsid[SCAN_MAX][33];
 static int8_t optScanRssi[SCAN_MAX];
 static bool optScanLock[SCAN_MAX];
-static const uint16_t HOLD_STEPS[] = {10, 30, 60, 120, 300};
+static const uint16_t HOLD_STEPS[] = {0, 1, 5, 15, 30};   // FISH ON alarm: 0 = until silenced, else minutes
 static const uint8_t RATE_STEPS[] = {2, 6, 12, 30, 60};
+
+// next value of a list (wraps), or the first one above the current value
+static uint8_t nextStep(const uint8_t* steps, uint8_t n, uint8_t cur) {
+  for (uint8_t i = 0; i < n; i++) if (steps[i] > cur) return steps[i];
+  return steps[0];
+}
+
+uint16_t depthStepCm(uint8_t idx) {
+  if (idx == 0 || idx > 8) return 0;
+  return settings.unitsMetric ? (uint16_t)(DEPTH_M[idx - 1] * 100u) : (uint16_t)(DEPTH_FT[idx - 1] * 3048u / 100u);
+}
+void depthStepText(uint8_t idx, char* out, size_t n) {
+  if (idx == 0 || idx > 8) snprintf(out, n, "auto");
+  else if (settings.unitsMetric) snprintf(out, n, "0-%u m", DEPTH_M[idx - 1]);
+  else snprintf(out, n, "0-%u ft", DEPTH_FT[idx - 1]);
+}
 
 static void optRow(ScrOptions* o, uint8_t item, uint8_t idx, const char* label, const char* value, bool sub = false) {
   if (optN >= OPT_MAX) return;
@@ -5140,6 +5338,10 @@ static const char* optHint(uint8_t item) {
     case OI_W_TYPE: return "OK: type the name";
     case OI_W_RETRY: return "OK: try now";
     case OI_BUZZTEST: return "OK: 2 beeps";
+    case OI_DISPLAY: case OI_SONAR: return "OK: open";
+    case OI_K_RESEND: return "OK: send now";
+    case OI_K_DEFAULTS: return "OK: ask to confirm";
+    case OI_K_FILTER: return "OK: next filter";
     case OI_BUZZTYPE: return "OK: switch + test";
     case OI_SC_NET: return "OK: join";
     case OI_SC_AGAIN: return "OK: scan again";
@@ -5168,7 +5370,8 @@ static void optBuild(ScrOptions* o) {
     optRow(o, OI_BUZZER, 0, "Buzzer", settings.buzzerEnabled ? "ON" : "OFF");
     optRow(o, OI_BUZZTEST, 0, "Buzzer test", "");
     optRow(o, OI_BUZZTYPE, 0, "Buzzer type", settings.buzzerPassive ? "passive" : "active");
-    snprintf(v, sizeof(v), "%u s", settings.alertHoldSec); optRow(o, OI_HOLD, 0, "Alert hold", v);
+    if (settings.alarmHoldMin) snprintf(v, sizeof(v), "%u min", settings.alarmHoldMin); else snprintf(v, sizeof(v), "until silenced");
+    optRow(o, OI_HOLD, 0, "Alarm", v);
     if (chalet) {
       const uint8_t t = settings.transportMode;
       optRow(o, OI_LINK, 0, "Link", t == 1 ? "LoRa only" : t == 2 ? "ESP-NOW" : "Auto");
@@ -5176,6 +5379,9 @@ static void optBuild(ScrOptions* o) {
       else snprintf(v, sizeof(v), "%u fixed", settings.loraChannel + 1);
       optRow(o, OI_LORACH, 0, "LoRa channel", v);
       optRow(o, OI_SIM, 0, "Simulation", simAnyOn() ? "ON" : "off", true);
+      static const char* const FN[] = {"low", "normal", "high", "custom"};
+      optRow(o, OI_SONAR, 0, "Sonar", FN[icemesh::sonar::presetOf(sonarPrm)], true);
+      optRow(o, OI_DISPLAY, 0, "Display", settings.unitsMetric ? "m" : "ft", true);
     } else {
       optRow(o, OI_RELAY, 0, "ESP-NOW relay", settings.ebRelay ? "ON" : "OFF");
       optRow(o, OI_REED, 0, "Reed polarity", settings.reedActiveHigh ? "HIGH" : "LOW");
@@ -5210,6 +5416,23 @@ static void optBuild(ScrOptions* o) {
       optRow(o, OI_SC_NET, (uint8_t)k, optScanSsid[k], v);
     }
     if (optScanN != -2) optRow(o, OI_SC_AGAIN, 0, "Scan again", "");
+  } else if (optMenu == OM_DISPLAY) {
+    optRow(o, OI_D_UNITS, 0, "Units", settings.unitsMetric ? "metres" : "feet");
+    depthStepText(settings.sonDepthIdx, v, sizeof(v)); optRow(o, OI_D_SONDEPTH, 0, "Sonar depth", v);
+    depthStepText(settings.focusDepthIdx, v, sizeof(v)); optRow(o, OI_D_FOCDEPTH, 0, "Focus depth", v);
+    optRow(o, OI_D_WEAK, 0, "Weak echoes", settings.hideWeak ? "hidden" : "shown");
+  } else if (optMenu == OM_SONAR) {
+    using namespace icemesh::sonar;
+    static const char* const FN[] = {"low", "normal", "high", "custom"};
+    optRow(o, OI_K_FILTER, 0, "Noise filter", FN[presetOf(sonarPrm)]);
+    snprintf(v, sizeof(v), "%u dB", sonarPrm[P_SNR_DB]); optRow(o, OI_K_SNR, 0, "Detection", v);
+    snprintf(v, sizeof(v), "%u pings", sonarPrm[P_CONFIRM]); optRow(o, OI_K_CONFIRM, 0, "Confirm", v);
+    if (settings.unitsMetric) snprintf(v, sizeof(v), "%u.%u m", sonarPrm[P_DEADZONE_DM] / 10, sonarPrm[P_DEADZONE_DM] % 10);
+    else snprintf(v, sizeof(v), "%.1f ft", sonarPrm[P_DEADZONE_DM] * 0.328084f);
+    optRow(o, OI_K_DEAD, 0, "Dead zone", v);
+    snprintf(v, sizeof(v), "%u cm", sonarPrm[P_GATE_CM]); optRow(o, OI_K_GATE, 0, "Max fish move", v);
+    optRow(o, OI_K_RESEND, 0, "Send to holes again", "");
+    optRow(o, OI_K_DEFAULTS, 0, "Defaults", "");
   } else if (optMenu == OM_SIM) {
     if (meshDemoHubs()) snprintf(v, sizeof(v), "%u hubs", meshDemoHubs()); else snprintf(v, sizeof(v), "off");
     optRow(o, OI_S_DEMO, 0, "Demo network", v);
@@ -5232,8 +5455,8 @@ static void optBuild(ScrOptions* o) {
   if (optSel >= optN) optSel = optN ? optN - 1 : 0;
   if (!o) return;
   o->mode = optMode; o->n = optN; o->sel = optSel;
-  static const char* const TITLES[] = {"Settings", "Wi-Fi", "Choose Wi-Fi", "Simulation"};
-  snprintf(o->title, sizeof(o->title), "%s", TITLES[optMenu & 3]);
+  static const char* const TITLES[] = {"Settings", "Wi-Fi", "Choose Wi-Fi", "Simulation", "Display", "Sonar (all holes)"};
+  snprintf(o->title, sizeof(o->title), "%s", optMenu < 6 ? TITLES[optMenu] : "");
   snprintf(o->hint, sizeof(o->hint), "%s", !cardKbAvailable ? "CardKB or web page" : optN ? optHint(optRows[optSel].item) : "Esc: back");
   o->line[0] = 0; o->text[0] = 0;
   if (optMode == SO_TEXT) {
@@ -5245,6 +5468,7 @@ static void optBuild(ScrOptions* o) {
   } else if (optMode == SO_CONFIRM) {
     if (optConfirm == OI_NETRESET) { snprintf(o->title, sizeof(o->title), "Reset network?"); snprintf(o->line, sizeof(o->line), "Link + channel to Auto"); }
     else if (optConfirm == OI_REBOOT) { snprintf(o->title, sizeof(o->title), "Reboot?"); snprintf(o->line, sizeof(o->line), "Back in about 10 s"); }
+    else if (optConfirm == OI_K_DEFAULTS) { snprintf(o->title, sizeof(o->title), "Sonar defaults?"); snprintf(o->line, sizeof(o->line), "for every sonar hole"); }
     else { snprintf(o->title, sizeof(o->title), "Forget Wi-Fi?"); snprintf(o->line, sizeof(o->line), "%s", storedSsid); }
   }
 }
@@ -5322,6 +5546,7 @@ static void optDo(uint8_t item) {
     case OI_NETRESET: resetNetworkSettings(); break;
     case OI_REBOOT: display.clearBuffer(); display.setFont(u8g2_font_6x10_tr); display.drawStr(30, 36, "Rebooting..."); display.sendBuffer(); delay(500); ESP.restart(); break;
     case OI_W_FORGET: wifiForget(); break;
+    case OI_K_DEFAULTS: for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) sonarKnobSet(i, icemesh::sonar::paramInfo(i).def); break;
     default: break;
   }
 }
@@ -5334,8 +5559,8 @@ static void optActivate(const OptRow& row) {
     case OI_BUZZTEST: buzzerTest(); break;
     case OI_BUZZTYPE: settings.buzzerPassive = !settings.buzzerPassive; saveSettings(); buzzerApplyType(); buzzerTest(); break;
     case OI_HOLD: {
-      uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] <= settings.alertHoldSec) k++;
-      settings.alertHoldSec = HOLD_STEPS[k % 5]; saveSettings(); break;
+      uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] != settings.alarmHoldMin) k++;
+      settings.alarmHoldMin = (uint8_t)HOLD_STEPS[(k + 1) % 5]; saveSettings(); break;
     }
     case OI_LINK: {
       const uint8_t t = (uint8_t)((settings.transportMode + 1) % 3);
@@ -5360,6 +5585,25 @@ static void optActivate(const OptRow& row) {
       else { optTextStep = 1; snprintf(optText, sizeof(optText), "%s", strcmp(optSsid, storedSsid) == 0 ? storedPassword : ""); optMode = SO_TEXT; }
       break;
     case OI_S_ALL: simAll(!simAnyOn()); break;
+    case OI_DISPLAY: optOpen(OM_DISPLAY); break;
+    case OI_SONAR: optOpen(OM_SONAR); break;
+    case OI_D_UNITS: settings.unitsMetric = !settings.unitsMetric; saveSettings(); break;
+    case OI_D_SONDEPTH: settings.sonDepthIdx = (uint8_t)((settings.sonDepthIdx + 1) % 9); saveSettings(); break;
+    case OI_D_FOCDEPTH: settings.focusDepthIdx = (uint8_t)((settings.focusDepthIdx + 1) % 9); saveSettings(); break;
+    case OI_D_WEAK: settings.hideWeak = !settings.hideWeak; saveSettings(); break;
+    case OI_K_FILTER: {
+      using namespace icemesh::sonar;
+      const uint8_t cur = presetOf(sonarPrm), nx = cur >= FILT_HIGH ? FILT_LOW : (uint8_t)(cur + 1);
+      Params q = sonarPrm; applyPreset(q, nx);
+      for (uint8_t i = 0; i < P_COUNT; i++) if (q[i] != sonarPrm[i]) sonarKnobSet(i, q[i]);
+      break;
+    }
+    case OI_K_SNR: { static const uint8_t S[] = {6, 8, 10, 12, 14, 18, 24}; sonarKnobSet(icemesh::sonar::P_SNR_DB, nextStep(S, 7, sonarPrm[icemesh::sonar::P_SNR_DB])); break; }
+    case OI_K_CONFIRM: { static const uint8_t S[] = {1, 2, 3, 4, 5, 6, 8}; sonarKnobSet(icemesh::sonar::P_CONFIRM, nextStep(S, 7, sonarPrm[icemesh::sonar::P_CONFIRM])); break; }
+    case OI_K_DEAD: { static const uint8_t S[] = {3, 5, 9, 12, 15, 20, 30}; sonarKnobSet(icemesh::sonar::P_DEADZONE_DM, nextStep(S, 7, sonarPrm[icemesh::sonar::P_DEADZONE_DM])); break; }
+    case OI_K_GATE: { static const uint8_t S[] = {16, 24, 32, 48, 64, 96}; sonarKnobSet(icemesh::sonar::P_GATE_CM, nextStep(S, 6, sonarPrm[icemesh::sonar::P_GATE_CM])); break; }
+    case OI_K_RESEND: sonarKnobsResend(); break;
+    case OI_K_DEFAULTS: optConfirm = row.item; optMode = SO_CONFIRM; break;
     case OI_S_DEMO: demoSet((uint8_t)((meshDemoHubs() + 1) % 5), meshDemoHoles()); break;   // off -> 1 -> 2 -> 3 -> 4 -> off
     case OI_S_DEMOHOLES: demoSet(meshDemoHubs(), (uint8_t)(meshDemoHoles() % 4 + 1)); break;
     case OI_S_VIRTUAL: settings.sonarSim = !settings.sonarSim; meshSetSonarSim(settings.sonarSim); saveSettings(); break;
@@ -5724,6 +5968,22 @@ void handleKeyPress(char key) {
     case KEY_ENTER: scrAction(true); break;
     case 's': case 'S': silenceAlerts(); showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 800); break;
     case KEY_ESC: menuOpen(); break;   // back to the menu, pick another page
+    case '+': case '=': case '-': case '_': case 'a': case 'A':   // v2: depth scale of the Sonar / Focus page
+      if (scrPage == PG_SONAR || scrPage == PG_FOCUS) {
+        uint8_t& idx = scrPage == PG_SONAR ? settings.sonDepthIdx : settings.focusDepthIdx;
+        if (k == 'a' || k == 'A') idx = 0;
+        else {
+          const bool in = (k == '+' || k == '=');
+          if (idx == 0) {   // from auto: the fixed scale just around what auto shows now
+            const uint16_t cur = scrPage == PG_SONAR ? screenSonarAutoRange(scr) : screenFocusAutoRange(scr);
+            uint8_t j = 1; while (j < 8 && depthStepCm(j) < cur) j++;
+            idx = in ? (j > 1 ? j - 1 : 1) : j;
+          } else if (in) { if (idx > 1) idx--; }
+          else if (idx < 8) idx++;
+        }
+        saveSettings();
+      }
+      break;
     default: break;
   }
 }
@@ -6137,6 +6397,68 @@ void navigateToScreen(MenuScreen screen) {
 // SETTINGS PERSISTENCE
 // ═══════════════════════════════════════════════════════════════════════════
 
+// =============================================================================================
+// v2 SONAR KNOBS (D42, lib/IceMesh/src/sonar_params.h): one set for every sonar hole.
+// Chalet: set from the OLED (Settings > Sonar) or the web page, saved, sent in the beacon one knob per
+// command (CMD_SONAR_PARAM), and the whole set again when a hub shows up after boot. Hub: keeps them
+// (NVS), uses them for its own fake sonars and repeats them to its tip-ups in the sonar control message.
+// =============================================================================================
+void sonarKnobsLoad() {
+  Preferences p;
+  p.begin("sonar", true);
+  uint8_t v[icemesh::sonar::P_COUNT];
+  const size_t n = p.getBytes("p", v, sizeof(v));
+  p.end();
+  for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) sonarPrm.set(i, v[i]);   // clamped; newer knobs keep their default
+  sonarPrmGen++;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshDemoSetParams(sonarPrm.v, icemesh::sonar::P_COUNT);
+}
+
+static void sonarKnobsSave() {
+  Preferences p;
+  p.begin("sonar", false);
+  p.putBytes("p", sonarPrm.v, icemesh::sonar::P_COUNT);
+  p.end();
+}
+
+void sonarKnobApply(uint8_t id, uint8_t v) {
+  if (!sonarPrm.set(id, v)) return;
+  sonarKnobsSave();
+  sonarPrmGen++;
+  sonarPrmChangedMs = millis(); if (sonarPrmChangedMs == 0) sonarPrmChangedMs = 1;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshDemoSetParams(sonarPrm.v, icemesh::sonar::P_COUNT);
+  Serial.printf("Sonar knob %s = %u\n", icemesh::sonar::paramInfo(id).key, sonarPrm[id]);
+}
+
+void sonarKnobSet(uint8_t id, uint8_t v) {
+  if (id >= icemesh::sonar::P_COUNT) return;
+  sonarKnobApply(id, v);
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetSonarParam(id, sonarPrm[id]);
+}
+
+void sonarKnobsResend() {
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
+  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) meshSetSonarParam(i, sonarPrm[i]);
+}
+
+// chalet loop: a real hub heard for the first time since boot gets the whole set (it may have missed changes)
+void sonarKnobsNewHubs() {
+  static uint32_t last = 0;
+  static uint8_t seen[16]; static uint8_t nseen = 0;
+  if (millis() - last < 2000) return;
+  last = millis();
+  MeshHubLink hl[10];
+  const uint8_t n = meshHubLinks(hl, 10);
+  bool fresh = false;
+  for (uint8_t k = 0; k < n; k++) {
+    if (hl[k].demo) continue;
+    bool known = false;
+    for (uint8_t j = 0; j < nseen; j++) known |= seen[j] == hl[k].id;
+    if (!known && nseen < sizeof(seen)) { seen[nseen++] = hl[k].id; fresh = true; }
+  }
+  if (fresh) { sonarKnobsResend(); Serial.println(F("Sonar knobs sent again (new hub)")); }
+}
+
 void loadSettings() {
   preferences.begin("settings", true);  // Read-only
 
@@ -6158,6 +6480,11 @@ void loadSettings() {
   if (settings.loraChannel > 7) settings.loraChannel = 255;
   settings.ebRelay = preferences.getBool("ebRelay", currentRole != ROLE_GATEWAY_OFFSHORE);   // v2: every hub relays by default
   settings.buzzerPassive = preferences.getBool("buzPas", false);
+  settings.alarmHoldMin = preferences.getUChar("alarmHold", 0);
+  settings.unitsMetric = preferences.getBool("metric", false);
+  settings.sonDepthIdx = preferences.getUChar("sonDepth", 0); if (settings.sonDepthIdx > 8) settings.sonDepthIdx = 0;
+  settings.focusDepthIdx = preferences.getUChar("focDepth", 0); if (settings.focusDepthIdx > 8) settings.focusDepthIdx = 0;
+  settings.hideWeak = preferences.getBool("hideWeak", false);
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;
@@ -6187,6 +6514,11 @@ void saveSettings() {
   preferences.putUChar("loraCh", settings.loraChannel);
   preferences.putBool("ebRelay", settings.ebRelay);
   preferences.putBool("buzPas", settings.buzzerPassive);
+  preferences.putUChar("alarmHold", settings.alarmHoldMin);
+  preferences.putBool("metric", settings.unitsMetric);
+  preferences.putUChar("sonDepth", settings.sonDepthIdx);
+  preferences.putUChar("focDepth", settings.focusDepthIdx);
+  preferences.putBool("hideWeak", settings.hideWeak);
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);
 
@@ -6296,6 +6628,7 @@ void silenceAlerts() {
 
   if (alertsSilenced) {
     buzzerStop();   // v2: the beep being played stops at once
+    alarmAck();     // v2: holes back to normal are cleared, tripped ones stay shown
     silenceTime = millis();
     silenceExpireTime = millis() + SILENCE_AUTO_CLEAR_MS;
     DEBUG_PRINTF("Alerts silenced for %d seconds\n", SILENCE_AUTO_CLEAR_MS / 1000);
@@ -6433,6 +6766,7 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   if (fish && !wasFish) {
     SET_FLAG(n->flags, FLAG_FISH_ON);
     n->fish_on_time = millis();
+    alarmStart(n);
     recordAlert(u.node);
     triggerBuzzer(3);
     registerActivity();
@@ -6501,6 +6835,8 @@ void meshLoop() {
         }
       } else if (cmd == MESH_CMD_SET_SIM) {
         hubSimApply(dev, val);
+      } else if (cmd == MESH_CMD_SONAR_PARAM) {
+        sonarKnobApply(dev, val);   // dev = knob index
       }
     }
   } else {
@@ -6546,7 +6882,7 @@ void meshLoop() {
   bool s;
   if (meshPollSilence(s) && s != alertsSilenced) {
     alertsSilenced = s;
-    if (s) { silenceTime = millis(); silenceExpireTime = millis() + SILENCE_AUTO_CLEAR_MS; }
+    if (s) { silenceTime = millis(); silenceExpireTime = millis() + SILENCE_AUTO_CLEAR_MS; buzzerStop(); alarmAck(); }
     else { silenceTime = 0; silenceExpireTime = 0; }
     if (!chalet) sendSilenceSyncEspNow();   // forward to this hub's tip-up nodes
     registerActivity();
@@ -6670,8 +7006,11 @@ static icemesh::sonar::SonarSource* sonarVirt = nullptr;   // up to 4, allocated
 
 static void sendSonarCtrl(bool sim, uint8_t focus) {
   SonarCtrlMessage m;
+  memset(&m, 0, sizeof(m));
   m.network_id = NETWORK_ID; m.sender_id = NODE_ID; m.msg_type = MSG_SONAR_CTRL;
-  m.focus_node = focus; m.sim_on = sim ? 1 : 0; m.reserved = 0;
+  m.focus_node = focus; m.sim_on = sim ? 1 : 0;
+  m.n_params = icemesh::sonar::P_COUNT;   // v2 (D42): the sonar knobs ride along
+  memcpy(m.params, sonarPrm.v, icemesh::sonar::P_COUNT);
   esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
 }
 
@@ -6741,9 +7080,15 @@ static bool hubSimTripped(uint8_t node) {
 
 void sonarHubLoop() {
   static unsigned long lastTick = 0, lastCtrl = 0, lastObserve = 0, simOffSince = 0;
+  static uint16_t prmGen = 0xFFFF;
   static bool wasSim = false;
   static uint8_t activeVirt = 0;
   static icemesh::sonar::SonarSource* ownSonar = nullptr;   // fake sonar of the hub's own hole
+  if (prmGen != sonarPrmGen) {   // v2 (D42): knobs changed: the hub's own fake sonars use them too
+    prmGen = sonarPrmGen;
+    if (ownSonar) ownSonar->proc.prm = sonarPrm;
+    if (sonarVirt) for (uint8_t k = 0; k < 4; k++) sonarVirt[k].proc.prm = sonarPrm;
+  }
   const bool global = meshSonarSim();                       // chalet: test holes (virtual) on
   const bool sim = global || realSonarSim;                  // tip-ups may run fake sonar
   const uint8_t focus = meshFocusNode();
@@ -6751,7 +7096,7 @@ void sonarHubLoop() {
   // own hole: fake sonar when asked (independent of the virtual holes)
   if (hubHoleSim(NODE_ID) & MESH_SIM_SONAR) {
     static unsigned long ownTick = 0;
-    if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); ownTick = millis(); }
+    if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->proc.prm = sonarPrm; ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); ownTick = millis(); }
     if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
     while (millis() - ownTick >= 250UL) {
       ownTick += 250UL;
@@ -6776,8 +7121,9 @@ void sonarHubLoop() {
     wasSim = sim;
   }
   const bool recentOff = !sim && simOffSince != 0 && millis() - simOffSince < 10000UL;
-  if (espNowReady && (sim || recentOff) &&
-      (millis() - lastCtrl >= 1000UL || (sonarCtrlKick && millis() - lastCtrl >= 50UL))) {
+  const bool knobsFresh = sonarPrmChangedMs != 0 && millis() - sonarPrmChangedMs < 60000UL;   // new knobs: tell the tip-ups for 1 min
+  if (espNowReady && (((sim || recentOff || knobsFresh) && millis() - lastCtrl >= 1000UL) ||
+                      (sonarCtrlKick && millis() - lastCtrl >= 50UL))) {   // a tip-up just sent: it listens now
     sendSonarCtrl(sim, focus);
     lastCtrl = millis();
   }
@@ -6786,7 +7132,7 @@ void sonarHubLoop() {
 
   // virtual holes (test holes generated by this hub): fake sonar by default, fake trips when asked
   const uint8_t want = settings.sonarVirtualNodes > 4 ? 4 : settings.sonarVirtualNodes;
-  if (want > 0 && sonarVirt == nullptr) sonarVirt = new icemesh::sonar::SonarSource[4];
+  if (want > 0 && sonarVirt == nullptr) { sonarVirt = new icemesh::sonar::SonarSource[4]; for (uint8_t k = 0; k < 4; k++) sonarVirt[k].proc.prm = sonarPrm; }
   while (activeVirt > want) { activeVirt--; meshHubObserveNode(meshSonarVirtualId(NODE_ID, activeVirt), MESH_LS_OFFLINE, 0, 0, 0); }
   while (activeVirt < want) {
     const uint8_t id = meshSonarVirtualId(NODE_ID, activeVirt);
@@ -6869,6 +7215,42 @@ void handleWebApiSimPost() {
     if (h > 0 && h <= 255) simRequest((uint8_t)h, doc["sonar"] | false, doc["hall"] | false);
   }
   server.send(200, "application/json", simJson());
+}
+
+// v2 (D42) GET: {"preset":0-3,"knobs":[{"key","name","lo","hi","def","unit","v"}]}
+// POST: {"key":"snr","v":12} | {"preset":0-2} | {"defaults":true} | {"resend":true}
+static String knobsJson() {
+  using namespace icemesh::sonar;
+  String s; s.reserve(200 + P_COUNT * 110);
+  s = "{\"preset\":"; s += presetOf(sonarPrm); s += ",\"knobs\":[";
+  for (uint8_t i = 0; i < P_COUNT; i++) {
+    const ParamInfo& f = paramInfo(i);
+    if (i) s += ",";
+    s += "{\"key\":\""; s += f.key; s += "\",\"name\":\""; s += f.name; s += "\",\"lo\":"; s += f.lo;
+    s += ",\"hi\":"; s += f.hi; s += ",\"def\":"; s += f.def; s += ",\"unit\":\""; s += f.unit; s += "\",\"v\":"; s += sonarPrm[i]; s += "}";
+  }
+  s += "]}";
+  return s;
+}
+
+void handleWebApiKnobs() { server.send(200, "application/json", knobsJson()); }
+
+void handleWebApiKnobsPost() {
+  using namespace icemesh::sonar;
+  StaticJsonDocument<192> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { server.send(400, "application/json", "{\"error\":\"the sonar knobs are set on the chalet\"}"); return; }
+  if (doc.containsKey("key") && doc.containsKey("v")) {
+    const char* k = doc["key"] | "";
+    for (uint8_t i = 0; i < P_COUNT; i++) if (strcmp(k, paramInfo(i).key) == 0) sonarKnobSet(i, (uint8_t)constrain(doc["v"].as<int>(), 0, 255));
+  }
+  if (doc.containsKey("preset")) {
+    Params q = sonarPrm; applyPreset(q, (uint8_t)(doc["preset"] | 1));
+    for (uint8_t i = 0; i < P_COUNT; i++) if (q[i] != sonarPrm[i]) sonarKnobSet(i, q[i]);
+  }
+  if (doc["defaults"] | false) for (uint8_t i = 0; i < P_COUNT; i++) sonarKnobSet(i, paramInfo(i).def);
+  if (doc["resend"] | false) sonarKnobsResend();
+  server.send(200, "application/json", knobsJson());
 }
 
 void handleWebApiSonarPost() {

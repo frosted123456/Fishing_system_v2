@@ -219,15 +219,17 @@ typedef struct __attribute__((packed)) {
   uint8_t  checksum;        // XOR checksum
 } ConfigAckMessage;
 
-// v2 sonar control (6 bytes) - hub broadcast every second while the sonar test mode is on,
-// and right after any message from a node (the node listens briefly after it transmits).
+// v2 sonar control - hub broadcast every second while the sonar test mode is on (or the knobs just
+// changed), and right after any message from a node (the node listens briefly after it transmits).
+#define SONAR_CTRL_PARAMS 16   // >= icemesh::sonar::P_COUNT (lib/IceMesh/src/sonar_params.h)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;
   uint8_t  msg_type;        // MSG_SONAR_CTRL
   uint8_t  focus_node;      // 0 = none
   uint8_t  sim_on;          // 1 = sonar nodes generate fake data
-  uint8_t  reserved;
+  uint8_t  n_params;        // v2 (D42): sonar knobs that follow (0 = none)
+  uint8_t  params[SONAR_CTRL_PARAMS];
 } SonarCtrlMessage;
 
 // v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
@@ -279,6 +281,7 @@ typedef struct {
   char     name[16];
   uint8_t  grid_row;
   uint8_t  grid_col;
+  uint32_t alarm_ms;          // v2: FISH ON alarm latched since (millis, 0 = none): stays after the line resets
 } NodeState;
 
 // Network state

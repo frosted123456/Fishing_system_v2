@@ -100,7 +100,8 @@ bool meshEbRelay();
 void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
 bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value);   // hub: SET_RELAY / SET_SIM received (MESH_CMD_*)
 void meshSetHoleSim(uint8_t hole, uint8_t value);       // chalet: CMD_SET_SIM in the beacon (hole ID or 255 = all)
-enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4 };   // = icemesh::tdma::BeaconCmd
+enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5 };   // = icemesh::tdma::BeaconCmd
+void meshSetSonarParam(uint8_t id, uint8_t value);   // chalet: knob for every sonar hole (CMD_SONAR_PARAM)
 enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02 };
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)
@@ -134,3 +135,4 @@ uint8_t meshDemoSim(uint8_t id);                          // its simulation valu
 void meshDemoSetSim(uint8_t id, uint8_t value);           // 255 = every demo hole (applied at once)
 void meshDemoName(uint8_t id, char* out, size_t n);       // "Demo A1"
 void meshDemoTick();                                      // chalet loop()
+void meshDemoSetParams(const uint8_t* v, uint8_t n);      // the chalet's sonar knobs for the demo sonar

@@ -99,3 +99,26 @@ The test holes above are made by a hub, so a powered hub was needed. The demo ne
 | Not saved | off after every reboot (never left running on the ice). Turning it off removes the demo holes from the pages |
 | Not simulated | LoRa airtime / slots (the demo hubs never join the LoRa plan), radio range, battery |
 | Host test | `test/test_demo_net` (holes appear with pocket + SIM, acks clear, BASE reaches the store, SET_SIM reaches the hubs, forget) |
+
+## Knobs (2026-10-07, D42)
+Real-water tests come late and may happen on the ice first, so the processing has knobs instead of fixed constants.
+**Processing knobs** (run on every sonar hole, one set for all; `lib/IceMesh/src/sonar_params.h`):
+
+| Key | Knob | Default | What it does |
+|---|---|---|---|
+| snr | Detection threshold | 10 dB | echo above the noise floor to count as a target (higher = less noise, misses faint fish) |
+| prom | Peak contrast | 5 dB | peak above its neighbourhood |
+| confirm | Confirm pings | 3 | pings before a target is reported (single-ping noise filter) |
+| keep | Keep without echo | 5 | gaps allowed in a fish trace |
+| gate | Max target move | 32 cm/ping | larger = fast fish stay one track, more mixing |
+| dead | Dead zone | 0.9 m | nothing reported closer (ring-down, ice, bubbles) |
+| bsmooth | Bottom smoothing | 25 % | lower = steadier bottom line |
+| learn | Static scene learning | 0.012 | how fast bottom / weeds become grey background |
+| range | Colour range | 46 dB | smaller = more contrast |
+| tvg | Range compensation | on | deeper echoes boosted for spreading/absorption |
+| cycles, gain, pinghz | (driver) | 8, 8, 4/s | kept and sent, used by the TUSS4470 driver when written |
+
+Defaults = the prototype ("Processed"): `test_sonar_proc` stays bit-exact. **Noise filter** presets (OLED): Low 7/4/2/6, Normal 10/5/3/5, High 14/7/5/4 (snr/prom/confirm/keep).
+Path: chalet (OLED Settings › Sonar, web Sonar › Display › Processing, serial `KNOBS` / `KNOB <key> <v>`) → beacon `CMD_SONAR_PARAM` (one knob per command; whole set again when a hub appears after boot, or "Send to holes again") → hub (NVS) → tip-ups in the sonar control message (NVS). Demo network: the knobs act on the FOCUS hole (full fake sonar); the light demo summaries ignore them.
+
+**Display knobs** (no radio): OLED Settings › Display (units, Sonar / Focus depth Auto or fixed, hide weak echoes; CardKB `+` `-` `a` on the Sonar / Focus pages); web Sonar › Display (depth scale Auto/fixed, colour gain, weak echoes, per phone); web Holes cards: scale "same for all" / "each hole" / fixed.

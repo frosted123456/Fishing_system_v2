@@ -66,6 +66,9 @@ struct ScreenModel {
   bool kb;                   // CardKB present: footers say "OK:" (Enter) instead of "2x:" (double press)
   uint32_t uptime_s;
   bool feet;                 // depth units
+  uint16_t son_range_cm;     // Sonar page depth scale: 0 = auto (deepest bottom + margin), else fixed
+  uint16_t focus_range_cm;   // Focus page depth scale: 0 = auto, else fixed
+  bool hide_weak;            // do not draw the weakest echoes (level 1)
   // FOCUS
   uint8_t focus_node; uint16_t bait_cm; uint8_t n_cols; ScrPingCol cols[118];
   // test
@@ -79,6 +82,8 @@ struct ScreenModel {
 // `blink` toggles every 500 ms. `sub` = sub-page (holes list paging).
 void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool blink);
 uint8_t screenHolesPages(const ScreenModel& m);
+uint16_t screenSonarAutoRange(const ScreenModel& m);   // cm, what "auto" shows now
+uint16_t screenFocusAutoRange(const ScreenModel& m);
 uint8_t screenSonarPages(const ScreenModel& m);
 // what OK (Enter / double press) does on this page ("" = nothing): shown in the footer
 const char* screenPageAction(const ScreenModel& m, uint8_t page);
