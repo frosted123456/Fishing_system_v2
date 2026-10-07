@@ -64,7 +64,8 @@ DeviceSettings settings = {
   .sonDepthIdx = 0,
   .focusDepthIdx = 0,
   .hideWeak = false,
-  .nearBaitBeep = false
+  .nearBaitBeep = false,
+  .beamDeg = 20
 };
 uint8_t pendingConfigSeq = 0;
 uint8_t pendingConfigTarget = 0;

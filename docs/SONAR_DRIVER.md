@@ -160,9 +160,8 @@ No compiler on the Windows PC? Send the log file to Claude: the replay runs in i
 5. **Analog echo up the mast**: VOUT travels in the same cable as SCLK. No SPI traffic happens during a capture
    (registers are written before the burst), but the IO2 burst at 200 kHz does: watch for a burst-shaped bump
    right after `t0` that is not in the water. Twisting VOUT with a GND wire helps.
-6. The TUSS4470 read: the register value is taken from the same 16-bit frame (as open_echo). If `REG` always
-   reads 0 or the previous value, the read needs a second frame (then the presence check fails too: `REG 10`
-   by hand tells which).
+6. SPI timing: mode 1 at 1 MHz per open_echo; the datasheet (7.5) says SDO is sampled on the falling SCLK edge
+   and SDI shifted on the rising edge. If `REG 1D` does not read 0xB9, try SPI_MODE0 first.
 
 ## Open questions
 

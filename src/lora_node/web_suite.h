@@ -73,7 +73,7 @@ a{color:var(--accent)}
 .inst{grid-area:inst}
 .flash-wrap{position:relative;width:100%;max-width:330px;margin:0 auto;aspect-ratio:1/1}
 .flash-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
-.readouts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px;border-top:1px solid var(--water-line);padding-top:10px}
+.readouts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;border-top:1px solid var(--water-line);padding-top:10px}
 .readouts div{min-width:0}
 .readouts span{display:block;color:var(--water-muted);font-size:.85rem}
 .readouts strong{display:block;font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -281,6 +281,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div><span>Bait line</span><strong id="roBait">–</strong></div>
       <div><span>Bottom type</span><strong id="roBottom">–</strong></div>
       <div><span>Noise floor</span><strong id="roNoise">–</strong></div>
+      <div><span>Beam at bottom</span><strong id="roCone">–</strong></div>
     </div>
   </section>
 
@@ -373,6 +374,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <form class="form" id="setForm">
         <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
         <span class="tog"><span id="lblNb">Short beep when a fish comes near a bait (sonar)</span><button type="button" class="switch" role="switch" id="fNear" aria-labelledby="lblNb" aria-checked="false"></button></span>
+        <label class="f">Sonar beam angle (°)<input type="number" id="fBeam" min="5" max="60" value="20"><small>Full cone angle from the transducer's spec sheet (typical 10-25° at 200 kHz). Sets the beam-width readouts on the Sonar tab.</small></label>
         <label class="f">FISH ON alarm<select id="fAlarm"><option value="0">Until silenced</option><option value="1">1 min after the trip</option><option value="5">5 min after the trip</option><option value="15">15 min after the trip</option><option value="30">30 min after the trip</option></select><small>Screen, buzzer and phone keep ringing after the flag is reset, until silenced (or this time). A new trip always rings again.</small></label>
         <label class="f">Alert hold time (s)<input type="number" id="fHold" min="5" max="300"><small>Minimum time an alert stays on (5-300)</small></label>
         <label class="f">Heartbeat interval (s)<input type="number" id="fHeart" min="10" max="600"><small>Status broadcast interval (10-600)</small></label>
@@ -472,7 +474,9 @@ const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
 /* ---------- State ---------- */
 let units = 'ft';
 try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
-const opts = { overlays: true, bgsep: true };
+const opts = { overlays: true, bgsep: true, cone: true };
+let beamDeg = 20;   // transducer beam angle (full cone, degrees), chalet setting (Settings tab); est. until the spec sheet
+const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
 let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
 let selSlot = null, userPicked = false, playing = true;
 
@@ -488,7 +492,8 @@ function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Cont
 let listBusy = false, pingBusy = false;
 const sfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
 function loadList() { if (listBusy) return; listBusy = true; sfetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}).then(() => { listBusy = false; }); }
-function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }   // called by the suite with /api/status
+function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }
+function setBeam(deg) { if (deg >= 5 && deg <= 60 && deg !== beamDeg) { beamDeg = deg; if (recs.length && visible()) drawOverlay(); } }   // called by the suite with /api/status
 function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
 function loadPings() {
   if (!focus || pingBusy) return; const n = focus;
@@ -638,6 +643,10 @@ function drawOverlay() {
     const y = Math.round(yOf(dm)) + 0.5;
     g.strokeStyle = 'rgba(215,230,234,0.09)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
     g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : (step < 1 ? dm.toFixed(1) : dm.toFixed(0)), 6 * dpr, y - 2 * dpr);
+    if (opts.cone) {   // D52: what the beam covers at that depth (a disc of this width on the lake, centred under the hole)
+      const lab = '⌀ ' + fmtD(coneWidth(dm)), lw = g.measureText(lab).width;
+      g.fillStyle = 'rgba(215,230,234,0.42)'; g.fillText(lab, w - lw - 6 * dpr, y - 2 * dpr);
+    }
   }
   g.fillStyle = 'rgba(215,230,234,0.5)';
   g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
@@ -758,6 +767,7 @@ function updReadouts() {
   $('roBait').textContent = bait == null ? '–' : fmtD(bait);
   $('roBottom').textContent = cur ? HARD[cur.hard].t : '–';
   $('roNoise').textContent = cur ? cur.nf.toFixed(0) + ' dB' : '–';
+  $('roCone').textContent = cur && cur.b != null ? fmtD(coneWidth(cur.b)) + ' wide' : '–';
   $('zoomSpan').textContent = units === 'ft' ? 'last 5 ft above bottom, stretched' : 'last 1.5 m above bottom, stretched';
 }
 function render() { if (!focus || !visible()) return; drawFall(); drawZoom(); drawOverlay(); drawFlash(); updTargets(); updEcho(); updReadouts(); }
@@ -767,7 +777,8 @@ $('tlist').addEventListener('click', pickRow);
 /* ---------- Controls ---------- */
 const TOGGLES = [
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
-  ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.']
+  ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
+  ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.']
 ];
 const tUl = $('toggles');
 tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
@@ -783,7 +794,8 @@ $('play').addEventListener('click', () => { playing = !playing; syncControls(); 
 function fillDepth() {
   const list = units === 'ft' ? [5, 10, 15, 20, 25, 30, 40] : [2, 3, 4, 5, 6, 8, 10, 12];
   $('vDepth').innerHTML = '<option value="auto">Auto</option>' + list.map(v => { const m = units === 'ft' ? v / 3.28084 : v; return `<option value="${m.toFixed(3)}">0-${v} ${units}</option>`; }).join('');
-  const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto' && Math.abs(+o.value - +vopt.depth) < 0.01);
+  const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto' &)rawliteral"
+R"rawliteral(& Math.abs(+o.value - +vopt.depth) < 0.01);
   $('vDepth').value = opt ? opt.value : 'auto'; if (!opt) vopt.depth = 'auto';
   $('vGain').value = String(vopt.gain || 0); $('vWeak').value = String(vopt.weak || 0);
 }
@@ -801,8 +813,7 @@ const KHELP = {
   prom: ['Peak sharpness', 'How much an echo must stand above its neighbours. Lower = merges close echoes less.'],
   confirm: ['Pings to confirm', 'An echo is reported after this many pings in a row. Higher = fewer flickers, slower.'],
   keep: ['Keep a lost fish for', 'Pings a fish stays on screen after its echo vanished.'],
-  g)rawliteral"
-R"rawliteral(ate: ['Max move per ping', 'A fish moving more than this between pings becomes a new one.'],
+  gate: ['Max move per ping', 'A fish moving more than this between pings becomes a new one.'],
   dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: ~0.9 m. Bucket: 0.1 m.'],
   bsmooth: ['Bottom line smoothing', 'Lower = steadier bottom line, slower to follow a real change.'],
   learn: ['Still-scene fading speed', 'How fast things that do not move (bed, weeds) fade to the muted colours.'],
@@ -856,7 +867,7 @@ setInterval(() => { if (visible() && !document.hidden) loadList(); }, 2000);   /
 let rz = null;
 new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length && visible()) render(); }); }).observe(document.body);
 window.sonarApi = {
-  list: () => L, fmtD: m => fmtD(m), HARD, onStatus,
+  list: () => L, fmtD: m => fmtD(m), HARD, onStatus, setBeam,
   focus: n => post({ focus: n }), setSim: on => post({ sim: on }),
   show: () => { loadList(); requestAnimationFrame(() => { if (focus) { loadPings(); render(); } }); }
 };
@@ -1031,7 +1042,7 @@ const PM_DEEP = [[0.0, [158, 211, 217]], [0.5, [60, 135, 150]], [1.0, [21, 64, 7
 function pmColor(t) { t = pmClamp(t, 0, 1); let a = PM_DEEP[0], b = PM_DEEP[PM_DEEP.length - 1]; for (let i = 1; i < PM_DEEP.length; i++) if (t <= PM_DEEP[i][0]) { a = PM_DEEP[i - 1]; b = PM_DEEP[i]; break; } const u = (t - a[0]) / (b[0] - a[0] || 1); return a[1].map((c, k) => Math.round(c + (b[1][k] - c) * u)); }
 function pmHoles() {
   const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {}; (L.nodes || []).forEach(x => { sonar[x.node] = x; });
-  return (st && st.nodes || []).map(n => { const s = sonar[n.id]; return { id: n.id, name: nodeName(n), x: n.px, y: n.py, placed: n.px != null, fish: !!n.fish && n.online !== false, off: n.online === false,
+  return (st && st.nodes || []).map(n => { const s = sonar[n.id]; const dr = pm.drag && pm.drag.id === n.id && pm.drag.moved; return { id: n.id, name: nodeName(n), x: dr ? pm.drag.x : n.px, y: dr ? pm.drag.y : n.py, placed: n.px != null, fish: !!n.fish && n.online !== false, off: n.online === false,
     depth: s && s.bottom < 2047 ? s.bottom / 100 : null, hard: s ? s.hard : 3 }; });
 }
 function pmView(w, h, holes) {
@@ -1093,14 +1104,15 @@ function pmPost(id, x, y) { fetch('/api/node/pos', { method: 'POST', headers: { 
 pmC.addEventListener('pointerdown', e => {
   if (!pm.edit) { const hh = pmHit(...pmEvt(e)); if (hh) { pm.sel = hh.id; drawPmap(); } return; }
   const [px, py] = pmEvt(e), hh = pmHit(px, py);
-  if (hh) { pm.sel = hh.id; pm.drag = { id: hh.id, moved: false }; pmC.setPointerCapture(e.pointerId); drawPmap(); return; }
+  if (hh) { pm.sel = hh.id; pm.drag = { id: hh.id, moved: false, x: hh.x, y: hh.y }; pmC.setPointerCapture(e.pointerId); drawPmap(); return; }
   if (pm.sel != null && !pmHoles().find(x => x.id === pm.sel && x.placed)) { const [mx, my] = pm.view.toM(px, py); pmPost(pm.sel, mx, my); pm.sel = null; }
 });
 pmC.addEventListener('pointermove', e => {
   if (!pm.drag) return; const [px, py] = pmEvt(e), [mx, my] = pm.view.toM(px, py);
-  const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n) { n.px = mx; n.py = my; pm.drag.moved = true; drawPmap(); }
+  pm.drag.x = mx; pm.drag.y = my; pm.drag.moved = true;
+  const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n) { n.px = mx; n.py = my; } drawPmap();
 });
-pmC.addEventListener('pointerup', e => { if (!pm.drag) return; const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n && pm.drag.moved) pmPost(n.id, n.px, n.py); pm.drag = null; });
+pmC.addEventListener('pointerup', () => { if (!pm.drag) return; if (pm.drag.moved) pmPost(pm.drag.id, pm.drag.x, pm.drag.y); pm.drag = null; });
 $('pmEdit').addEventListener('click', () => { pm.edit = !pm.edit; pm.sel = null; $('pmEdit').setAttribute('aria-pressed', String(pm.edit)); $('pmEdit').classList.toggle('on', pm.edit); $('pmEdit').textContent = pm.edit ? 'Done' : 'Place holes'; drawPmap(); });
 $('pmRemove').addEventListener('click', () => { if (pm.sel != null) { pmPost(pm.sel, null); pm.sel = null; } });
 $('pmChips').addEventListener('click', e => { const b = e.target.closest('[data-pm]'); if (b) { pm.sel = pm.sel === +b.dataset.pm ? null : +b.dataset.pm; drawPmap(); } });
@@ -1276,6 +1288,7 @@ function loadSettings() {
     $('fHold').value = d.alertHoldSec; $('fHeart').value = d.heartbeatSec;
     if (d.alarmHoldMin !== undefined) $('fAlarm').value = String(d.alarmHoldMin);
     $('fNear').setAttribute('aria-checked', String(!!d.nearBaitBeep));
+    if (d.beamDeg) { $('fBeam').value = d.beamDeg; if (SON()) SON().setBeam(+d.beamDeg); }
   }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
   loadSim();
 }
@@ -1284,6 +1297,7 @@ $('setForm').addEventListener('submit', e => {
   e.preventDefault();
   const body = { buzzerEnabled: $('fBuzzer').getAttribute('aria-checked') === 'true', alertHoldSec: parseInt($('fHold').value, 10) || 30,
     alarmHoldMin: parseInt($('fAlarm').value, 10) || 0, nearBaitBeep: $('fNear').getAttribute('aria-checked') === 'true',
+    beamDeg: Math.min(60, Math.max(5, parseInt($('fBeam').value, 10) || 20)),
     heartbeatSec: parseInt($('fHeart').value, 10) || 60, reedActiveHigh: $('fReed').getAttribute('aria-checked') === 'true' };
   api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
   setTimeout(() => { $('setMsg').textContent = ''; }, 4000);

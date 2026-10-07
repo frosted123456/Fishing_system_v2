@@ -188,6 +188,7 @@ void loadSettings() {
   settings.focusDepthIdx = preferences.getUChar("focDepth", 0); if (settings.focusDepthIdx > 8) settings.focusDepthIdx = 0;
   settings.hideWeak = preferences.getBool("hideWeak", false);
   settings.nearBaitBeep = preferences.getBool("nearBeep", false);
+  settings.beamDeg = preferences.getUChar("beamDeg", 20);
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;
@@ -223,6 +224,7 @@ void saveSettings() {
   preferences.putUChar("focDepth", settings.focusDepthIdx);
   preferences.putBool("hideWeak", settings.hideWeak);
   preferences.putBool("nearBeep", settings.nearBaitBeep);
+  preferences.putUChar("beamDeg", settings.beamDeg);
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);
 

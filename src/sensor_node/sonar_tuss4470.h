@@ -41,7 +41,7 @@
 
 // ---- acquisition constants (est.) ----
 #define SONAR_ADC_HZ          150000   // I2S-ADC sample rate: ~5 samples per 2.5 cm bin at 1403 m/s
-#define SONAR_CHARGE_MS       4        // pause before each burst (VDRV refill), est.
+#define SONAR_CHARGE_MS       1        // settle before each burst; the real VDRV refill is the VDRV_READY wait in capture()
 // Drive voltage: knob "vdrv" (volts). VDRV_CTRL (reg 0x16) bits 3:0 = VDRV - 5 V, 5-20 V (datasheet), charged
 // from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet), so knob = MT3608 setting - 1 V. Default 11 V for the
 // 12.0 V setting. MT3608 at 21 V -> vdrv 20 = 40 V p-p across the transducer (full bridge, 2 x VDRV).

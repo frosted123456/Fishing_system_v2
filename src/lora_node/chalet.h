@@ -178,6 +178,7 @@ struct DeviceSettings {
   uint8_t focusDepthIdx;      // v2 OLED Focus page depth scale: 0 = auto, 1-8 = fixed
   bool hideWeak;              // v2 OLED: do not draw the weakest echoes
   bool nearBaitBeep;          // v2 (D43): short beep when a fish comes near a bait (off by default)
+  uint8_t beamDeg;            // v2 (D52): transducer beam angle, degrees (full cone). Display: cone width per depth. est. 20
 };
 
 

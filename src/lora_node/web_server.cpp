@@ -238,6 +238,7 @@ void handleWebApiSettingsGet() {
   doc["alertHoldSec"] = settings.alertHoldSec;
   doc["alarmHoldMin"] = settings.alarmHoldMin;
   doc["nearBaitBeep"] = settings.nearBaitBeep;
+  doc["beamDeg"] = settings.beamDeg;   // v2 (D52)
   doc["heartbeatSec"] = settings.heartbeatSec;
   doc["reedActiveHigh"] = settings.reedActiveHigh;
   doc["displayBrightness"] = settings.displayBrightness;
@@ -276,6 +277,7 @@ void handleWebApiSettingsPost() {
     settings.alertHoldSec = constrain(val, 5, 300);
     changed = true;
   }
+  if (doc.containsKey("beamDeg")) { settings.beamDeg = (uint8_t)constrain(doc["beamDeg"].as<int>(), 5, 60); changed = true; }
   if (doc.containsKey("nearBaitBeep")) { settings.nearBaitBeep = doc["nearBaitBeep"].as<bool>(); changed = true; }
   if (doc.containsKey("alarmHoldMin")) {   // v2: 0 = until silenced
     settings.alarmHoldMin = (uint8_t)constrain(doc["alarmHoldMin"].as<int>(), 0, 120);

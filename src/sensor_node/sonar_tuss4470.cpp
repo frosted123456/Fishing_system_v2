@@ -40,7 +40,7 @@ static uint16_t xfer(uint8_t b0, uint8_t b1) {
   const uint8_t r0 = vspi.transfer(b0), r1 = vspi.transfer(b1);
   digitalWrite(SONAR_PIN_CS, HIGH);
   vspi.endTransaction();
-  g_stat = (uint8_t)(r0 & 0x3F);   // every reply carries the status (datasheet figure 7-9)
+  g_stat = (uint8_t)((r0 >> 1) & 0x3F);   // reply bits 14:9 = STAT5..0 (bit 15 parity error, bit 8 parity; datasheet figure 7-9)
   return (uint16_t)((r0 << 8) | r1);
 }
 void writeReg(uint8_t addr, uint8_t v) { xfer((uint8_t)((addr & 0x3F) << 1), v); }

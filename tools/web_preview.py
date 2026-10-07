@@ -30,7 +30,7 @@ state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "s
          "simreq": {}, "simrate": 6,
          "transport": 0, "ch_setting": "auto", "ch": 0, "moves": 0, "relay_req": {}, "lr_only": False,
          "settings": {"buzzerEnabled": True, "alertHoldSec": 30, "heartbeatSec": 60, "reedActiveHigh": True,
-                      "alarmHoldMin": 0, "nearBaitBeep": False, "unitsMetric": False, "buzzerPassive": False},
+                      "alarmHoldMin": 0, "nearBaitBeep": False, "beamDeg": 20, "unitsMetric": False, "buzzerPassive": False},
          "bait": {3: 457}, "knobs": None, "trips": [], "pos": {2: (-18.0, 42.0), 3: (14.0, 55.0), 4: (31.0, 30.0), 136: (-40.0, 70.0), 137: (-12.0, 88.0)}}
 # the same knob table as lib/IceMesh/src/sonar_params.h (key, name, lo, hi, def, unit)
 KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contrast", 1, 15, 5, "dB"),
