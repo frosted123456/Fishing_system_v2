@@ -9,6 +9,7 @@
 #define MESSAGES_H
 
 #include <Arduino.h>
+#include <alarm_latch.h>   // v2 (D41/D47) FISH ON alarm latch rules (lib/IceMesh, host-tested)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE ROLES
@@ -281,8 +282,7 @@ typedef struct {
   char     name[16];
   uint8_t  grid_row;
   uint8_t  grid_col;
-  uint32_t alarm_ms;          // v2: FISH ON alarm latched since (millis, 0 = none): stays after the line resets
-  bool alarm_acked;           // v2 (D47): silenced while still tripped -> cleared when the line resets (no comeback)
+  icemesh::AlarmLatch alarm;  // v2 (D41/D47): the FISH ON alarm shown / sounded for this hole (alarm_latch.h)
 } NodeState;
 
 // Network state

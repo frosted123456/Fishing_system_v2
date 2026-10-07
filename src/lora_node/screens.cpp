@@ -217,10 +217,11 @@ void holesPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
     u8g2_SetFont(u, F_SMALL);
     char d[20];
     if (h.state == SH_OFFLINE) snprintf(d, sizeof(d), "offline");
+    else if (h.state == SH_FISH) snprintf(d, sizeof(d), "FISH %lu:%02lu", (unsigned long)(h.since_s / 60), (unsigned long)(h.since_s % 60));
     else if (h.son.valid && (h.son.status & 1)) snprintf(d, sizeof(d), "ICE?");                  // ring-down: slush on the transducer?
-    else if (h.son.valid && m.setup_s) snprintf(d, sizeof(d), "bot %udB", h.son.bottom_snr);     // level check while setting up
-    else if (h.son.valid && (h.son.status & 2) && h.batt <= 100) snprintf(d, sizeof(d), "NEAR %u%%", h.batt);
-    else if (h.fish >= 0 && h.batt <= 100) snprintf(d, sizeof(d), "%df %u%%", h.fish, h.batt);
+    else if (h.son.valid && m.setup_s) snprintf(d, sizeof(d), "echo %udB", h.son.bottom_snr);    // level check while setting up
+    else if (h.son.valid && (h.son.status & 2)) snprintf(d, sizeof(d), "near bait");
+    else if (h.fish > 0 && h.batt <= 100) snprintf(d, sizeof(d), "%d fish %u%%", h.fish, h.batt);
     else if (h.batt <= 100) snprintf(d, sizeof(d), "%u%%", h.batt);
     else snprintf(d, sizeof(d), "-");
     right(u, y + 8, d);
