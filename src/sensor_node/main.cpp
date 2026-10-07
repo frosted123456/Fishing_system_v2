@@ -62,6 +62,9 @@
 
 #include "config.h"
 #include "messages.h"
+#include <hall_latch.h>         // v2 (D46): spool-shaft Hall latch
+#include <driver/rtc_io.h>
+#include <sys/time.h>
 #include "sonar_tuss4470.h"    // v2 (D43): real sonar (TUSS4470), only with SONAR_REAL=1
 #include <sonar_sim.h>      // v2: fake sonar for the sonar test mode (lib/IceMesh)
 #include <eb_link.h>        // v2: ESP-NOW backbone relay (lib/IceMesh)
@@ -131,6 +134,30 @@ RTC_DATA_ATTR uint32_t bootCount = 0;
 RTC_DATA_ATTR uint32_t totalUptimeSec = 0;
 RTC_DATA_ATTR uint16_t messageSeq = 0;      // Monotonic sequence for dedup
 RTC_DATA_ATTR bool lastReedState = false;
+#if HALL_LATCH
+RTC_DATA_ATTR icemesh::HallLatch hall;            // v2 (D46): plain struct, zero at power-on, kept in deep sleep
+static volatile uint32_t hallEdges = 0;           // counted by the pin interrupt while awake
+static void IRAM_ATTR hallIsr() { hallEdges++; }
+static uint64_t hallNowMs() {                     // system time keeps running through deep sleep (RTC timer)
+  struct timeval tv; gettimeofday(&tv, nullptr);
+  return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
+}
+static void hallPoll() {
+  noInterrupts(); const uint32_t n = hallEdges; hallEdges = 0; interrupts();
+  hall.edges(n, (uint8_t)digitalRead(REED_PIN), hallNowMs());
+}
+// before deep sleep: wake on the NEXT flip (the opposite level), pull-up kept by the RTC IO
+static void hallArmWake() {
+  detachInterrupt(digitalPinToInterrupt(REED_PIN));
+  hallPoll();
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)REED_PIN, hall.wakeLevel());
+  rtc_gpio_pullup_en((gpio_num_t)REED_PIN);
+  rtc_gpio_pulldown_dis((gpio_num_t)REED_PIN);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);   // RTC pull-up needs it (ext0 keeps it on too)
+}
+#else
+static inline void hallArmWake() {}
+#endif
 RTC_DATA_ATTR bool sonarSimOn = false;              // v2 sonar test mode (survives a reboot loop guard)
 volatile bool sonarCtrlSeen = false;
 volatile bool sonarCtrlSim = false;
@@ -236,7 +263,7 @@ void setup() {
   switch (wakeReason) {
     case ESP_SLEEP_WAKEUP_EXT0:
       DEBUG_PRINTLN(F("Wake: Reed switch triggered (EXT0)!"));
-      reedTriggered = true;
+      reedTriggered = !HALL_LATCH;   // latch: one flip is not a trip by itself (TRIGGER_FLIPS), the check below decides
       break;
     case ESP_SLEEP_WAKEUP_GPIO:
       DEBUG_PRINTLN(F("Wake: Reed switch triggered (GPIO)!"));
@@ -473,7 +500,20 @@ void setupPins() {
   // Configure reed switch input with internal pull-up
   // When magnet is present (flag down): switch closed, reads LOW
   // When magnet absent (flag up/FISH ON): switch open, reads HIGH
+#if HALL_LATCH
+  // the pad is still in RTC mode after an ext0 wake: back to a normal input with pull-up, then count
+  // the flips that happened while asleep, then count edges while awake
+  rtc_gpio_deinit((gpio_num_t)REED_PIN);
   pinMode(REED_PIN, INPUT_PULLUP);
+  delayMicroseconds(50);   // pull-up settles (open-drain output)
+  hall.settings(TRIGGER_FLIPS, HALL_WINDOW_MS, (uint32_t)HALL_CLEAR_SEC * 1000UL);
+  hall.boot((uint8_t)digitalRead(REED_PIN), lastWakeReason == ESP_SLEEP_WAKEUP_EXT0, hallNowMs());
+  hallEdges = 0;
+  attachInterrupt(digitalPinToInterrupt(REED_PIN), hallIsr, CHANGE);
+  DEBUG_PRINTF("Hall latch: level %u, %lu flips since power-on, trip %s\n", hall.level, (unsigned long)hall.total, hall.on ? "ON" : "off");
+#else
+  pinMode(REED_PIN, INPUT_PULLUP);
+#endif
 
   #ifdef LED_PIN
   if (LED_PIN >= 0) {
@@ -761,6 +801,10 @@ static bool readReedHw();
 bool readReedSwitch() { return readReedHw() || simTripActive(); }   // v2: a simulated trip looks like the real flag
 
 static bool readReedHw() {
+#if HALL_LATCH
+  hallPoll();
+  return hall.active(hallNowMs());
+#endif
   int reading1 = digitalRead(REED_PIN);
   delay(DEBOUNCE_MS);
   int reading2 = digitalRead(REED_PIN);
@@ -979,7 +1023,9 @@ void enterDeepSleep() {
   // BUG FIX #1: Determine if we should enable GPIO wakeup
   // If FISH_ON is already active, GPIO is already HIGH - enabling GPIO wakeup
   // on HIGH level would cause immediate wake, creating an infinite loop!
-  bool enableGpioWake = !HAS_FLAG(currentFlags, FLAG_FISH_ON);
+  // latch (D46): always wake on the next flip (opposite level: no wake loop); reed: only while the flag is down
+  bool enableGpioWake = !HALL_LATCH && !HAS_FLAG(currentFlags, FLAG_FISH_ON);
+  if (HALL_LATCH) hallArmWake();
 
   if (enableGpioWake) {
     DEBUG_PRINTLN(F("Entering deep sleep..."));
@@ -1063,6 +1109,8 @@ void enterDeepSleepFast() {
 
   // NO GPIO wake during FISH_ON - pin is HIGH, would wake immediately
   // We rely on timer wake to poll the reed switch
+  // Latch (D46): wake on the next flip is safe (opposite level): line still running = counted at once
+  if (HALL_LATCH) hallArmWake();
 
   // Shut down WiFi
   WiFi.disconnect(true);

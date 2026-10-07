@@ -23,7 +23,7 @@
 // sleep mode over SPI (reg 0x1B bit 7). Mast cable (shielded 12-core): 3.3 V, GND, Hall out, SCLK, MOSI,
 // MISO, CS, IO1, IO2, echo (= VOUT) + echo-GND twisted, 1 spare. Frank's plan: VSPI 18/19/23/5, IO1/IO2 on
 // two free GPIOs (e.g. 25, 26), echo on ADC1, Hall on an RTC GPIO. IO1/IO2/echo numbers still to confirm. VOUT on an ADC1 pin (I2S-ADC works on ADC1
-// only: GPIO32-39). WROOM tip-up already uses 15 (Hall), 2 (LED), 34 (battery). GPIO5 is a strapping
+// only: GPIO32-39). WROOM tip-up already uses 27 (Hall latch), 2 (LED), 34 (battery). GPIO5 is a strapping
 // pin: fine as SPI CS (idles high).
 #ifndef SONAR_PIN_SCK
 #define SONAR_PIN_SCK   18

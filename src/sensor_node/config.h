@@ -73,6 +73,20 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Most tip-ups use a magnet that pulls away when the flag pops up, so HIGH is typical.
 #define REED_ACTIVE_HIGH        true
 
+// v2 (D46) spool-shaft Hall latch (US1881 + 4 magnets alternating): output flips every quarter turn.
+// Used instead of the reed level logic when HALL_LATCH is 1 (WROOM tip-up by default; C3 keeps the reed).
+#ifndef HALL_LATCH
+#ifdef BOARD_ESP32WROOM
+#define HALL_LATCH              1
+#else
+#define HALL_LATCH              0
+#endif
+#endif
+#define TRIGGER_FLIPS           1       // 1 = alert on a quarter turn, 2 = half turn (wind / bait false alerts)
+#define HALL_WINDOW_MS          10000   // flips further apart than this start a new count (matters with 2)
+#define HALL_CLEAR_SEC          30      // trip ends (line state back to normal) after the shaft is still this long.
+                                        // The chalet alarm stays latched until silenced (D41).
+
 // ═══════════════════════════════════════════════════════════════════════════
 // TIMING SETTINGS
 // ═══════════════════════════════════════════════════════════════════════════
@@ -146,7 +160,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 #ifdef BOARD_ESP32WROOM
 
-#define REED_PIN            15          // Reed switch input
+#define REED_PIN            27          // Hall latch output (US1881, open drain): RTC GPIO, ext0 wake source
 #define LED_PIN             2           // Onboard LED (most devkits)
 #define VBAT_PIN            34          // Battery voltage ADC
 

@@ -38,7 +38,7 @@ None of these are confirmed. If the mast-head wiring differs, define **all** of 
 | OUT_4 comparator | OUT_4 | -1 | Not in the 12-core cable (the one echo wire is VOUT). Spare core + a free GPIO = edge timing |
 | VOUT log-amp | VOUT | 36 (VP, ADC1_CH0) | I2S-ADC works on ADC1 only (GPIO 32-39); ADC1 works with the radio on |
 | Converter enable | none | -1 | Not in Frank's design (MT3608 always on). Optional GPIO = converter off while listening |
-| Already used | | 15 Hall, 2 LED, 34 battery | unchanged |
+| Already used | | 27 Hall latch, 2 LED, 34 battery | Hall moved from 15 to 27 (D46) |
 
 Check before powering: **VOUT must stay below about 3.1 V** at the ESP32 pin (ADC at 12 dB attenuation). If the
 shield's VOUT can go higher, add a divider and tell Claude (the dB scale changes).
