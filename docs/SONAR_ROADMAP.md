@@ -10,8 +10,8 @@ Status:
 | # | Item | Status | Where / notes |
 |---|---|---|---|
 | 1 | Sound speed 1403 m/s | Blind | `sound` knob (1350 + v, default 1403). Sample time → 2.5 cm bins in the driver |
-| 2 | Converter off while listening | Blind | GPIO33 LOW during capture. Needs a reachable EN pin on the **boost** converter (3 AA → 24-28 V is a boost, not a buck) |
-| 3 | Drive 24-28 V | Hardware | |
+| 2 | Converter off while listening | Dropped (hardware) | No enable wire in the design: MT3608 always on, TUSS4470 sleep mode instead. Driver still supports an enable GPIO if added |
+| 3 | Drive voltage | Hardware: 12-15 V | MT3608 12-15 V (not 24-28 V). VDRV build constant `SONAR_VDRV_LEVEL` must stay below it |
 | 4 | I2S-DMA ADC + calibration curve | Blind | 150 kHz, rate measured each ping (`adc=`); 17-point curve, serial `CAL`, NVS |
 | 5 | Band-pass / log-amp registers | Blind | `bpf` (reg 0x10), `gain` (0x13), `thresh` (0x17) knobs. Per-frequency BPF codes: open |
 | 6 | Burst 16 base / 6-8 focus | Blind | `cycles` / `fcycles` knobs, RMT burst |

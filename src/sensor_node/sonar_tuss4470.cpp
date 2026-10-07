@@ -25,11 +25,15 @@ static uint16_t g_raw[MAX_SAMPLES];
 static volatile uint32_t g_cap_burst = 0, g_cap_edge = 0;
 static volatile bool g_edge_seen = false;
 static volatile uint32_t g_blind_ticks = 0;
+static bool g_asleep = false, g_spi_up = false;
+// TOF_CONFIG (reg 0x1B, datasheet): bit 7 SLEEP_MODE_EN, bit 6 STDBY_MODE_EN, bit 1 VDRV_TRIGGER, bit 0 CMD_TRIGGER
+static const uint8_t TOF_SLEEP = 0x80, TOF_TRIGGER = 0x01;
 
 // ---- SPI register access (open_echo protocol: 16-bit frame, odd parity bit, SPI mode 1) ----
 static uint8_t parity16(uint16_t v) { uint8_t ones = 0; for (int i = 0; i < 16; i++) ones += (v >> i) & 1; return (uint8_t)((ones + 1) % 2); }
 static uint16_t xfer(uint8_t b0, uint8_t b1) {
   b0 |= parity16((uint16_t)((b0 << 8) | b1));
+  gpio_hold_dis((gpio_num_t)SONAR_PIN_CS);   // sleep() holds NCS high for deep sleep; any frame releases it
   vspi.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE1));
   digitalWrite(SONAR_PIN_CS, LOW);
   const uint8_t r0 = vspi.transfer(b0), r1 = vspi.transfer(b1);
@@ -39,6 +43,19 @@ static uint16_t xfer(uint8_t b0, uint8_t b1) {
 }
 void writeReg(uint8_t addr, uint8_t v) { xfer((uint8_t)((addr & 0x3F) << 1), v); }
 uint8_t readReg(uint8_t addr) { return (uint8_t)(xfer((uint8_t)(0x80 | ((addr & 0x3F) << 1)), 0) & 0xFF); }
+static void spiUp() {
+  if (g_spi_up) return;
+  pinMode(SONAR_PIN_CS, OUTPUT); digitalWrite(SONAR_PIN_CS, HIGH);
+  vspi.begin(SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS);
+  g_spi_up = true;
+}
+// out of sleep mode; first releases the NCS hold that sleep() set, or no frame could reach the chip
+static void wake() {
+  gpio_hold_dis((gpio_num_t)SONAR_PIN_CS);
+  digitalWrite(SONAR_PIN_CS, HIGH);
+  writeReg(0x1B, 0x00);
+  g_asleep = false;
+}
 
 // ---- comparator edge: MCPWM capture (CAP0 = burst start on IO2, CAP1 = OUT_4), 80 MHz ticks ----
 static bool IRAM_ATTR capCb(mcpwm_unit_t, mcpwm_capture_channel_id_t ch, const cap_event_data_t* e, void*) {
@@ -73,25 +90,25 @@ static inline uint16_t cal(uint16_t raw) {   // piecewise linear, 16 segments
 
 bool begin() {
   loadCal();
-  pinMode(SONAR_PIN_CS, OUTPUT); digitalWrite(SONAR_PIN_CS, HIGH);
   pinMode(SONAR_PIN_IO1, OUTPUT); digitalWrite(SONAR_PIN_IO1, HIGH);   // as open_echo: IO1 high, burst on IO2
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
-  vspi.begin(SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS);
+  spiUp();
+  wake();                                                              // out of sleep (if a deep sleep left it there)
   // presence check: write/read back the threshold register
   writeReg(0x17, 0x5A);
   g_ok = readReg(0x17) == 0x5A;
-  writeReg(0x16, 0x0F);   // VDRV enabled (not Hi-Z), as open_echo
+  writeReg(0x16, SONAR_VDRV_LEVEL & 0x0F);   // VDRV = level + 5 V, 10 mA charge (bit 4 = 0), see header
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0
   // input: mcpwm_gpio_init makes the pin input-only, so it runs FIRST, the RMT then takes the pin as
   // output (that clears the input enable) and the input is switched back on last. The in-matrix route
   // to CAP0 stays. Bench check: "edge" on the bench line must not be "-" with a target in the water.
   mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM_CAP_0, SONAR_PIN_IO2);
-  mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM_CAP_1, SONAR_PIN_O4);
+  if (SONAR_PIN_O4 >= 0) mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM_CAP_1, SONAR_PIN_O4);
   mcpwm_capture_config_t cc = {};
   cc.cap_edge = MCPWM_POS_EDGE; cc.cap_prescale = 1; cc.capture_cb = capCb; cc.user_data = nullptr;
   mcpwm_capture_enable_channel(MCPWM_UNIT_0, MCPWM_SELECT_CAP0, &cc);
-  mcpwm_capture_enable_channel(MCPWM_UNIT_0, MCPWM_SELECT_CAP1, &cc);
+  if (SONAR_PIN_O4 >= 0) mcpwm_capture_enable_channel(MCPWM_UNIT_0, MCPWM_SELECT_CAP1, &cc);
 
   // burst generator: RMT channel 0 on IO2, 80 MHz (12.5 ns)
   rmt_config_t rc = RMT_DEFAULT_CONFIG_TX((gpio_num_t)SONAR_PIN_IO2, RMT_CH);
@@ -116,6 +133,19 @@ bool begin() {
 }
 bool ok() { return g_ok; }
 
+// Before every deep sleep and when the sonar stops: the shield stays powered (no enable wire), so this
+// is its only low-power state. Works without begin() (only SPI is brought up).
+void sleep() {
+  spiUp();
+  writeReg(0x1B, TOF_SLEEP);
+  g_asleep = true;
+  // NCS held HIGH through deep sleep: a floating CS + SCLK could clock in a frame and wake the chip.
+  // (A 10 k pull-up on NCS at the shield does the same in hardware.)
+  digitalWrite(SONAR_PIN_CS, HIGH);
+  gpio_hold_en((gpio_num_t)SONAR_PIN_CS);
+  gpio_deep_sleep_hold_en();
+}
+
 static void burst(uint32_t hz, uint8_t cycles) {
   static rmt_item32_t items[33];
   const uint32_t half = 40000000UL / hz;   // 80 MHz ticks per half period
@@ -131,7 +161,7 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   if (SONAR_PIN_BOOST >= 0) digitalWrite(SONAR_PIN_BOOST, LOW);   // item 2: quiet receive (VDRV holds the burst)
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
-  writeReg(0x1B, 0x01);                                           // time-of-flight start
+  writeReg(0x1B, TOF_TRIGGER);                                    // time-of-flight start
   burst(hz, cycles);
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
@@ -177,13 +207,16 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
 bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo& info) {
   if (!g_ok) return false;
   const uint32_t t_start = micros();
+  if (g_asleep) { wake(); delay(SONAR_WAKE_MS); }
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   const uint8_t avg = focus ? 1 : p[P_AVG];
   writeReg(0x13, p[P_GAIN] & 3);        // LNA gain
   writeReg(0x10, p[P_BPF] & 0x3F);      // band-pass centre (one code for the 3 frequencies: TODO per-frequency codes, datasheet Table 7.1)
   writeReg(0x17, p[P_THRESH]);          // OUT_4 threshold
-  writeReg(0x1A, (uint8_t)((cycles - 1) & 0x1F));   // burst pulses register (open_echo: 0x0F = 16) - the RMT sets the real count
+  // BURST_PULSE bits 5:0 = pulse count, and 0 = CONTINUOUS burst (datasheet): never write 0. Bits 7:6
+  // (half-bridge, pre-driver mode) stay 0. The RMT on IO2 sends the real count.
+  writeReg(0x1A, (uint8_t)((cycles < 1 ? 1 : cycles) & 0x3F));
   g_blind_ticks = (uint32_t)(2.0f * p[P_DEADZONE_DM] * 0.1f / sound * 80e6f);
   static uint8_t rot = 0;
   const uint8_t mode = p[P_FREQ_MODE];
@@ -218,6 +251,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
 #else   // SONAR_REAL == 0: nothing (the fake sonar runs instead)
 namespace tuss {
 bool begin() { return false; }
+void sleep() {}
 bool ok() { return false; }
 bool ping(const icemesh::sonar::Params&, bool, uint8_t[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], PingInfo&) { return false; }
 uint8_t readReg(uint8_t) { return 0; }

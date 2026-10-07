@@ -1042,6 +1042,7 @@ void enterDeepSleep() {
     esp_wifi_stop();
   #endif
 
+  if (SONAR_REAL) tuss::sleep();   // shield stays powered (no enable wire): low-power mode over SPI
   esp_deep_sleep_start();
 }
 
@@ -1071,6 +1072,7 @@ void enterDeepSleepFast() {
     esp_wifi_stop();
   #endif
 
+  if (SONAR_REAL) tuss::sleep();   // shield stays powered (no enable wire): low-power mode over SPI
   esp_deep_sleep_start();
 }
 
@@ -1423,6 +1425,7 @@ void sonarLoop() {
     if (started) {
       started = false;
       DEBUG_PRINTLN(F("Sonar test mode OFF"));
+      if (SONAR_REAL) tuss::sleep();   // relay / no-sleep nodes too: the shield has no power switch
       if (SLEEP_ENABLED && !ebRelayOn) {   // a backbone relay stays awake
         totalUptimeSec += millis() / 1000;
         if (HAS_FLAG(currentFlags, FLAG_FISH_ON)) { fishOnMonitorMode = true; enterDeepSleepFast(); }

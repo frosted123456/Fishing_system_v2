@@ -20,7 +20,7 @@ checks one thing.
 | Time zero (transmit leakage onset) | **No** | Rule: first sample above 80 % of the max of the first 3 ms |
 | dB scale of the ADC (95 dB over 4096 counts) | **No, estimate** | Prototype scale; calibrate |
 | OUT_4 edge timing (MCPWM capture) | **No** | IO2 is both RMT output and capture input (see "Risks") |
-| Converter off while listening (GPIO33) | **No** | Needs an enable pin on the converter, see "Power" |
+| TUSS4470 sleep mode between sessions / before deep sleep | **No** | Reg 0x1B bit 7 (datasheet); NCS held high in deep sleep |
 
 ## Wiring: PROPOSED pins, Frank to confirm
 
@@ -35,23 +35,40 @@ None of these are confirmed. If the mast-head wiring differs, define **all** of 
 | SPI CS | NCS | 5 | VSPI default; strapping pin, fine as CS (idles high) |
 | IO1 | IO1 | 26 | Held HIGH (as open_echo) |
 | IO2 burst | IO2 | 25 | RMT output + MCPWM CAP0 input |
-| OUT_4 comparator | OUT_4 | 27 | MCPWM CAP1 |
+| OUT_4 comparator | OUT_4 | 27 | MCPWM CAP1; `-1` if not wired (no edge timing, the rest works) |
 | VOUT log-amp | VOUT | 36 (VP, ADC1_CH0) | I2S-ADC works on ADC1 only (GPIO 32-39); ADC1 works with the radio on |
-| Converter enable | converter EN | 33 | LOW while listening; `-D SONAR_PIN_BOOST=-1` if not wired |
+| Converter enable | none | -1 | Not in Frank's design (MT3608 always on). Optional GPIO = converter off while listening |
 | Already used | | 15 Hall, 2 LED, 34 battery | unchanged |
 
 Check before powering: **VOUT must stay below about 3.1 V** at the ESP32 pin (ADC at 12 dB attenuation). If the
 shield's VOUT can go higher, add a divider and tell Claude (the dB scale changes).
 
-## Power (items 2-3)
+## Power (items 2-3): Frank's design, 2026-10-07
 
-- 3 AA (≈4.5 V) to the 24-28 V drive is a **boost** converter (e.g. MT3608), not a buck: a buck only steps down.
-- Quiet receive needs the converter's **EN** pin on GPIO33. Check your module: on many cheap MT3608 boards EN is
-  tied to VIN on the PCB and is not reachable without lifting a pin. If there is no EN: build with
-  `-D SONAR_PIN_BOOST=-1` (the driver then leaves it alone) and compare the noise floor (`noise=`) with the
-  converter on vs unplugged during the test.
-- `SONAR_CHARGE_MS` (4 ms, estimate): converter on before each burst to refill VDRV. Too short → weaker bursts
-  later in an average (watch `raw_max` drop across pings).
+| Rail | From | Feeds |
+|---|---|---|
+| Pack | 3 x L91 lithium AA, holder switch, 3.6-5.4 V | both converters, straight (no load switch) |
+| 3.3 V | TPS63020 buck-boost | ESP32, Hall latch, shield logic (VDD) |
+| 12-15 V | MT3608 boost | shield VIN (VPWR, transducer drive) |
+
+What the firmware does with it:
+
+- **No enable wire**: `SONAR_PIN_BOOST` = -1, the MT3608 runs whenever the holder switch is on. Idle = the
+  TUSS4470 **sleep mode** over SPI (reg 0x1B bit 7, datasheet), set before every deep sleep and when the sonar
+  stops; the next ping wakes it (`SONAR_WAKE_MS` 5 ms, est.). NCS is held high through deep sleep so a floating
+  line cannot clock in a frame (a 10 k pull-up on NCS at the shield is the hardware equivalent).
+- **VDRV level** (reg 0x16 bits 3:0, VDRV = level + 5 V, datasheet) must stay below the MT3608 output:
+  `SONAR_VDRV_LEVEL` 0x06 = 11 V for a 12 V setting (est.: the regulator's headroom is not checked). MT3608 set
+  to 15 V → `-D SONAR_VDRV_LEVEL=0x09` (14 V). open_echo's 0x0F = 20 V assumed a 24-28 V supply.
+- 12-15 V drive instead of 24-28 V: roughly half the burst voltage, so weaker echoes than open_echo's numbers.
+  More `cycles` (knob) puts more energy in the water, at the cost of a longer ring-down.
+- No quiet receive (roadmap #2): the MT3608 switches during listening. Check in the bucket: `noise=` with the
+  pack vs with the shield VIN from a bench supply / fresh 9 V battery. A few dB worse = acceptable; much worse =
+  LC filter on shield VIN (hardware), or add an enable wire later (the driver supports one).
+- Battery: the TUSS4470 sleeps, but the MT3608's own idle draw stays while the holder switch is on. Worth one
+  multimeter reading in series with the pack (deep sleep, sonar asleep).
+- `SONAR_CHARGE_MS` (4 ms, est.): pause before each burst to refill VDRV. Too short → weaker bursts later in an
+  average (watch `raw_max` drop across pings).
 
 ## Bucket test, step by step
 
@@ -111,7 +128,9 @@ No compiler on the Windows PC? Send the log file to Claude: the replay runs in i
 | Time-zero rule | first sample > 80 % of max in the first 3 ms | Constant depth offset | Step 4 / recordings |
 | `SONAR_CHARGE_MS` | 4 ms | Burst strength in averages | Scope on VDRV, or `raw_max` over an average |
 | BPF code | one code (knob `bpf`, 0x1E) for all 3 frequencies | 190/210 kHz sensitivity | Datasheet BPF table |
-| Burst count register 0x1A | `cycles-1` (open_echo writes 0x0F for 16) | Probably unused: the RMT sends the real count | Datasheet: IO mode |
+| Burst count register 0x1A | `cycles` (1-32), **never 0 = continuous burst** (datasheet) | Probably unused in IO mode: the RMT sends the real count | Datasheet: IO mode |
+| VDRV level (reg 0x16) | 0x06 = 11 V | Must stay below the MT3608 output | MT3608 setting, datasheet headroom |
+| Wake time | 5 ms | First ping after sleep | Datasheet sleep exit time |
 | Capture length | 2800 samples = 12.2 m at 1403 m/s | Max depth | Raise `MAX_SAMPLES` for deeper lakes (RAM: 2 B/sample) |
 | Ping time | ~20 ms per capture + 4 ms charge; base = 3 freq × avg 2 → ~140 ms | Must stay under the 250 ms tick | `ping=` on the BENCH line |
 
@@ -125,13 +144,18 @@ No compiler on the Windows PC? Send the log file to Claude: the replay runs in i
 3. **OUT_4 edge rate**: if OUT_4 toggles at the carrier frequency during echoes, the capture ISR runs at up to
    200 kHz for the echo length. Only the first edge is used; the ISR is short, but watch for watchdog resets.
 4. **ADC during radio TX**: ESP-NOW sends happen after the ping in the same loop (never during a capture).
-5. The TUSS4470 read: the register value is taken from the same 16-bit frame (as open_echo). If `REG` always
+5. **Analog echo up the mast**: VOUT travels in the same cable as SCLK. No SPI traffic happens during a capture
+   (registers are written before the burst), but the IO2 burst at 200 kHz does: watch for a burst-shaped bump
+   right after `t0` that is not in the water. Twisting VOUT with a GND wire helps.
+6. The TUSS4470 read: the register value is taken from the same 16-bit frame (as open_echo). If `REG` always
    reads 0 or the previous value, the read needs a second frame.
 
 ## Open questions
 
-1. Pins (table above) and whether the converter has a usable EN pin.
-2. Shield VOUT maximum vs the ESP32 ADC range (divider?).
-3. BPF codes for 190 and 210 kHz (per-frequency `REG 10` before each burst).
-4. Log-amp slope in mV/dB, for a real dB scale.
-5. Transducer: beam angle, Q / bandwidth, ring-down time (sets the `dead` knob and burst cycles).
+1. GPIO numbers (table above). The cable carries SCLK/SDI/SDO/NCS, IO1, IO2, "echo": is "echo" VOUT (analog,
+   needed) or OUT_4 (edge timing, optional), or both?
+2. MT3608 output setting (12 or 15 V) → `SONAR_VDRV_LEVEL`.
+3. Shield VOUT maximum vs the ESP32 ADC range: with the shield logic on 3.3 V it should stay under ~3.1 V; check.
+4. BPF codes for 190 and 210 kHz (per-frequency `REG 10` before each burst).
+5. Log-amp slope in mV/dB, for a real dB scale.
+6. Transducer: beam angle, Q / bandwidth, ring-down time (sets the `dead` knob and burst cycles).
