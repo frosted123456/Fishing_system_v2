@@ -255,7 +255,9 @@ class SonarStore : public SonarSink {
     ns.act_bits = static_cast<uint16_t>((ns.act_bits << 1) | (fish ? 1u : 0u));
     uint8_t act = 0;
     for (uint16_t b = ns.act_bits; b; b >>= 1) act = static_cast<uint8_t>(act + (b & 1u));
+    const uint8_t st = s.status, bsnr = s.bottom_snr;   // v4 flags come with BASE only: keep the last ones
     memset(&s, 0, sizeof(s));
+    s.status = st; s.bottom_snr = bsnr;
     s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.hard = hard; s.activity = act > 15 ? 15 : act;
     for (uint8_t i = 0; i < p.n_targets && s.n_list < MAX_TARGETS; i++) {
       const Target& t = p.t[i];

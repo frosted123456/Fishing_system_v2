@@ -337,7 +337,7 @@ static void cmdQueue(uint8_t cmd, uint8_t target, uint8_t value) {   // under lo
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == CMD_SET_CHANNEL) { g_cmdq[i].value = value; return; }   // newest choice wins
   }
-  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM) {   // same target: the newest value replaces the queued one
+  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT) {   // same target: newest value wins
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == cmd && g_cmdq[i].target == target) { g_cmdq[i].value = value; return; }
   }
@@ -545,7 +545,7 @@ static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
     g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
   }
   if (cmd == CMD_SET_CHANNEL) g_pending_since_ms = millis();
-  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM) && g_devq_n < 4) {
+  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT) && g_devq_n < 4) {
     g_devq[g_devq_n].cmd = cmd; g_devq[g_devq_n].target = g_hub->last_cmd_target; g_devq[g_devq_n].value = g_hub->last_cmd_value;
     g_devq_n = static_cast<uint8_t>(g_devq_n + 1);
   }
@@ -942,6 +942,12 @@ bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value) {
   return true;
 }
 
+void meshSetBait(uint8_t hole, uint8_t v5) {   // chalet: bait depth of one hole (5 cm steps)
+  if (!g_chalet || g_ch == nullptr) return;
+  Lock l;
+  cmdQueue(CMD_SET_BAIT, hole, v5);
+}
+
 void meshSetSonarParam(uint8_t id, uint8_t value) {   // chalet: one sonar knob for every sonar hole (beacon)
   if (!g_chalet || g_ch == nullptr) return;
   Lock l;
@@ -1296,12 +1302,12 @@ String meshSonarListJson() {
     }
     for (uint8_t i = 0; i < n; i++) {
       const sonar::NodeSonar& ns = copy[i];
-      char b[200];
+      char b[240];
       snprintf(b, sizeof(b),
-               "%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"hard\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s}",
+               "%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"hard\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s,\"st\":%u,\"bsnr\":%u}",
                i ? "," : "", ns.node, ns.hub, static_cast<int>(static_cast<int16_t>(g_frame - ns.frame)), ns.sum.ping,
                ns.sum.bottom_cm, ns.sum.hard, ns.sum.n_targets, ns.sum.nearest_cm, ns.sum.nearest_level, ns.sum.activity,
-               ns.bg_ver, ns.bg_mask, ns.has_sum ? "true" : "false");
+               ns.bg_ver, ns.bg_mask, ns.has_sum ? "true" : "false", ns.sum.status, ns.sum.bottom_snr);
       s += b;
     }
     s += "],\"blocks_ok\":"; s += ok; s += ",\"blocks_bad\":"; s += bad;
@@ -1417,6 +1423,19 @@ String meshSonarGlanceJson(uint16_t since) {
   return s;
 }
 
+uint8_t meshSonarHistory(uint8_t node, MeshBaseRec* out, uint8_t max) {
+  if (g_sonar == nullptr) return 0;
+  static sonar::BaseRec r[90];
+  if (max > 90) max = 90;
+  uint8_t n;
+  { Lock l; n = g_sonar->history(node, r, max); }
+  for (uint8_t k = 0; k < n; k++) {
+    out[k].frame = r[k].frame; out[k].bottom_cm = r[k].bottom_cm; out[k].n = r[k].n;
+    for (uint8_t j = 0; j < 5; j++) out[k].t[j] = j < r[k].n ? r[k].t[j] : 0;
+  }
+  return n;
+}
+
 // ---- raw views for the OLED screens ----
 bool meshSonarSummary(uint8_t node, MeshSonarLite& out) {
   if (g_sonar == nullptr) return false;
@@ -1425,6 +1444,7 @@ bool meshSonarSummary(uint8_t node, MeshSonarLite& out) {
   if (ns == nullptr || !ns->has_sum) return false;
   out.bottom_cm = ns->sum.bottom_cm >= sonar::DEPTH_NONE ? 0 : ns->sum.bottom_cm;
   out.hard = ns->sum.hard; out.activity = ns->sum.activity; out.n = ns->sum.n_list;
+  out.status = ns->sum.status; out.bottom_snr = ns->sum.bottom_snr;
   for (uint8_t k = 0; k < out.n && k < 5; k++) out.t[k] = sonar::packTarget(ns->sum.list[k]);
   out.age_frames = static_cast<uint16_t>(g_frame - ns->frame);
   return true;
@@ -1546,6 +1566,15 @@ static void demoApplySim(uint8_t target, uint8_t value) {
 
 void meshDemoSetSim(uint8_t id, uint8_t value) { demoApplySim(id, value); }
 
+void meshDemoSetBait(uint8_t id, uint8_t v5) {   // demo hole: bait depth (5 cm steps, 0 = keep)
+  DemoHole* d = demoHole(id);
+  if (d == nullptr || v5 == 0) return;
+  uint16_t cm = static_cast<uint16_t>(v5 * 5u);
+  if (cm + 20 > d->bottom_cm) cm = static_cast<uint16_t>(d->bottom_cm - 20);
+  d->bait_cm = cm;
+  if (g_demo_src != nullptr && g_demo_src_node == id) { g_demo_src->proc.bait_m = cm / 100.0f; g_demo_src->scene.setBait(cm / 100.0f); }
+}
+
 void meshDemoSet(uint8_t hubs, uint8_t holes) {
   if (!g_chalet || g_ch == nullptr) return;
   if (hubs > DEMO_MAX_HUBS) hubs = DEMO_MAX_HUBS;
@@ -1617,6 +1646,10 @@ static void demoSummary(DemoHole& d, HubRole<8>& role) {
     fish++;
   }
   s.n_targets = fish;
+  // D43 flags and level check, like a real hole: fish within 40 cm of the bait, bait within 30 cm of the bottom
+  for (uint8_t i = 0; i < 3; i++) if (d.fl[i] && (d.fd[i] > d.bait_cm ? d.fd[i] - d.bait_cm : d.bait_cm - d.fd[i]) < 40) s.status |= sonar::ST_NEAR_BAIT;
+  if (d.bottom_cm < d.bait_cm + 30) s.status |= sonar::ST_BAIT_COVER;
+  s.bottom_snr = static_cast<uint8_t>(30 + (d.id * 7) % 25);
   d.act_bits = static_cast<uint8_t>((d.act_bits << 1) | (fish ? 1 : 0));
   uint8_t a = 0; for (uint8_t b = d.act_bits; b; b >>= 1) a = static_cast<uint8_t>(a + (b & 1));
   s.activity = static_cast<uint8_t>(a * 2 > 15 ? 15 : a * 2);
@@ -1657,7 +1690,10 @@ void meshDemoTick() {
   DemoHole* fd = demoHole(focus);
   if (fd != nullptr && (fd->sim & MESH_SIM_SONAR)) {
     if (g_demo_src == nullptr) { g_demo_src = new sonar::SonarSource(); g_demo_src->proc.prm = g_demo_prm; }
-    if (g_demo_src_node != focus) { g_demo_src->begin(focus, 7919UL * focus + 17UL, static_cast<uint16_t>(demoRand())); g_demo_src_node = focus; }
+    if (g_demo_src_node != focus) {
+      g_demo_src->begin(focus, 7919UL * focus + 17UL, static_cast<uint16_t>(demoRand())); g_demo_src_node = focus;
+      g_demo_src->proc.bait_m = fd->bait_cm / 100.0f; g_demo_src->scene.setBait(fd->bait_cm / 100.0f);   // this hole's bait
+    }
     sonar::Block out[2];
     const uint8_t n = g_demo_src->tick(true, out, 2);
     for (uint8_t h = 0; h < g_demo_hubs; h++)

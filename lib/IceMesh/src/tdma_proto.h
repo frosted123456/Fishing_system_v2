@@ -40,8 +40,9 @@ enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0
 //   CMD_SET_RELAY     target = device ID, value = 1 relay on / 0 off (ESP-NOW backbone)
 //   CMD_SET_SIM       target = hole ID (255 = every hole), value = simValue(): test data for that hole
 //   CMD_SONAR_PARAM   target = sonar knob index (sonar_params.h), value = its value; for every sonar hole
+//   CMD_SET_BAIT      target = hole ID, value = bait depth in 5 cm steps (0 = not set)
 enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1, CMD_SET_CHANNEL = 2, CMD_SET_RELAY = 3, CMD_SET_SIM = 4,
-                           CMD_SONAR_PARAM = 5 };
+                           CMD_SONAR_PARAM = 5, CMD_SET_BAIT = 6 };
 // Simulation of one hole: bit0 fake sonar, bit1 fake Hall-sensor trips, bits 2-7 trips per hour (0 = 6)
 enum : uint8_t { SIM_SONAR = 0x01, SIM_HALL = 0x02 };
 inline uint8_t simValue(bool sonar, bool hall, uint8_t trips_per_hour) {

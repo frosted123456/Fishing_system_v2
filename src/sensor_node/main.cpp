@@ -89,7 +89,8 @@ volatile int16_t devCmdSim = -1;
 void simLoadSetting(bool power_on);
 void simApplyCmd();
 bool simTripActive();
-volatile int8_t devCmdRelay = -1;           // relay command received (-1 none, 0 off, 1 on)
+volatile int8_t devCmdRelay = -1;
+volatile int16_t devCmdBait = -1;            // v2 (D43): bait depth from the chalet (5 cm steps), applied by sonarLoop           // relay command received (-1 none, 0 off, 1 on)
 static icemesh::RxRing<8, 250> ebRing;
 static uint32_t ebRelayed = 0;
 void ebRelayLoadSetting(bool power_on);
@@ -933,6 +934,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     const DevCmdMessage* c = (const DevCmdMessage*)data;
     if (c->target == NODE_ID && c->cmd == DEVCMD_RELAY) devCmdRelay = c->value ? 1 : 0;
     if (c->target == NODE_ID && c->cmd == DEVCMD_SIM) devCmdSim = c->value;
+    if (c->target == NODE_ID && c->cmd == DEVCMD_BAIT) devCmdBait = c->value;
     return;
   }
 
@@ -1301,6 +1303,14 @@ void sonarLoop() {
     for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) knobs.set(i, v[i]);
     src.proc.prm = knobs;
   }
+  static uint8_t bait5 = 0;
+  static bool baitLoaded = false;
+  if (!baitLoaded) { baitLoaded = true; Preferences p; p.begin("node", true); bait5 = p.getUChar("bait", 0); p.end(); }
+  if (devCmdBait >= 0) {   // v2 (D43): this hole's bait depth (labels "Bait", near-bait, cover)
+    const uint8_t v = (uint8_t)devCmdBait; devCmdBait = -1;
+    if (v && v != bait5) { bait5 = v; Preferences p; p.begin("node", false); p.putUChar("bait", v); p.end(); }
+  }
+  if (bait5) { const float m = bait5 * 0.05f; if (src.proc.bait_m != m) { src.proc.bait_m = m; src.scene.setBait(m); } }
   if (sonarKnobsNew) {
     sonarKnobsNew = false;
     bool changed = false;

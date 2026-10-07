@@ -34,6 +34,8 @@ static const uint8_t RESID_RICE_K = 6;
 static const uint8_t BG_RICE_K = 3;
 
 enum BlockType : uint8_t { BT_NONE = 0, BT_BASE = 1, BT_DATA = 2, BT_BG = 3 };
+// BASE v4 status flags (D43)
+enum : uint8_t { ST_RING = 0x01, ST_NEAR_BAIT = 0x02, ST_BAIT_COVER = 0x04 };
 
 // track: 0 = the bait (lure), 1-7 = other tracks (IDs reused). width in bins 1-8 (first appearance in a block).
 struct Target { uint8_t track; uint16_t depth_cm; uint8_t strength; uint8_t width; uint8_t level; };
@@ -67,6 +69,8 @@ struct Summary {
   uint16_t nearest_cm;      // valid when n_targets > 0 (derived from the list: fish closest to the bait)
   uint8_t nearest_level;
   uint8_t bg_ver;
+  uint8_t status;           // v4 (D43): ST_* flags (ring-down long, fish near the bait, bait in cover)
+  uint8_t bottom_snr;       // v4: bottom echo above the noise floor, dB (0-63): level check at setup
   uint8_t n_list;           // targets of the latest ping (fish and bait), for the per-hole sonar glance
   Target list[MAX_TARGETS]; // track 0 = bait, else 1; depth_cm and level only (strength/width not sent)
 };
@@ -125,6 +129,8 @@ inline size_t encodeSummary(const Summary& s, uint8_t* out, size_t cap) {
   const uint8_t nt = s.n_targets > 7 ? 7 : s.n_targets;
   w.put(nt, 3);
   w.put(s.bg_ver & 15u, 4);
+  w.put(s.status & 15u, 4);                                   // v4
+  w.put(s.bottom_snr > 63 ? 63 : s.bottom_snr, 6);            // v4
   // v3: every target of the latest ping: depth 11 b, level 2 b, bait 1 b (14 b each)
   const uint8_t nl = s.n_list > MAX_TARGETS ? MAX_TARGETS : s.n_list;
   w.put(nl, 3);
@@ -147,6 +153,8 @@ inline bool decodeSummary(const uint8_t* in, size_t len, Summary& s) {
   s.hard = static_cast<uint8_t>(r.get(2));
   s.n_targets = static_cast<uint8_t>(r.get(3));
   s.bg_ver = static_cast<uint8_t>(r.get(4));
+  s.status = static_cast<uint8_t>(r.get(4));
+  s.bottom_snr = static_cast<uint8_t>(r.get(6));
   s.n_list = static_cast<uint8_t>(r.get(3));
   if (s.n_list > MAX_TARGETS) return false;
   for (uint8_t i = 0; i < s.n_list; i++) {

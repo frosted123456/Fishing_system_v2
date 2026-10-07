@@ -114,6 +114,7 @@ void footer(u8g2_t* u, const ScreenModel& m, uint8_t page) {
   if (scroll) snprintf(line, sizeof(line), "^v: more holes");
   else if (act[0]) snprintf(line, sizeof(line), "%s %s", m.kb ? "OK:" : "2x:", act);
   else if (m.silenced) { char t[12]; mmss(t, sizeof(t), m.silence_s); snprintf(line, sizeof(line), "SILENCED %s", t); }
+  else if (page == PG_HOME && m.note[0]) snprintf(line, sizeof(line), "%s", m.note);
   else if (m.kb && page != PG_HOME) snprintf(line, sizeof(line), "Esc: menu");
   else if (m.chalet && m.sta) { const char* ip = strncmp(m.url, "http://", 7) == 0 ? m.url + 7 : m.url; snprintf(line, sizeof(line), "%s", ip); }
   else if (m.chalet) snprintf(line, sizeof(line), "%s", (m.sta_ssid[0] && (m.uptime_s / 3) % 2) ? "No cabin Wi-Fi" : m.ssid);   // alternates every 3 s
@@ -216,6 +217,9 @@ void holesPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
     u8g2_SetFont(u, F_SMALL);
     char d[20];
     if (h.state == SH_OFFLINE) snprintf(d, sizeof(d), "offline");
+    else if (h.son.valid && (h.son.status & 1)) snprintf(d, sizeof(d), "ICE?");                  // ring-down: slush on the transducer?
+    else if (h.son.valid && m.setup_s) snprintf(d, sizeof(d), "bot %udB", h.son.bottom_snr);     // level check while setting up
+    else if (h.son.valid && (h.son.status & 2) && h.batt <= 100) snprintf(d, sizeof(d), "NEAR %u%%", h.batt);
     else if (h.fish >= 0 && h.batt <= 100) snprintf(d, sizeof(d), "%df %u%%", h.fish, h.batt);
     else if (h.batt <= 100) snprintf(d, sizeof(d), "%u%%", h.batt);
     else snprintf(d, sizeof(d), "-");

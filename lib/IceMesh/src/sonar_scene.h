@@ -115,7 +115,7 @@ class SonarScene {
           P[i] += Pn * R(7) * s * s * s * s * expo();
         }
       }
-      for (int i = 0; i < rEnd; i++) P[i] += db2p(R(-8)) * std::exp(-(static_cast<sreal>(i) * BIN_M()) / R(0.045)) * (R(0.8) + R(0.4) * rng_.next());
+      for (int i = 0; i < rEnd; i++) P[i] += db2p(R(-8)) * std::exp(-(static_cast<sreal>(i) * BIN_M()) / ring_tau) * (R(0.8) + R(0.4) * rng_.next());
       addBottom(P, bd, Pb, tail, hard ? R(0.3) : R(0.5));
       addBottom(P, R(2) * bd, Pb2, tail * R(1.8), R(0.7));
       for (int k = 0; k < NWEEDS; k++) {
@@ -139,6 +139,13 @@ class SonarScene {
   }
 
   void jig() { jig_ = t_; }                       // "Jig the bait" button of the prototype
+  void advance(sreal s) { t_ += s; }   // skip time without a ping (slower ping rate)
+  sreal ring_tau = R(0.045);   // ring-down decay (m); larger = slush / frazil ice on the face (test of the ring monitor)
+  void setBait(sreal m) {      // per-hole bait depth (fake lure follows it)
+    const sreal lo = R(0.3), hi = cfg_.bottom_m - R(0.2);
+    cfg_.bait_m = m < lo ? lo : (m > hi ? hi : m);
+    identity_ = (cfg_.bottom_m == R(5.64) && cfg_.bait_m == R(4.57));
+  }
   sreal time() const { return t_; }
   const SceneConfig& config() const { return cfg_; }
 

@@ -181,6 +181,7 @@ struct DeviceSettings {
   uint8_t sonDepthIdx;        // v2 OLED Sonar page depth scale: 0 = auto, 1-8 = fixed (DEPTH_STEPS)
   uint8_t focusDepthIdx;      // v2 OLED Focus page depth scale: 0 = auto, 1-8 = fixed
   bool hideWeak;              // v2 OLED: do not draw the weakest echoes
+  bool nearBaitBeep;          // v2 (D43): short beep when a fish comes near a bait (off by default)
 };
 
 DeviceSettings settings = {
@@ -205,7 +206,8 @@ DeviceSettings settings = {
   .unitsMetric = false,
   .sonDepthIdx = 0,
   .focusDepthIdx = 0,
-  .hideWeak = false
+  .hideWeak = false,
+  .nearBaitBeep = false
 };
 
 // Remote config state
@@ -436,6 +438,13 @@ void sonarKnobApply(uint8_t id, uint8_t v);   // set + save + apply here (hub: f
 void sonarKnobSet(uint8_t id, uint8_t v);     // chalet: set + send to every sonar hole
 void sonarKnobsResend();                      // chalet: send the whole set again
 void sonarKnobsNewHubs();
+// v2 (D43) bait depth per hole, 5 cm steps (0 = not set: the processing keeps its default)
+uint8_t baitCm5[256];
+uint16_t baitGen = 0;
+void baitLoad();
+void baitSet(uint8_t hole, uint8_t v5);      // chalet: save + send (CMD_SET_BAIT) + demo
+void baitApply(uint8_t hole, uint8_t v5);    // save + use here (hub: own / test holes, or forward to the tip-up)
+void baitResendAll();
 void buzzerStop();
 void buzzerTest();
 void buzzerApplyType();
@@ -516,9 +525,19 @@ void handleWebApiRemoteConfigStatus();
 void updateAlertState();
 bool nodeAlarm(const NodeState& n);
 void alarmStart(NodeState* n);
+void tripRecord(uint8_t node);
+void nearBaitWatch();
+extern uint8_t nearBaitNode;
+extern uint32_t nearBaitAt;
 void alarmAck();
 void loopAlarmHold();
 void handleWebApiNodeName();
+void handleWebApiNodeBait();
+void handleWebApiTrips();
+// v2 (D43) trip recordings (see tripRecord)
+struct TripRec { uint8_t node; uint32_t at_s; uint8_t n; MeshBaseRec r[30]; };
+TripRec tripRecs[8];
+uint8_t tripHead = 0, tripCount = 0;
 void handleWebApiSilence();
 void handleResetAllConfirmInput(char key);
 void sendResetAllCommand();
@@ -580,6 +599,7 @@ void setup() {
   // Load persisted settings
   loadSettings();
   sonarKnobsLoad();
+  baitLoad();
   
   // BUG FIX #8: Initialize self-node completely at startup
   // Previously missing: last_seen, last_uptime, last_seq, initialized
@@ -782,6 +802,7 @@ void loop() {
     case ROLE_GATEWAY_OFFSHORE:
       { PerfScope p(PF_DEMO); meshDemoTick(); }   // v2: demo network (fake hubs inside this box), when on
       sonarKnobsNewHubs();   // v2 (D42): a hub that shows up gets the sonar knobs
+      nearBaitWatch();       // v2 (D43)
       if (settings.webServerEnabled) { PerfScope p(PF_WEB); loopWebServer(); }
       checkWiFiStatus();
       checkSerialWifiConfig();
@@ -2524,6 +2545,7 @@ bool nodeAlarm(const NodeState& n) { return HAS_FLAG(n.flags, FLAG_FISH_ON) || n
 
 void alarmStart(NodeState* n) {
   n->alarm_ms = millis(); if (n->alarm_ms == 0) n->alarm_ms = 1;   // (recordAlert turns the sound back on)
+  tripRecord(n->node_id);   // v2 (D43): keep the sonar of the minute before
 }
 
 void alarmAck() {
@@ -3086,6 +3108,12 @@ void checkSerialWifiConfig() {
     if (line != "BUZZ") { settings.buzzerPassive = (line == "BUZZ PASSIVE"); saveSettings(); buzzerApplyType(); }
     Serial.printf("Buzzer: %s, test beeps\n", settings.buzzerPassive ? "passive (tone)" : "active (DC)");
     buzzerTest();
+  } else if (line.startsWith("BAIT")) {
+    // v2 (D43) bait depth per hole (chalet): BAIT <hole> <cm>  (0 = not set)
+    String a = line.substring(4); a.trim();
+    const int sp = a.indexOf(' ');
+    if (sp > 0 && currentRole == ROLE_GATEWAY_OFFSHORE) baitSet((uint8_t)a.substring(0, sp).toInt(), (uint8_t)constrain(a.substring(sp + 1).toInt() / 5, 0, 255));
+    else Serial.println(F("Usage (chalet): BAIT <hole> <depth cm>"));
   } else if (line.startsWith("KNOB")) {
     // v2 (D42) sonar knobs (chalet): KNOBS = list, KNOB <key> <value>, KNOB DEFAULTS, KNOB RESEND
     using namespace icemesh::sonar;
@@ -3424,6 +3452,8 @@ void setupWebServer() {
   server.on("/api/status", HTTP_GET, handleWebApi);
   server.on("/api/silence", HTTP_POST, handleWebApiSilence);
   server.on("/api/node/name", HTTP_POST, handleWebApiNodeName);
+  server.on("/api/node/bait", HTTP_POST, handleWebApiNodeBait);    // v2 (D43): bait depth per hole
+  server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
   server.on("/api/settings", HTTP_GET, handleWebApiSettingsGet);
   server.on("/api/settings", HTTP_POST, handleWebApiSettingsPost);
@@ -3669,6 +3699,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     </div>
     <label class="hint" style="display:flex;gap:8px;align-items:center;margin:0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
     <div class="ngrid" id="ngrid"></div>
+    <p class="hint" id="tripsInfo" style="margin:0"></p>
     <p class="hint" style="margin:0">Rename a hole with its Rename link. Holes with a sonar show their last summary; Watch opens the live sonar.</p>
   </div>
 </div>
@@ -3790,6 +3821,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <h2>Alerts</h2>
       <form class="form" id="setForm">
         <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
+        <span class="tog"><span id="lblNb">Short beep when a fish comes near a bait (sonar)</span><button type="button" class="switch" role="switch" id="fNear" aria-labelledby="lblNb" aria-checked="false"></button></span>
         <label class="f">FISH ON alarm<select id="fAlarm"><option value="0">Until silenced</option><option value="1">1 min after the trip</option><option value="5">5 min after the trip</option><option value="15">15 min after the trip</option><option value="30">30 min after the trip</option></select><small>Screen, buzzer and phone keep ringing after the flag is reset, until silenced (or this time). A new trip always rings again.</small></label>
         <label class="f">Alert hold time (s)<input type="number" id="fHold" min="5" max="300"><small>Minimum time an alert stays on (5-300)</small></label>
         <label class="f">Heartbeat interval (s)<input type="number" id="fHeart" min="10" max="600"><small>Status broadcast interval (10-600)</small></label>
@@ -4344,6 +4376,7 @@ $('alertSilence').addEventListener('click', toggleSilence);
 /* ---------- Holes tab ---------- */
 function renderNodes() {
   if (!st) return;
+  $('tripsInfo').innerHTML = st.trips ? `Trip recordings (sonar of the minute before each flag): ${st.trips} · <a href="/api/trips?download=1">Download</a>` : '';
   const nodes = (st.nodes || []).slice().sort((a, b) => (b.fish - a.fish) || (a.id - b.id));
   const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {};
   (L.nodes || []).forEach(x => { sonar[x.node] = x; });
@@ -4355,10 +4388,13 @@ function renderNodes() {
   let h = '';
   nodes.forEach(n => {
     const off = n.online === false, low = !!n.lowbat, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
-    const badge = (n.sim ? '<span class="badge sim">SIM</span> ' : '') + (off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : low ? '<span class="badge">LOW BATT</span>' : '<span class="badge on">OK</span>');
+    const nb = sonar[n.id] && (sonar[n.id].st & 2) ? '<span class="badge">NEAR BAIT</span> ' : '';
+    const badge = (n.sim ? '<span class="badge sim">SIM</span> ' : '') + nb + (off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : low ? '<span class="badge">LOW BATT</span>' : '<span class="badge on">OK</span>');
     const via = n.via_lora ? 'via LoRa' : (n.via_espnow ? 'ESP-NOW' : '');
     const s = sonar[n.id];
     const g = glance.nodes[n.id];
+    const fl = s ? (s.st || 0) : 0, fmt = m => son ? son.fmtD(m) : m.toFixed(2) + ' m';
+    const stLine = s ? `<div class="sm">${fl & 1 ? '<b style="color:var(--alert)">Transducer iced? (long ring-down)</b> · ' : ''}${fl & 2 ? '<b>Fish near the bait</b> · ' : ''}${fl & 4 ? 'bait in cover · ' : ''}bottom echo ${s.bsnr || 0} dB ${(s.bsnr || 0) >= 30 ? '(good)' : (s.bsnr || 0) >= 15 ? '(ok)' : '(weak: is the transducer pointing down?)'}</div>` : '';
     const sonarLine = (s || g) ? `<canvas class="gl" data-glance="${n.id}" title="last 3 min: bottom, fish, bait line"></canvas>` +
       `<div class="son"><span class="glt" data-glt="${n.id}">${s && s.fish ? s.fish + ' fish · nearest ' + son.fmtD(s.near / 100) : 'Sonar: no fish'}</span><button class="btn small" type="button" data-watch="${n.id}">Watch</button></div>` : '';
     h += `<div class="node${n.fish && !off ? ' fish' : ''}${off ? ' off' : ''}${low ? ' low' : ''}">` +
@@ -4366,7 +4402,8 @@ function renderNodes() {
       `<div class="sm">#${n.id}${n.role ? ' · ' + esc(n.role) : ''}${via ? ' · ' + via : ''}</div>` +
       `<div class="bat"><span class="bar"><i style="width:${pct}%"></i></span>${pct}%</div>` +
       `<div class="sm">${n.last_seen_sec == null ? '' : 'seen ' + (n.last_seen_sec < 60 ? n.last_seen_sec + ' s' : Math.round(n.last_seen_sec / 60) + ' min') + ' ago'}</div>` +
-      sonarLine + `<button class="linkbtn" type="button" data-rename="${n.id}">Rename</button></div>`;
+      sonarLine + stLine + `<button class="linkbtn" type="button" data-rename="${n.id}">Rename</button>` +
+      ((s || g) ? ` <button class="linkbtn" type="button" data-bait="${n.id}">Bait: ${n.bait ? fmt(n.bait / 100) : 'not set'}</button>` : '') + `</div>`;
   });
   $('ngrid').innerHTML = h || '<p class="empty">No hole heard yet.</p>';
   drawGlances();
@@ -4446,6 +4483,16 @@ window.addEventListener('resize', drawGlances);
 $('ngrid').addEventListener('click', e => {
   const w = e.target.closest('[data-watch]');
   if (w) { if (SON()) SON().focus(+w.dataset.watch); showTab('sonar'); return; }
+  const bt = e.target.closest('[data-bait]');
+  if (bt) {   // v2 (D43): bait depth of this hole, in the page's unit
+    const id = +bt.dataset.bait, son = SON(), ft = son && son.fmtD(1).indexOf('ft') >= 0;
+    const v = prompt('Bait depth for hole ' + id + ' (' + (ft ? 'feet' : 'metres') + ', 0 = not set):', '');
+    if (v === null) return;
+    const num = parseFloat(String(v).replace(',', '.')); if (!(num >= 0)) { alert('Enter a depth.'); return; }
+    const cm = Math.round((ft ? num / 3.28084 : num) * 100);
+    api('/api/node/bait', { nodeId: id, cm }).then(() => loadStatus()).catch(() => {});
+    return;
+  }
   const r = e.target.closest('[data-rename]'); if (!r) return;
   const id = +r.dataset.rename, n = (st.nodes || []).find(x => x.id === id);
   const name = prompt('Name for hole ' + id + ' (max 15 characters):', n && n.name ? n.name : '');
@@ -4546,14 +4593,15 @@ function loadSettings() {
     $('fBuzzer').setAttribute('aria-checked', String(!!d.buzzerEnabled)); $('fReed').setAttribute('aria-checked', String(!!d.reedActiveHigh));
     $('fHold').value = d.alertHoldSec; $('fHeart').value = d.heartbeatSec;
     if (d.alarmHoldMin !== undefined) $('fAlarm').value = String(d.alarmHoldMin);
+    $('fNear').setAttribute('aria-checked', String(!!d.nearBaitBeep));
   }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
   loadSim();
 }
-['fBuzzer', 'fReed'].forEach(id => $(id).addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); }));
+['fBuzzer', 'fReed', 'fNear'].forEach(id => $(id).addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); }));
 $('setForm').addEventListener('submit', e => {
   e.preventDefault();
   const body = { buzzerEnabled: $('fBuzzer').getAttribute('aria-checked') === 'true', alertHoldSec: parseInt($('fHold').value, 10) || 30,
-    alarmHoldMin: parseInt($('fAlarm').value, 10) || 0,
+    alarmHoldMin: parseInt($('fAlarm').value, 10) || 0, nearBaitBeep: $('fNear').getAttribute('aria-checked') === 'true',
     heartbeatSec: parseInt($('fHeart').value, 10) || 60, reedActiveHigh: $('fReed').getAttribute('aria-checked') === 'true' };
   api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
   setTimeout(() => { $('setMsg').textContent = ''; }, 4000);
@@ -4635,6 +4683,7 @@ void handleWebApi() {
   doc["silenced"] = alertsSilenced;
   doc["silence_left_sec"] = (alertsSilenced && silenceExpireTime > millis()) ? (silenceExpireTime - millis()) / 1000 : 0;
   doc["sonar_sim"] = meshSonarSim();
+  doc["trips"] = tripCount;   // v2 (D43): trip recordings kept (download /api/trips)
   doc["radio_test"] = meshTestModeName(meshTestMode());
   // v2 network one-liner: setup phase countdown (0 = running), link, LoRa channel (1-8), master
   doc["setup_arm_s"] = meshSetupArmInS();
@@ -4667,6 +4716,7 @@ void handleWebApi() {
     n["online"] = network.nodes[i].online;
     n["fish"] = nodeAlarm(network.nodes[i]);   // v2: the alarm (latched), not only the line state
     n["line"] = HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON);
+    n["bait"] = baitCm5[network.nodes[i].node_id] * 5;   // v2 (D43): cm, 0 = not set
     n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
     n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
     n["battery"] = network.nodes[i].battery_mv;
@@ -4699,6 +4749,40 @@ void handleWebApi() {
  * Set a custom name for a node
  * Body: {"nodeId": 2, "name": "Bob's Hole"}
  */
+// v2 (D43) POST {"nodeId":n,"cm":depth}  (cm 0 = not set)
+void handleWebApiNodeBait() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0, cm = doc["cm"] | 0;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id >= 255 || cm < 0 || cm > 1275) { server.send(400, "application/json", "{\"error\":\"bad hole or depth\"}"); return; }
+  baitSet((uint8_t)id, (uint8_t)((cm + 2) / 5));
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// v2 (D43) trip recordings: ?download=1 sends a file. recs: [frame, bottom_cm, target...] (target = depth | level<<11 | bait<<13)
+void handleWebApiTrips() {
+  String s; s.reserve(256 + tripCount * 1100);
+  s = "{\"uptime\":"; s += millis() / 1000; s += ",\"trips\":[";
+  for (uint8_t k = 0; k < tripCount; k++) {
+    const TripRec& t = tripRecs[(tripHead + 8 - tripCount + k) % 8];
+    if (k) s += ",";
+    const int ix = findNodeIndexForMesh(t.node);
+    s += "{\"node\":"; s += t.node; s += ",\"name\":\"";
+    if (ix >= 0) for (const char* c = network.nodes[ix].name; *c; c++) if (*c != '"' && *c != '\\') s += *c;
+    s += "\",\"at_s\":"; s += t.at_s; s += ",\"bait_cm\":"; s += baitCm5[t.node] * 5; s += ",\"recs\":[";
+    for (uint8_t r = 0; r < t.n; r++) {
+      if (r) s += ",";
+      s += "["; s += t.r[r].frame; s += ","; s += t.r[r].bottom_cm;
+      for (uint8_t j = 0; j < t.r[r].n && j < 5; j++) { s += ","; s += t.r[r].t[j]; }
+      s += "]";
+    }
+    s += "]}";
+  }
+  s += "]}";
+  if (server.hasArg("download")) server.sendHeader("Content-Disposition", "attachment; filename=\"trip_recordings.json\"");
+  server.send(200, "application/json", s);
+}
+
 void handleWebApiNodeName() {
   if (server.method() != HTTP_POST) {
     server.send(405, "application/json", "{\"error\":\"POST required\"}");
@@ -4750,6 +4834,7 @@ void handleWebApiSettingsGet() {
   doc["buzzerEnabled"] = settings.buzzerEnabled;
   doc["alertHoldSec"] = settings.alertHoldSec;
   doc["alarmHoldMin"] = settings.alarmHoldMin;
+  doc["nearBaitBeep"] = settings.nearBaitBeep;
   doc["heartbeatSec"] = settings.heartbeatSec;
   doc["reedActiveHigh"] = settings.reedActiveHigh;
   doc["displayBrightness"] = settings.displayBrightness;
@@ -4788,6 +4873,7 @@ void handleWebApiSettingsPost() {
     settings.alertHoldSec = constrain(val, 5, 300);
     changed = true;
   }
+  if (doc.containsKey("nearBaitBeep")) { settings.nearBaitBeep = doc["nearBaitBeep"].as<bool>(); changed = true; }
   if (doc.containsKey("alarmHoldMin")) {   // v2: 0 = until silenced
     settings.alarmHoldMin = (uint8_t)constrain(doc["alarmHoldMin"].as<int>(), 0, 120);
     changed = true;
@@ -5191,6 +5277,12 @@ static void buildScreenModel() {
   m.chalet = chalet; m.self_id = NODE_ID; m.feet = !settings.unitsMetric; m.uptime_s = now / 1000;
   m.son_range_cm = depthStepCm(settings.sonDepthIdx); m.focus_range_cm = depthStepCm(settings.focusDepthIdx);
   m.hide_weak = settings.hideWeak;
+  m.note[0] = 0;
+  if (nearBaitNode && millis() - nearBaitAt < 15000UL) {   // D43: a fish came near a bait in the last 15 s
+    const int ix = findNodeIndexForMesh(nearBaitNode);
+    if (ix >= 0 && network.nodes[ix].name[0]) snprintf(m.note, sizeof(m.note), "Near bait: %s", network.nodes[ix].name);
+    else snprintf(m.note, sizeof(m.note), "Near bait: hole %u", nearBaitNode);
+  }
   // holes, grouped by pocket (owner hub), the hub's own hole first
   static MeshNodeSnapshot snap[48];
   const uint8_t ns = chalet ? meshNodeSnapshot(snap, 48) : 0;
@@ -5214,6 +5306,7 @@ static void buildScreenModel() {
     MeshSonarLite sl;
     if (chalet && meshSonarSummary(n.node_id, sl)) {
       h.son.valid = true; h.son.bottom_cm = sl.bottom_cm; h.son.hard = sl.hard; h.son.activity = sl.activity; h.son.n = 0; h.fish = 0;
+      h.son.status = sl.status; h.son.bottom_snr = sl.bottom_snr;
       for (uint8_t k = 0; k < sl.n && k < 5; k++) {
         ScrTarget& t = h.son.t[h.son.n++];
         t.depth_cm = sl.t[k] & 0x7FF; t.level = (sl.t[k] >> 11) & 3; t.bait = (sl.t[k] >> 13) & 1;
@@ -5290,7 +5383,7 @@ enum OptItem : uint8_t {
   OI_SC_NET, OI_SC_AGAIN,
   OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES, OI_BUZZTEST, OI_BUZZTYPE,
   OI_DISPLAY, OI_D_UNITS, OI_D_SONDEPTH, OI_D_FOCDEPTH, OI_D_WEAK,
-  OI_SONAR, OI_K_FILTER, OI_K_SNR, OI_K_CONFIRM, OI_K_DEAD, OI_K_GATE, OI_K_RESEND, OI_K_DEFAULTS
+  OI_SONAR, OI_K_FILTER, OI_K_SNR, OI_K_CONFIRM, OI_K_DEAD, OI_K_GATE, OI_K_RESEND, OI_K_DEFAULTS, OI_NEARBEEP
 };
 struct OptRow { uint8_t item, idx; };
 static const uint8_t OPT_MAX = 56;
@@ -5370,6 +5463,7 @@ static void optBuild(ScrOptions* o) {
     optRow(o, OI_BUZZER, 0, "Buzzer", settings.buzzerEnabled ? "ON" : "OFF");
     optRow(o, OI_BUZZTEST, 0, "Buzzer test", "");
     optRow(o, OI_BUZZTYPE, 0, "Buzzer type", settings.buzzerPassive ? "passive" : "active");
+    if (chalet) optRow(o, OI_NEARBEEP, 0, "Near-bait beep", settings.nearBaitBeep ? "ON" : "OFF");
     if (settings.alarmHoldMin) snprintf(v, sizeof(v), "%u min", settings.alarmHoldMin); else snprintf(v, sizeof(v), "until silenced");
     optRow(o, OI_HOLD, 0, "Alarm", v);
     if (chalet) {
@@ -5557,6 +5651,7 @@ static void optActivate(const OptRow& row) {
     case OI_SIM: optOpen(OM_SIM); break;
     case OI_BUZZER: settings.buzzerEnabled = !settings.buzzerEnabled; saveSettings(); if (!settings.buzzerEnabled) buzzerStop(); break;
     case OI_BUZZTEST: buzzerTest(); break;
+    case OI_NEARBEEP: settings.nearBaitBeep = !settings.nearBaitBeep; saveSettings(); break;
     case OI_BUZZTYPE: settings.buzzerPassive = !settings.buzzerPassive; saveSettings(); buzzerApplyType(); buzzerTest(); break;
     case OI_HOLD: {
       uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] != settings.alarmHoldMin) k++;
@@ -6456,7 +6551,87 @@ void sonarKnobsNewHubs() {
     for (uint8_t j = 0; j < nseen; j++) known |= seen[j] == hl[k].id;
     if (!known && nseen < sizeof(seen)) { seen[nseen++] = hl[k].id; fresh = true; }
   }
-  if (fresh) { sonarKnobsResend(); Serial.println(F("Sonar knobs sent again (new hub)")); }
+  if (fresh) { sonarKnobsResend(); baitResendAll(); Serial.println(F("Sonar knobs and bait depths sent again (new hub)")); }
+}
+
+// ---- v2 (D43) bait depth per hole -----------------------------------------------------------
+void baitLoad() {
+  Preferences p; p.begin("bait", true);
+  memset(baitCm5, 0, sizeof(baitCm5));
+  p.getBytes("b", baitCm5, sizeof(baitCm5));
+  p.end();
+  baitGen++;
+}
+
+static bool myTestHole(uint8_t id) {   // hub: its own hole or one of its virtual test holes
+  if (id == NODE_ID) return true;
+  for (uint8_t k = 0; k < 8; k++) if (meshSonarVirtualId(NODE_ID, k) == id) return true;
+  return false;
+}
+
+void baitApply(uint8_t hole, uint8_t v5) {
+  if (hole == 0 || hole == 255) return;
+  if (baitCm5[hole] != v5) {
+    baitCm5[hole] = v5;
+    Preferences p; p.begin("bait", false); p.putBytes("b", baitCm5, sizeof(baitCm5)); p.end();
+  }
+  baitGen++;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshDemoSetBait(hole, v5);
+  else if (!myTestHole(hole) && v5) devCmdQueue(hole, DEVCMD_BAIT, v5);   // the tip-up gets it after its next message
+  Serial.printf("Bait of hole %u: %u cm\n", hole, (unsigned)v5 * 5u);
+}
+
+void baitSet(uint8_t hole, uint8_t v5) {
+  baitApply(hole, v5);
+  if (currentRole == ROLE_GATEWAY_OFFSHORE && v5) meshSetBait(hole, v5);
+}
+
+void baitResendAll() {
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
+  for (int i = 1; i < 255; i++) if (baitCm5[i]) meshSetBait((uint8_t)i, baitCm5[i]);
+}
+
+static void baitToSource(icemesh::sonar::SonarSource* src, uint8_t id) {
+  if (src == nullptr || id == 0 || baitCm5[id] == 0) return;
+  const float m = baitCm5[id] * 0.05f;
+  src->proc.bait_m = m; src->scene.setBait(m);   // fake sonar: the lure follows too
+}
+
+// =============================================================================================
+// v2 (D43) TRIP RECORDINGS: the last 60 s of sonar summaries of a hole, saved when its flag trips
+// (labelled data for later: what the fish did before the flag). RAM only (8 newest), web download.
+// NEAR-BAIT WATCH: a hole's sonar says "fish near the bait" (ST_NEAR_BAIT) -> note on the OLED / page,
+// optional short beep (Settings > Near-bait beep). Never replaces FISH ON.
+// =============================================================================================
+uint8_t nearBaitNode = 0;                   // latest hole with a fish near its bait (OLED footer, page)
+uint32_t nearBaitAt = 0;
+
+void tripRecord(uint8_t node) {
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
+  TripRec& t = tripRecs[tripHead];
+  t.node = node; t.at_s = millis() / 1000;
+  t.n = meshSonarHistory(node, t.r, 30);
+  if (t.n == 0) return;   // no sonar on that hole: nothing to keep
+  tripHead = (uint8_t)((tripHead + 1) % 8); if (tripCount < 8) tripCount++;
+  Serial.printf("Trip recording: hole %u, %u s of sonar before the flag\n", node, (unsigned)t.n * 2u);
+}
+
+void nearBaitWatch() {
+  static uint32_t last = 0;
+  static uint8_t was[256];
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || millis() - last < 1000) return;
+  last = millis();
+  for (int i = 1; i < network.node_count; i++) {
+    const uint8_t id = network.nodes[i].node_id;
+    MeshSonarLite sl;
+    const bool near = meshSonarSummary(id, sl) && sl.age_frames < 10 && (sl.status & 0x02);
+    if (near && !was[id]) {
+      nearBaitNode = id; nearBaitAt = millis();
+      if (settings.nearBaitBeep && settings.buzzerEnabled && !activeAlerts) triggerBuzzer(1);
+      registerActivity();
+    }
+    was[id] = near ? 1 : 0;
+  }
 }
 
 void loadSettings() {
@@ -6485,6 +6660,7 @@ void loadSettings() {
   settings.sonDepthIdx = preferences.getUChar("sonDepth", 0); if (settings.sonDepthIdx > 8) settings.sonDepthIdx = 0;
   settings.focusDepthIdx = preferences.getUChar("focDepth", 0); if (settings.focusDepthIdx > 8) settings.focusDepthIdx = 0;
   settings.hideWeak = preferences.getBool("hideWeak", false);
+  settings.nearBaitBeep = preferences.getBool("nearBeep", false);
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;
@@ -6519,6 +6695,7 @@ void saveSettings() {
   preferences.putUChar("sonDepth", settings.sonDepthIdx);
   preferences.putUChar("focDepth", settings.focusDepthIdx);
   preferences.putBool("hideWeak", settings.hideWeak);
+  preferences.putBool("nearBeep", settings.nearBaitBeep);
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);
 
@@ -6837,6 +7014,8 @@ void meshLoop() {
         hubSimApply(dev, val);
       } else if (cmd == MESH_CMD_SONAR_PARAM) {
         sonarKnobApply(dev, val);   // dev = knob index
+      } else if (cmd == MESH_CMD_SET_BAIT) {
+        baitApply(dev, val);        // own / test hole here, tip-up after its next message
       }
     }
   } else {
@@ -7089,6 +7268,12 @@ void sonarHubLoop() {
     if (ownSonar) ownSonar->proc.prm = sonarPrm;
     if (sonarVirt) for (uint8_t k = 0; k < 4; k++) sonarVirt[k].proc.prm = sonarPrm;
   }
+  static uint16_t bGen = 0xFFFF;
+  if (bGen != baitGen) {         // v2 (D43): bait depth per hole
+    bGen = baitGen;
+    baitToSource(ownSonar, NODE_ID);
+    if (sonarVirt) for (uint8_t k = 0; k < 4; k++) baitToSource(&sonarVirt[k], sonarVirt[k].node());
+  }
   const bool global = meshSonarSim();                       // chalet: test holes (virtual) on
   const bool sim = global || realSonarSim;                  // tip-ups may run fake sonar
   const uint8_t focus = meshFocusNode();
@@ -7096,7 +7281,7 @@ void sonarHubLoop() {
   // own hole: fake sonar when asked (independent of the virtual holes)
   if (hubHoleSim(NODE_ID) & MESH_SIM_SONAR) {
     static unsigned long ownTick = 0;
-    if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->proc.prm = sonarPrm; ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); ownTick = millis(); }
+    if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->proc.prm = sonarPrm; ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); baitToSource(ownSonar, NODE_ID); ownTick = millis(); }
     if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
     while (millis() - ownTick >= 250UL) {
       ownTick += 250UL;
@@ -7137,6 +7322,7 @@ void sonarHubLoop() {
   while (activeVirt < want) {
     const uint8_t id = meshSonarVirtualId(NODE_ID, activeVirt);
     sonarVirt[activeVirt].begin(id, (uint32_t)id * 7919UL + NODE_ID, (uint16_t)esp_random());
+    baitToSource(&sonarVirt[activeVirt], id);
     HoleSim* hs = hubSimSlot(id, true);
     if (hs && !simAllSet) hs->value = MESH_SIM_SONAR;   // a test hole has fake sonar unless told otherwise
     meshHubObserveNode(id, MESH_LS_IDLE, 0, MESH_LF_SIM, 100);

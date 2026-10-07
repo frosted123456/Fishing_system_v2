@@ -100,8 +100,9 @@ bool meshEbRelay();
 void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
 bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value);   // hub: SET_RELAY / SET_SIM received (MESH_CMD_*)
 void meshSetHoleSim(uint8_t hole, uint8_t value);       // chalet: CMD_SET_SIM in the beacon (hole ID or 255 = all)
-enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5 };   // = icemesh::tdma::BeaconCmd
+enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5, MESH_CMD_SET_BAIT = 6 };   // = icemesh::tdma::BeaconCmd
 void meshSetSonarParam(uint8_t id, uint8_t value);   // chalet: knob for every sonar hole (CMD_SONAR_PARAM)
+void meshSetBait(uint8_t hole, uint8_t v5);          // chalet: bait depth of one hole, 5 cm steps (CMD_SET_BAIT)
 enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02 };
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)
@@ -119,10 +120,12 @@ String meshSonarBgJson(uint8_t node);        // chalet: /api/sonar/bg (2-bit bac
 String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glance (every hole, ~3 min of summaries)
 
 // ---- raw views for the OLED screens (chalet) ----
-struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; };   // t: depth | level << 11 | bait << 13
+struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; uint8_t status, bottom_snr; };   // status: ST_* (D43)   // t: depth | level << 11 | bait << 13
 struct MeshPingLite { uint16_t bottom_cm; uint8_t n; uint16_t d[5]; uint8_t lv[5]; uint8_t bait_mask; };
 struct MeshHubLink { uint8_t id; int8_t rssi; int32_t lora_age_s, eb_age_s; uint8_t hops; bool demo; };
 bool meshSonarSummary(uint8_t node, MeshSonarLite& out);
+struct MeshBaseRec { uint16_t frame, bottom_cm; uint8_t n; uint16_t t[5]; };   // one BASE summary (2 s), t as above
+uint8_t meshSonarHistory(uint8_t node, MeshBaseRec* out, uint8_t max);        // newest `max`, oldest first (chalet)
 uint8_t meshFocusPings(uint8_t node, MeshPingLite* out, uint8_t max);   // newest `max` pings, oldest first
 uint8_t meshHubLinks(MeshHubLink* out, uint8_t max);
 
@@ -136,3 +139,4 @@ void meshDemoSetSim(uint8_t id, uint8_t value);           // 255 = every demo ho
 void meshDemoName(uint8_t id, char* out, size_t n);       // "Demo A1"
 void meshDemoTick();                                      // chalet loop()
 void meshDemoSetParams(const uint8_t* v, uint8_t n);      // the chalet's sonar knobs for the demo sonar
+void meshDemoSetBait(uint8_t id, uint8_t v5);             // demo hole bait depth (5 cm steps)

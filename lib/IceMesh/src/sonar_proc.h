@@ -37,6 +37,9 @@ class SonarProc {
   struct Out {
     sreal bottom, nf, ratio, tail;
     bool has_ratio;
+    sreal bottom_snr;        // D43: bottom echo peak above the noise floor (dB): level check at setup
+    sreal ring_m, ring_base_m;   // D43: ring-down length (m, from the transducer) and its learned normal value
+    bool ring_alarm;         // D43: ring-down much longer than normal for a while (slush / frazil ice on the face?)
     uint8_t hard;
     uint8_t n;               // tracks with age >= 3 (prototype output), in tracker order
     TrackOut t[MAX_TRACKS];
@@ -44,11 +47,15 @@ class SonarProc {
 
   sreal bait_m = R(4.57);   // bait (lure) depth: prototype constant; real system: set per hole
   Params prm;               // knobs (sonar_params.h); defaults = prototype
+  sreal dt = R(0.25);       // s between processed pings (prototype 4/s); the caller sets it when the rate changes
+  enum { RING_LEARN = 40, RING_ALARM_PINGS = 8 };
+  static sreal ringAlarmExtra() { return R(0.15); }   // m longer than normal (est., re-check on real ice)
 
   SonarProc() { reset(); }
   void reset() {
     have_bottom_ = have_nf_ = have_hi_ = have_ratio_ = have_tail_ = have_static_ = false;
     bottom_ = nf_ = hi_ = ratio_ = tail_ = R(0); bj_ = 0; n_tracks_ = 0; nid_ = 1;
+    ring_n_ = 0; ring_run_ = 0; ring_base_ = R(0); rot_mask_ = 0;
   }
 
   // codes[f][i]: f = 0..nfreq-1 (3 = 190/200/210 kHz compounding, 1 = single frequency)
@@ -140,12 +147,12 @@ class SonarProc {
       for (int k = 0; k < n_tracks_; k++) {
         if (used[k]) continue;
         const Track& T = tracks_[k];
-        const sreal dd = std::fabs(T.depth + T.vel * DT() - p.depth);
+        const sreal dd = std::fabs(T.depth + T.vel * dt - p.depth);
         if (dd < bd) { bd = dd; bt = k; }
       }
       if (bt >= 0) {
         Track& T = tracks_[bt];
-        T.vel = R(0.6) * T.vel + R(0.4) * (p.depth - T.depth) / DT(); T.depth = p.depth; T.miss = 0; T.age++;
+        T.vel = R(0.6) * T.vel + R(0.4) * (p.depth - T.depth) / dt; T.depth = p.depth; T.miss = 0; T.age++;
         T.push(p); used[bt] = true;
       } else {
         const uint32_t id = nid_++;
@@ -209,6 +216,21 @@ class SonarProc {
     else hard = tail_ < R(0.18) ? HARD_HARD : HARD_SOFT;
 
     out.bottom = bottom_; out.nf = nf; out.ratio = ratio_; out.has_ratio = have_ratio_; out.tail = tail_; out.hard = hard;
+    out.bottom_snr = static_cast<sreal>(d[bp]) - nf;
+
+    // D43 ring-down monitor: how far below the transducer the echo stays well above the noise floor.
+    // Its normal length is learned on the first pings, then slowly; much longer for a while = alarm
+    // (slush / frazil ice on the face, transducer touching the ice). Does not change anything above.
+    {
+      int i = 1; const int iMax = std::min(N - 1, roundi(R(1.5) / BIN_M()));
+      while (i < iMax && static_cast<sreal>(d[i]) > nf + R(10)) i++;
+      const sreal rl = static_cast<sreal>(i) * BIN_M();
+      if (ring_n_ < RING_LEARN) { ring_base_ = (ring_base_ * static_cast<sreal>(ring_n_) + rl) / static_cast<sreal>(ring_n_ + 1); ring_n_++; }
+      const bool longer = ring_n_ >= RING_LEARN && rl > ring_base_ + ringAlarmExtra();
+      ring_run_ = longer ? (ring_run_ < 255 ? ring_run_ + 1 : 255) : 0;
+      if (ring_n_ >= RING_LEARN && !longer) ring_base_ = ring_base_ + R(0.01) * (rl - ring_base_);
+      out.ring_m = rl; out.ring_base_m = ring_base_; out.ring_alarm = ring_run_ >= RING_ALARM_PINGS;
+    }
     out.n = 0;
     for (int k = 0; k < n_tracks_; k++) {
       const Track& T = tracks_[k];
@@ -222,6 +244,16 @@ class SonarProc {
       o.spread = o.has_stats ? spread(T) : R(0);
       o.width = widthMedian(T);
     }
+  }
+
+  // D43: one frequency per ping, rotating 190 / 200 / 210 kHz (f = 0..2): compounding over the last three
+  // pings (until all three are seen, the missing ones repeat this ping). Moving fish smear over ~0.75 s.
+  void stepRotating(const uint8_t codes[BINS], uint8_t f, Out& out) {
+    if (f >= sp::NFREQ) f = 0;
+    memcpy(rot_[f], codes, BINS);
+    rot_mask_ = static_cast<uint8_t>(rot_mask_ | (1u << f));
+    for (uint8_t k = 0; k < sp::NFREQ; k++) if (!(rot_mask_ & (1u << k))) memcpy(rot_[k], codes, BINS);
+    step(rot_, sp::NFREQ, out);
   }
 
   // Per-bin results of the last step() of ANY SonarProc (shared scratch): read right after step().
@@ -300,6 +332,8 @@ class SonarProc {
   int n_tracks_;
   uint32_t nid_;
   float static_[BINS], sig_[BINS];
+  uint16_t ring_n_; uint8_t ring_run_; sreal ring_base_;
+  uint8_t rot_[sp::NFREQ][BINS]; uint8_t rot_mask_;
 };
 
 }  // namespace sonar

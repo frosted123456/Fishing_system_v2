@@ -23,7 +23,7 @@ static DataHeader hdr(uint8_t node) { DataHeader h; memset(&h, 0, sizeof h); h.n
 // pings from the real chain (prototype scene + processing)
 struct Chain {
   SonarSource src;
-  explicit Chain(uint32_t seed) { src.begin(9, seed); }
+  explicit Chain(uint32_t seed) { src.begin(9, seed); src.proc.prm.set(P_IDLE_HZ_X4, 16); }   // one ping per tick
   Ping next() { Block b[2]; src.tick(false, b, 2); return src.lastPing(); }
 };
 
@@ -48,23 +48,25 @@ static void test_bitstream(void) {
 static void test_summary_roundtrip(void) {
   Summary s; memset(&s, 0, sizeof s);
   s.node = 137; s.activity = 9; s.ping = 65530; s.bottom_cm = 612; s.hard = BH_MEDIUM; s.n_targets = 4; s.bg_ver = 7;
+  s.status = ST_NEAR_BAIT | ST_RING; s.bottom_snr = 41;   // v4
   // v3: every target of the latest ping (bait first here), nearest is derived on decode
   const uint16_t dep[5] = {400, 540, 120, 590, 300}; const uint8_t lv[5] = {2, 3, 1, 2, 1};
   for (int k = 0; k < 5; k++) { s.list[k].depth_cm = dep[k]; s.list[k].level = lv[k]; s.list[k].track = k == 0 ? 0 : 1; }
   s.n_list = 5;
   uint8_t b[24];
   const size_t n = encodeSummary(s, b, sizeof b);
-  TEST_ASSERT_EQUAL(16, n);   // 55 + 5 x 14 = 125 bits
+  TEST_ASSERT_EQUAL(17, n);   // v4: 65 + 5 x 14 = 135 bits
   Summary d;
   TEST_ASSERT_TRUE(decodeSummary(b, n, d));
   TEST_ASSERT_EQUAL(137, d.node); TEST_ASSERT_EQUAL(9, d.activity); TEST_ASSERT_EQUAL(65530, d.ping);
   TEST_ASSERT_EQUAL(612, d.bottom_cm); TEST_ASSERT_EQUAL(BH_MEDIUM, d.hard); TEST_ASSERT_EQUAL(4, d.n_targets); TEST_ASSERT_EQUAL(7, d.bg_ver);
   TEST_ASSERT_EQUAL(5, d.n_list);
+  TEST_ASSERT_EQUAL(ST_NEAR_BAIT | ST_RING, d.status); TEST_ASSERT_EQUAL(41, d.bottom_snr);
   for (int k = 0; k < 5; k++) { TEST_ASSERT_EQUAL(dep[k], d.list[k].depth_cm); TEST_ASSERT_EQUAL(lv[k], d.list[k].level); TEST_ASSERT_EQUAL(k == 0 ? 0 : 1, d.list[k].track); }
   TEST_ASSERT_EQUAL(300, d.nearest_cm); TEST_ASSERT_EQUAL(1, d.nearest_level);   // closest fish to the bait at 400 cm
   s.n_targets = 0; s.n_list = 0;
   const size_t n0 = encodeSummary(s, b, sizeof b);
-  TEST_ASSERT_EQUAL(7, n0);   // 55 bits: no target
+  TEST_ASSERT_EQUAL(9, n0);   // v4: 65 bits, no target
   TEST_ASSERT_TRUE(decodeSummary(b, n0, d));
   TEST_ASSERT_EQUAL(DEPTH_NONE, d.nearest_cm);
   TEST_ASSERT_FALSE(decodeSummary(b, n0 - 1, d));   // truncated

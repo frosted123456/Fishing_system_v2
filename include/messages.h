@@ -221,7 +221,7 @@ typedef struct __attribute__((packed)) {
 
 // v2 sonar control - hub broadcast every second while the sonar test mode is on (or the knobs just
 // changed), and right after any message from a node (the node listens briefly after it transmits).
-#define SONAR_CTRL_PARAMS 16   // >= icemesh::sonar::P_COUNT (lib/IceMesh/src/sonar_params.h)
+#define SONAR_CTRL_PARAMS 24   // >= icemesh::sonar::P_COUNT (lib/IceMesh/src/sonar_params.h)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;
@@ -234,7 +234,7 @@ typedef struct __attribute__((packed)) {
 
 // v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
 // (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
-enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2 };   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)
+enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3 };   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;

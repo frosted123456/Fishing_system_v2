@@ -21,10 +21,17 @@ enum ParamId : uint8_t {
   P_STATIC_LEARN,    // how fast the static scene (bottom, weeds) is learned, 0.001 per ping
   P_RANGE_DB,        // colour dynamic range (dB): smaller = more contrast, weak echoes drop out
   P_TVG,             // range compensation (time-varied gain) 1 on / 0 off
-  // acquisition knobs for the TUSS4470 driver (NOT WRITTEN YET): kept and sent, not used by anything today
-  P_PULSE_CYCLES,    // cycles per ping (longer = more energy, less resolution)
-  P_GAIN,            // receiver gain step (TUSS4470 VGA, meaning set by the driver)
-  P_PING_HZ_X4,      // pings per second x4 (4 = 1/s ... 16 = 4/s)
+  // acquisition (src/sensor_node/sonar_tuss4470.*, D43): written blind, to verify in the bucket
+  P_PULSE_CYCLES,    // burst cycles in base mode (longer = more energy / range)
+  P_GAIN,            // TUSS4470 LNA gain code 0-3 (reg 0x13: 0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V)
+  P_PING_HZ_X4,      // ping rate while something moves (x0.25/s: 16 = 4/s)
+  P_CYCLES_FOCUS,    // burst cycles in focus mode (shorter = 2-3 cm resolution)
+  P_IDLE_HZ_X4,      // ping rate when nothing moves (x0.25/s: 4 = 1/s)
+  P_AVG,             // bursts averaged per ping in base mode (1-4, +3-6 dB)
+  P_FREQ_MODE,       // 0 = 3 bursts per ping (190/200/210), 1 = one frequency per ping, rotating, 2 = 200 kHz only
+  P_SOUND,           // sound speed - 1350 m/s (53 = 1403 m/s, water 0-2 degC)
+  P_BPF,             // TUSS4470 band-pass centre code (reg 0x10; 0x1E = 200 kHz per open_echo)
+  P_THRESH,          // OUT_4 comparator threshold (reg 0x17), edge timing
   P_COUNT
 };
 
@@ -42,9 +49,16 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"learn", "Static scene learning", 1, 100, 12, "x0.001"},
     {"range", "Colour range", 20, 80, 46, "dB"},
     {"tvg", "Range compensation", 0, 1, 1, ""},
-    {"cycles", "Pulse cycles (driver)", 1, 32, 8, ""},
-    {"gain", "Receiver gain (driver)", 0, 15, 8, ""},
-    {"pinghz", "Ping rate (driver)", 1, 16, 16, "x0.25/s"},
+    {"cycles", "Burst cycles, base", 1, 32, 16, "cycles"},
+    {"gain", "Receiver gain code", 0, 3, 1, "0-3"},
+    {"pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"},
+    {"fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"},
+    {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
+    {"avg", "Bursts averaged", 1, 4, 2, "per ping"},
+    {"freq", "Frequency mode", 0, 2, 0, "0 3/ping 1 rot 2 200k"},
+    {"sound", "Sound speed", 0, 255, 53, "+1350 m/s"},
+    {"bpf", "Band-pass code", 0, 63, 30, "reg 0x10"},
+    {"thresh", "Edge threshold", 0, 255, 31, "reg 0x17"},
   };
   return T[id < P_COUNT ? id : 0];
 }

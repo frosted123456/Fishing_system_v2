@@ -15,7 +15,8 @@ enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, 
 
 // Sonar at a glance (from the BASE block of every hole): bottom + every target, not just the nearest
 struct ScrTarget { uint16_t depth_cm; uint8_t level; bool bait; };   // level 1-3
-struct ScrSonar { bool valid; uint16_t bottom_cm; uint8_t hard; uint8_t n; ScrTarget t[5]; uint8_t activity; };
+struct ScrSonar { bool valid; uint16_t bottom_cm; uint8_t hard; uint8_t n; ScrTarget t[5]; uint8_t activity;
+                  uint8_t status; uint8_t bottom_snr; };   // D43: status 1 = ring-down long (ice?), 2 = fish near bait, 4 = bait in cover; bottom echo dB
 // FOCUS hole history (one column per ping)
 struct ScrPingCol { uint16_t bottom_cm; uint8_t n; uint16_t d[5]; uint8_t lv[5]; };
 
@@ -69,6 +70,7 @@ struct ScreenModel {
   uint16_t son_range_cm;     // Sonar page depth scale: 0 = auto (deepest bottom + margin), else fixed
   uint16_t focus_range_cm;   // Focus page depth scale: 0 = auto, else fixed
   bool hide_weak;            // do not draw the weakest echoes (level 1)
+  char note[24];             // D43: short note for the home footer ("Near bait: Pointe"), "" = none
   // FOCUS
   uint8_t focus_node; uint16_t bait_cm; uint8_t n_cols; ScrPingCol cols[118];
   // test

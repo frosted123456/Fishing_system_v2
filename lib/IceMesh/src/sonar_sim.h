@@ -38,16 +38,51 @@ class SonarSource {
     node_ = node; scene.begin(cfg); proc.reset(); proc.bait_m = cfg.bait_m;
     index_ = start_index; n_pend_ = 0; since_base_ = BASE_EVERY; since_bg_ = BG_EVERY; bg_seg_ = 0;
     bg_ver_ = 0; bg_valid_ = false; data_blocks_ = 0; act_bits_ = 0; was_focus_ = false; last_fish_ = 0;
+    tick_n_ = 0; rot_f_ = 0; last_status_ = 0; status_ = 0;
     memset(slot_id_, 0, sizeof(slot_id_)); memset(slot_used_, 0, sizeof(slot_used_));
     memset(&last_, 0, sizeof(last_)); memset(&out_, 0, sizeof(out_)); memset(bg_, 0, sizeof(bg_));
   }
 
-  // One ping. Writes up to `max_out` blocks; returns how many.
+  // Called every 250 ms. Pings at the active rate while something moves (or in focus), at the idle rate
+  // otherwise (knobs pinghz / idlehz, D43); the fake scene's clock keeps real time. Up to `max_out` blocks.
   uint8_t tick(bool focus, Block* out, uint8_t max_out) {
+    const uint8_t tpp = ticksPerPing(focus);
+    since_base_++;
+    if (++tick_n_ < tpp) return 0;
+    tick_n_ = 0;
     static uint8_t codes[sp::NFREQ][BINS];   // shared scratch (one source runs at a time)
+    if (tpp > 1) scene.advance(static_cast<sreal>(tpp - 1) * sp::DT());
     scene.ping(codes);
-    proc.step(codes, sp::NFREQ, out_);
+    proc.dt = static_cast<sreal>(tpp) * sp::DT();
+    const uint8_t fm = proc.prm[P_FREQ_MODE];
+    if (fm == 1) { proc.stepRotating(codes[rot_f_], rot_f_, out_); rot_f_ = static_cast<uint8_t>((rot_f_ + 1) % sp::NFREQ); }
+    else if (fm == 2) { memcpy(codes[0], codes[1], BINS); proc.step(codes, 1, out_); }   // 200 kHz only
+    else proc.step(codes, sp::NFREQ, out_);
+    return afterPing(focus, out, max_out);
+  }
+
+  // Real sonar (driver): one processed ping from captured codes (nfreq 3 = one burst per frequency,
+  // 1 = single frequency; rotate = this ping's frequency index when rotating). Same output as tick().
+  uint8_t process(const uint8_t codes[sp::NFREQ][BINS], uint8_t nfreq, int8_t rotate_f, sreal dt_s, bool focus,
+                  Block* out, uint8_t max_out) {
+    since_base_ = static_cast<uint16_t>(since_base_ + static_cast<uint16_t>(dt_s / sp::DT() + R(0.5)));
+    proc.dt = dt_s;
+    if (rotate_f >= 0) proc.stepRotating(codes[0], static_cast<uint8_t>(rotate_f), out_);
+    else proc.step(codes, nfreq, out_);
+    return afterPing(focus, out, max_out);
+  }
+
+  // ticks of 250 ms per ping: active rate when in focus or a fish was seen in the last ~40 pings
+  uint8_t ticksPerPing(bool focus) const {
+    const uint8_t r = (focus || act_bits_ != 0) ? proc.prm[P_PING_HZ_X4] : proc.prm[P_IDLE_HZ_X4];
+    return static_cast<uint8_t>(r >= 16 ? 1 : (r == 0 ? 16 : 16 / r));
+  }
+  uint8_t status() const { return status_; }   // ST_* of the latest ping
+
+ private:
+  uint8_t afterPing(bool focus, Block* out, uint8_t max_out) {
     buildPing(last_);
+    status_ = computeStatus();
     uint8_t fish = 0;
     for (uint8_t i = 0; i < last_.n_targets; i++) if (last_.t[i].track != 0) fish++;
     act_bits_ = static_cast<uint16_t>((act_bits_ << 1) | (fish ? 1u : 0u));
@@ -75,25 +110,46 @@ class SonarSource {
         bg_seg_ = static_cast<uint8_t>((bg_seg_ + 1) % BG_SEGMENTS);
         since_bg_ = 0;
       }
-    } else {
-      since_base_++;
-      const bool fish_new = fish > 0 && last_fish_ == 0 && since_base_ >= 4;
-      if ((since_base_ >= BASE_EVERY || fish_new) && n_out < max_out) {
-        const Summary s = summary();
-        const size_t len = encodeSummary(s, out[n_out].data, MAX_BLOCK);
-        if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
-        since_base_ = 0;
-      }
+    }
+    // BASE every 2 s (also in focus: it carries the status flags), at once for a new fish (not in focus)
+    // or when a fish comes near the bait (D43)
+    const bool fish_new = !focus && fish > 0 && last_fish_ == 0 && since_base_ >= 4;
+    const bool near_new = (status_ & ST_NEAR_BAIT) && !(last_status_ & ST_NEAR_BAIT);
+    if ((since_base_ >= BASE_EVERY || fish_new || near_new) && n_out < max_out) {
+      const Summary s = summary();
+      const size_t len = encodeSummary(s, out[n_out].data, MAX_BLOCK);
+      if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
+      since_base_ = 0;
     }
     last_fish_ = fish;
+    last_status_ = status_;
     return n_out;
   }
+
+  // D43 flags: ring-down alarm; a fish within 40 cm of the bait (or coming toward it within 60 cm);
+  // bait in cover (a "cover" echo within 40 cm, or the bottom within 30 cm under the bait)
+  uint8_t computeStatus() const {
+    uint8_t st = out_.ring_alarm ? ST_RING : 0;
+    const sreal bait = proc.bait_m;
+    for (uint8_t i = 0; i < out_.n; i++) {
+      const TrackOut& t = out_.t[i];
+      const sreal dd = t.depth - bait, ad = dd < 0 ? -dd : dd;
+      if (t.label == LBL_FISH && t.miss == 0 && (ad < R(0.4) || (ad < R(0.6) && dd * t.vel < R(0)))) st |= ST_NEAR_BAIT;
+      if (t.label == LBL_COVER && ad < R(0.4)) st |= ST_BAIT_COVER;
+    }
+    if (out_.bottom > R(0) && out_.bottom - bait < R(0.3)) st |= ST_BAIT_COVER;
+    return st;
+  }
+
+ public:
 
   // Summary of the latest ping: fish (not the bait), nearest one to the bait line.
   Summary summary() const {
     Summary s;
     memset(&s, 0, sizeof(s));
     s.node = node_; s.ping = last_.index; s.bottom_cm = last_.bottom_cm; s.bg_ver = bg_ver_; s.hard = out_.hard;
+    s.status = status_;
+    { const float b = static_cast<float>(out_.bottom_snr); s.bottom_snr = static_cast<uint8_t>(b <= 0.f ? 0 : (b >= 63.f ? 63 : b + 0.5f)); }
     uint8_t a = 0;
     for (uint16_t b = act_bits_; b; b >>= 1) a = static_cast<uint8_t>(a + (b & 1u));
     s.activity = a > 15 ? 15 : a;
@@ -240,6 +296,7 @@ class SonarSource {
   uint16_t act_bits_ = 0;
   bool was_focus_ = false;
   uint8_t last_fish_ = 0;
+  uint8_t tick_n_ = 0, rot_f_ = 0, last_status_ = 0, status_ = 0;
   uint32_t slot_id_[8];
   bool slot_used_[8];
   Ping last_;
