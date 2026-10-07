@@ -286,7 +286,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <div class="zoom-head"><strong>Bottom lock</strong><span id="zoomSpan">last 5 ft above bottom, stretched</span></div>
     <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
     <div class="legend">
-      <span><i style="background:#8FA9B2"></i>Unchanged scene: bottom, weeds</span>
+      <span><i style="background:#8FA9B2"></i><i class="sw" style="background:#9A8F7A"></i>Lake bed <i class="sw" style="background:#6FA868"></i>Weeds, structure (still)</span>
       <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong</span>
       <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
     </div>
@@ -319,10 +319,14 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only.</span></li>
     </ul>
     <details class="knobs"><summary>Processing on the holes (every sonar hole)</summary>
-      <div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low filter</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High filter</button></div>
-      <ul class="toggles" id="knobs"></ul>
+      <ul class="toggles">
+        <li><span class="name">Noise filter</span><div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High</button></div><span class="desc">Low shows more (and more junk), High shows only clear echoes. Start Normal.</span></li>
+        <li><span class="name">Water</span><div class="seg" role="group" aria-label="Water depth" id="kWater"><button type="button" data-water="lake">Lake</button><button type="button" data-water="shallow">Shallow (under 2 m)</button><button type="button" data-water="bucket">Bucket test</button></div><span class="desc">Where the bottom is looked for and how close to the transducer echoes count.</span></li>
+      </ul>
+      <label class="tog" style="margin:8px 0"><input type="checkbox" id="kAdv"> Advanced (all 22 settings)</label>
+      <ul class="toggles" id="knobs" hidden></ul>
       <div class="scene"><button class="btn" id="kDefaults" type="button">Defaults</button> <button class="btn" id="kResend" type="button">Send to holes again</button></div>
-      <p class="desc" id="kNote">Guesses tuned on simulated pings: re-tune on real echoes. Saved on each hole; the "(driver)" knobs wait for the TUSS4470 driver.</p>
+      <p class="desc" id="kNote">Values tuned on simulated echoes so far; the first real recordings will move them. Saved on every hole.</p>
     </details>
     <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
   </section>
@@ -453,6 +457,8 @@ function lut(stops) {
 }
 const PAL = lut([[0, '#0A1E26'], [0.16, '#11414C'], [0.32, '#1B7778'], [0.48, '#58AE7C'], [0.62, '#D3C04A'], [0.76, '#EE8B2F'], [0.9, '#D8432F'], [1, '#FFE6D2']]);
 const GREY = lut([[0, '#0A1E26'], [1, '#8FA9B2']]);
+const SEDIMENT = lut([[0, '#0A1E26'], [1, '#9A8F7A']]);   // static scene at and below the bottom line: the lake bed
+const WEED = lut([[0, '#0A1E26'], [1, '#6FA868']]);       // static scene above the bottom line: weeds, structure
 const palCss = v => { const k = Math.round(clamp(v, 0, 1) * 255) * 3; return `rgb(${PAL[k]},${PAL[k + 1]},${PAL[k + 2]})`; };
 const BGV = [0, 0.13, 0.30, 0.55];      // static scene level -> grey value (dimmed like the prototype)
 const RV = [0, 0.35, 0.55, 0.75];       // changed-cell level -> colour value
@@ -469,7 +475,7 @@ let selSlot = null, userPicked = false, playing = true;
 const fmtD = m => units === 'ft' ? (m * 3.28084).toFixed(1) + ' ft' : m.toFixed(2) + ' m';
 const fmtNum = m => units === 'ft' ? (m * 3.28084).toFixed(1) : m.toFixed(2);
 const nameOf = n => names[n] || ('Hole ' + n);
-function labelOf(t, bottom) { return t.slot === 0 ? 'Bait' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
+function labelOf(t, bottom) { return t.slot === 0 ? 'At bait depth' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
 function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of the prototype colour scale (46 dB span)
 
 /* ---------- Server ---------- */
@@ -537,7 +543,8 @@ function pixels(rec) {
   if (rec.px) return rec.px;
   const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
   const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
-  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? GREY : PAL, BGV[l]); } }
+  const bedBin = rec.b != null ? Math.round(rec.b / BIN) - 2 : N;   // the bottom line of this ping splits bed from weeds
+  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? (i >= bedBin ? SEDIMENT : WEED) : PAL, BGV[l]); } }
   const G = GAIN(), wt = WT[vopt.weak] || 0;   // v2 display knobs: colour gain, hide weak echoes
   for (const r of rec.r) { const v = RV[r[1]]; if (v >= wt) put(r[0], PAL, v * G); }
   for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
@@ -650,7 +657,7 @@ function drawOverlay() {
     const last = pts[pts.length - 1];
     g.strokeStyle = palCss(clamp(Math.max(0.5, last.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
   }
-  const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'Bait') && t.s > 0.08).sort((a, b) => a.d - b.d);
+  const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'At bait depth') && t.s > 0.08).sort((a, b) => a.d - b.d);
   let lastY = -1e9;
   for (const t of cur) {
     let y = yOf(t.d) - 12 * dpr; if (y - lastY < 20 * dpr) y = lastY + 20 * dpr; lastY = y;
@@ -756,7 +763,7 @@ $('tlist').addEventListener('click', pickRow);
 /* ---------- Controls ---------- */
 const TOGGLES = [
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
-  ['bgsep', 'Static scene in grey', 'Bottom and weeds fade back. Anything that moves stays in colour.']
+  ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.']
 ];
 const tUl = $('toggles');
 tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
@@ -784,14 +791,46 @@ fillDepth();
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', fillDepth));
 // processing knobs on the holes (chalet -> every sonar hole)
 let K = null;
+// plain words for each knob (the hole firmware only knows the short name and the unit)
+const KHELP = {
+  snr: ['Echo must stand out by', 'How much louder than the background an echo must be to count. Lower = more fish and more junk.'],
+  prom: ['Peak sharpness', 'How much an echo must stand above its neighbours. Lower = merges close echoes less.'],
+  confirm: ['Pings to confirm', 'An echo is reported after this many pings in a row. Higher = fewer flickers, slower.'],
+  keep: ['Keep a lost fish for', 'Pings a fish stays on screen after its echo vanished.'],
+  gate: ['Max move per ping', 'A fish moving more than this between pings becomes a new one.'],
+  dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: ~0.9 m. Bucket: 0.1 m.'],
+  bsmooth: ['Bottom line smoothing', 'Lower = steadier bottom line, slower to follow a real change.'],
+  learn: ['Still-scene fading speed', 'How fast things that do not move (bed, weeds) fade to the muted colours.'],
+  range: ['Colour range', 'Loudness span mapped to the colours. Smaller = more contrast.'],
+  tvg: ['Deep echo boost', 'Boosts deeper echoes to make up for spreading. On for normal use.'],
+  cycles: ['Ping length, overview', 'Longer ping = more energy, longer ringing. Base mode.'],
+  fcycles: ['Ping length, watching', 'Shorter ping = sharper detail while you watch one hole.'],
+  gain: ['Receiver gain', '0-3 = 10 / 12.5 / 15 / 20x. Lower if the bench line says CLIPPED.'],
+  pinghz: ['Ping rate when busy', 'Pings per second (x0.25) while fish are around or you watch the hole.'],
+  idlehz: ['Ping rate when quiet', 'Pings per second (x0.25) when nothing is in the water. Lower saves battery.'],
+  avg: ['Pings averaged', 'Overview mode averages this many bursts: smoother, slower.'],
+  freq: ['Frequencies', '0 = 190/200/210 kHz every ping, 1 = one at a time, 2 = 200 kHz only.'],
+  sound: ['Speed of sound', '1350 + value m/s. 53 = 1403 m/s, fresh water near 0 C.'],
+  bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
+  thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
+  bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; bucket: just past the ringing.'],
+  vdrv: ['Drive voltage', 'Transducer drive, volts. Must stay 1 V below the MT3608 setting.'],
+};
+const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
 function renderKnobs() {
   if (!K) return;
   document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
+  const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
+  const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin) || null;
+  document.querySelectorAll('#kWater [data-water]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.water === water)));
+  $('knobs').hidden = !$('kAdv').checked;
   if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#knobs')) return;
-  $('knobs').innerHTML = K.knobs.map(k => `<li><span class="name">${k.name}</span><input type="number" data-knob="${k.key}" min="${k.lo}" max="${k.hi}" value="${k.v}" style="width:5.5em" aria-label="${k.name}"><span class="desc">${k.unit}${k.v !== k.def ? ' · default ' + k.def : ''}</span></li>`).join('');
+  $('knobs').innerHTML = K.knobs.map(k => { const h = KHELP[k.key] || [k.name, '']; return `<li><span class="name">${h[0]}</span><input type="number" data-knob="${k.key}" min="${k.lo}" max="${k.hi}" value="${k.v}" style="width:5.5em" aria-label="${h[0]}"><span class="desc">${h[1]} <i>${k.unit}${k.v !== k.def ? ' · default ' + k.def : ''}</i></span></li>`; }).join('');
 }
+$('kAdv').addEventListener('change', renderKnobs);
+$('kWater').addEventListener('click', e => { const b = e.target.closest('[data-water]'); if (!b) return; const w = WATER[b.dataset.water]; postKnobs({ key: 'dead', v: w.dead }).then(() => postKnobs({ key: 'bmin', v: w.bmin })); });
 function loadKnobs() { sfetch('/api/sonar/knobs').then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
-function postKnobs(o) { sfetch('/api/sonar/knobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
+function postKnobs(o) { return sfetch('/api/sonar/knobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
 $('knobs').addEventListener('change', e => { const i = e.target.closest('[data-knob]'); if (i) postKnobs({ key: i.dataset.knob, v: +i.value }); });
 $('kPreset').addEventListener('click', e => { const b = e.target.closest('[data-preset]'); if (b) postKnobs({ preset: +b.dataset.preset }); });
 $('kDefaults').addEventListener('click', () => { if (confirm('Sonar processing back to defaults on every hole?')) postKnobs({ defaults: true }); });
