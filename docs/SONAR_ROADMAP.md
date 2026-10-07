@@ -38,3 +38,10 @@ Status:
 | 27 | Level check at setup | Done | Bottom echo dB over noise (`bottom_snr`, BASE v4) on OLED Holes / web card |
 | 28 | Strike-imminent | Done | Fish near the bait (`ST_NEAR_BAIT`) → "Near bait: X" note, optional beep (Settings) |
 | 29 | Log 60 s before each flag | Done | Chalet keeps the last 8 trips (`/api/trips`, download). Raw recordings: tip-up serial `REC ON` |
+
+## Backlog (not sonar, parked)
+
+| Item | Status | Notes |
+|---|---|---|
+| Pin holes with the chalet box's GPS at installation | Idea (Frank, 2026-10-07) | Carry the box to each hole, pick it on the OLED, OK = store the fix; positions relative to where the box ends up. Needs: GPS module type and UART pins on the offshore box. Accuracy 3-5 m: fine for holes 10 m+ apart. Writes the same `/api/node/pos` store as the web map (D51). ~1 h once the module is known |
+
