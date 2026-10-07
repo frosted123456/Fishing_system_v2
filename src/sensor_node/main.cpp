@@ -1373,9 +1373,9 @@ static int16_t sonarKnobAskId = -1; static uint8_t sonarKnobAskVal = 0;   // ser
 static void sonarBenchLine(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   char edge[16];
   if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
-  Serial.printf("BENCH adc=%luHz(want %lu) t0=%d%s raw_max=%u%s edge=%s ping=%lums | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s |",
+  Serial.printf("BENCH adc=%luHz(want %lu) t0=%d%s raw_max=%u%s edge=%s ping=%lums%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s |",
                 (unsigned long)pi.adc_hz, (unsigned long)SONAR_ADC_HZ, pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
-                edge, (unsigned long)(pi.us / 1000), (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
+                edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                 o.ring_alarm ? "(RING ALARM)" : "");
   static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
   for (uint8_t k = 0; k < o.n; k++) Serial.printf(" %.2fm:%s", (double)o.t[k].depth, L[o.t[k].label & 3]);

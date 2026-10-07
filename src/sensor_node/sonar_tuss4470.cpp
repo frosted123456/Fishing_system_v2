@@ -26,6 +26,7 @@ static volatile uint32_t g_cap_burst = 0, g_cap_edge = 0;
 static volatile bool g_edge_seen = false;
 static volatile uint32_t g_blind_ticks = 0;
 static bool g_asleep = false, g_spi_up = false;
+static uint8_t g_stat = 0;   // status bits of the last SPI reply (high byte bits 5:0)
 // TOF_CONFIG (reg 0x1B, datasheet): bit 7 SLEEP_MODE_EN, bit 6 STDBY_MODE_EN, bit 1 VDRV_TRIGGER, bit 0 CMD_TRIGGER
 static const uint8_t TOF_SLEEP = 0x80, TOF_TRIGGER = 0x01;
 
@@ -39,6 +40,7 @@ static uint16_t xfer(uint8_t b0, uint8_t b1) {
   const uint8_t r0 = vspi.transfer(b0), r1 = vspi.transfer(b1);
   digitalWrite(SONAR_PIN_CS, HIGH);
   vspi.endTransaction();
+  g_stat = (uint8_t)(r0 & 0x3F);   // every reply carries the status (datasheet figure 7-9)
   return (uint16_t)((r0 << 8) | r1);
 }
 void writeReg(uint8_t addr, uint8_t v) { xfer((uint8_t)((addr & 0x3F) << 1), v); }
@@ -94,14 +96,13 @@ bool begin() {
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
   spiUp();
   wake();                                                              // out of sleep (if a deep sleep left it there)
-  // presence check: BPF_CONFIG_1 (0x10) has 8 R/W bits (datasheet); two values, so a floating or stuck
-  // MISO (0x00 / 0xFF) cannot pass. (0x17 was used before: its bits 7:5 are read-only = always failed.)
-  writeReg(0x10, 0x1A); const uint8_t r1 = readReg(0x10);
-  writeReg(0x10, 0x25); const uint8_t r2 = readReg(0x10);
-  g_ok = r1 == 0x1A && r2 == 0x25;
+  // presence check: DEVICE_ID (0x1D) reads 0xB9 (datasheet 7.6.1.12); a floating or stuck MISO gives 0x00 / 0xFF
+  readReg(0x1D);                                  // first frame after a wake can be stale
+  g_ok = readReg(0x1D) == 0xB9;
   writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
   writeReg(0x14, 0x00);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2)
-  writeReg(0x16, 0x06);   // VDRV 11 V (regulator on: bit 5 = 0) until the first ping sets the knob
+  writeReg(0x16, 0x46);   // VDRV 11 V, regulator on (bit 5 = 0), bit 6 DIS_VDRV_REG_LSTN: the chip stops charging
+                          // VDRV while it listens (its own quiet receive, datasheet 7.3.1); the ping re-arms it
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0
   // input: mcpwm_gpio_init makes the pin input-only, so it runs FIRST, the RMT then takes the pin as
@@ -136,6 +137,7 @@ bool begin() {
   return g_ok;
 }
 bool ok() { return g_ok; }
+uint8_t lastStatus() { return g_stat; }
 
 // Before every deep sleep and when the sonar stops: the shield stays powered (no enable wire), so this
 // is its only low-power state. Works without begin() (only SPI is brought up).
@@ -165,7 +167,9 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   if (SONAR_PIN_BOOST >= 0) digitalWrite(SONAR_PIN_BOOST, LOW);   // item 2: quiet receive (VDRV holds the burst)
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
-  writeReg(0x1B, TOF_TRIGGER);                                    // time-of-flight start
+  writeReg(0x1B, 0x02);                                           // VDRV_TRIGGER: charge VDRV for this burst (DIS_VDRV_REG_LSTN mode)
+  for (int w = 0; w < 20 && !(lastStatus() & 0x20); w++) { delayMicroseconds(200); readReg(0x1C); }   // VDRV_READY, 4 ms max
+  writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER (VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
   burst(hz, cycles);
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
@@ -222,7 +226,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   const uint8_t avg = focus ? 1 : p[P_AVG];
-  writeReg(0x16, (uint8_t)((p[P_VDRV] - 5) & 0x0F));   // VDRV = knob volts (regulator on, 10 mA)
+  writeReg(0x16, (uint8_t)(0x50 | ((p[P_VDRV] - 5) & 0x0F)));   // VDRV = knob volts, 20 mA charge (bit 4), stop charging while listening (bit 6)
   // DEV_CTRL_2 (0x13): bits 1:0 LNA_GAIN codes are NOT in order (0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V,
   // datasheet): knob 0..3 = 10, 12.5, 15, 20 V/V. Bit 2 VOUT_SCALE_SEL = 0 (3.3 V map), both log-amp stages on.
   static const uint8_t LNA_CODE[4] = {1, 3, 0, 2};
@@ -260,6 +264,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
     }
   }
   info.nfreq = nf;
+  info.fault = (uint8_t)(readReg(0x1C) & 0x06);   // DEV_STAT: PULSE_NUM_FLT (bit 2) / DRV_PULSE_FLT (bit 1) of the last burst
   info.edge_um = g_edge_seen ? (int32_t)((float)(g_cap_edge - g_cap_burst) / 80e6f * sound / 2.0f * 1e6f) : -1;
   info.us = micros() - t_start;
   return true;
@@ -274,6 +279,7 @@ void sleep() {}
 bool ok() { return false; }
 bool ping(const icemesh::sonar::Params&, bool, uint8_t[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], PingInfo&) { return false; }
 uint8_t readReg(uint8_t) { return 0; }
+uint8_t lastStatus() { return 0; }
 void writeReg(uint8_t, uint8_t) {}
 void setCalibration(const uint16_t[17]) {}
 void getCalibration(uint16_t pts[17]) { for (int i = 0; i < 17; i++) pts[i] = (uint16_t)(i * 256); }

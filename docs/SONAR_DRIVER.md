@@ -14,7 +14,7 @@ checks one thing.
 | Processing (bottom, noise floor, targets, ring-down, flags, rotation, adaptive rate) | Host only | `make -C test all` (fake sonar data), ASan/UBSan clean |
 | Recording line format → PC replay | Host only | `tools/sonar_replay.cpp` on a fake recording; file, stdin and Windows monitor logs (`12:00:01.123 > SONAR ...`, CRLF) read the same |
 | Driver compiles for the WROOM (IDF 4.4 legacy APIs: SPI, RMT, I2S-ADC, MCPWM capture) | Yes | arduino-cli, core 2.0.17 |
-| SPI register protocol (odd parity, mode 1, 1 MHz) | **No** | Ported from open_echo. Presence check = write/read two values in BPF_CONFIG_1 (all 8 bits R/W per datasheet) |
+| SPI register protocol (odd parity, mode 1, 1 MHz) | **No** | Datasheet 7.5. Presence check = DEVICE_ID (0x1D) reads 0xB9. Every reply carries the status bits (VDRV_READY, burst faults) |
 | Register fields (IO_MODE 0, LNA codes, threshold bits, BPF table, VDRV, sleep) | Datasheet | Re-read 2026-10-07 against the TI datasheet: 4 fields were wrong before (D47) |
 | Burst on IO2 (RMT, 12.5 ns) | **No** | |
 | I2S-ADC real sample rate | **No** | Measured by the driver itself (`adc=` on the BENCH line) |
@@ -74,7 +74,9 @@ What the firmware does with it:
   Before going above 12 V: the transducer's voltage rating (spec sheet), MT3608 still reaching the setting at
   3.6 V in (end of pack, bench supply), and the freezer re-check. Higher drive also lengthens the ring-down
   (`ring=`; raise `dead` / `bmin` to match).
-- No quiet receive (roadmap #2): the MT3608 switches during listening. Check in the bucket: `noise=` with the
+- Quiet receive, chip side (roadmap #2, datasheet 7.3.1): DIS_VDRV_REG_LSTN = 1, so the TUSS4470 charges VDRV only
+  between VDRV_TRIGGER and the burst (the driver waits for VDRV_READY, 4 ms max), not while it listens. The MT3608
+  itself still switches during listening. Check in the bucket: `noise=` with the
   pack vs with the shield VIN from a bench supply / fresh 9 V battery. A few dB worse = acceptable; much worse =
   LC filter on shield VIN (hardware), or add an enable wire later (the driver supports one).
 - Battery: the TUSS4470 sleeps, but the MT3608's own idle draw stays while the holder switch is on. Worth one

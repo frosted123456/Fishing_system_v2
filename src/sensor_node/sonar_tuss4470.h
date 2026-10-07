@@ -67,12 +67,15 @@ struct PingInfo {
   int32_t edge_um;        // OUT_4 first edge after the blind zone, depth in micrometres (-1 none)
   uint16_t raw_max;       // largest raw ADC value of the capture (clipping check, 4095 = clipped)
   uint32_t us;            // time the ping took
+  uint8_t fault;          // DEV_STAT bits after the burst: 0x04 wrong pulse count, 0x02 driver stuck (clock lost)
   uint8_t t0_ok;          // 1 = time zero from the leakage, 0 = SONAR_T0_FALLBACK used (no leakage seen)
   uint32_t adc_hz;        // MEASURED sample rate of the last capture (samples / capture time). Must read
                           // ~SONAR_ADC_HZ: the depth scale depends on it (bench line / STAT, first bucket step)
 };
 
 bool begin();                                             // false = TUSS4470 not answering (SPI)
+uint8_t lastStatus();                                     // SPI status bits of the last frame (datasheet 7.4:
+                                                          // bit5 VDRV_READY, 4 PULSE_NUM_FLT, 3 DRV_PULSE_FLT, 2 EE_CRC_FLT, 1:0 state)
 void sleep();                                             // TUSS4470 sleep mode (reg 0x1B bit 7); safe before
                                                           // begin(). The next ping() wakes it.
 bool ok();
