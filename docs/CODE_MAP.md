@@ -16,6 +16,7 @@
 | `  web_suite.h` | GENERATED from `web/suite.html` by `tools/gen_web.py` (PlatformIO runs it; build_check.sh too). Never edit | |
 | `web/suite.html` | The chalet web page (Holes / Sonar / Radio / Settings). Open with `python3 tools/web_preview.py` | Chromium screenshots |
 | `src/sensor_node/` | Tip-up firmware (ESP32-C3 reed, WROOM Hall latch + TUSS4470 sonar) | build_check.sh; driver: bucket test (`docs/SONAR_DRIVER.md`) |
+| `tools/flash.html` + `tools/flash.py` | Flash a board: pick board + purpose + ID on the page, run the one command; each board gets an env in `devices.ini` (the fleet) | |
 | `include/messages.h` | Frames and `NodeState` shared by the two firmwares | |
 
 Rules kept from v1: `config.h` holds the Wi-Fi credentials and is never committed; every global of the Heltec

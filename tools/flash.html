@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash a board</title>
+<style>
+:root{--bg:#EEF3F4;--surface:#fff;--ink:#13262D;--muted:#55707A;--line:#D2DEE2;--chip:#E1EAEC;--accent:#1C6C77;--accent-ink:#fff;--warn:#F2C94C;--warn-ink:#3A2A00;--alert:#C2412D;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0C171C;--surface:#13232A;--ink:#E4EDEF;--muted:#90A7AF;--line:#22363D;--chip:#1A2D34;--accent:#5DB0BA;--accent-ink:#0A1E26;--alert:#E0725A;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 "Barlow Semi Condensed","Arial Narrow",system-ui,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:16px}
+h1{margin:0 0 2px;font-size:1.7rem}.sub{color:var(--muted);margin:0 0 14px}
+h2{font-size:1.1rem;margin:0 0 8px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+.step{display:flex;gap:12px;align-items:flex-start}.step .n{flex:0 0 30px;height:30px;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-weight:700;display:flex;align-items:center;justify-content:center}
+.opts{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
+.opt{border:1px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer;background:var(--bg)}
+.opt:hover{border-color:var(--accent)}.opt[aria-pressed=true]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent);background:var(--surface)}
+.opt b{display:block;font-size:1.05rem}.opt small{color:var(--muted)}
+.form{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px 16px;align-items:start}
+label.f{display:grid;gap:3px;font-weight:600}label.f small{color:var(--muted);font-weight:400}
+input,select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-height:42px}
+.tog{display:flex;gap:8px;align-items:center;font-weight:600;min-height:42px;margin-top:22px}
+pre{background:#0A1E26;color:#D7E6EA;border-radius:10px;padding:12px;overflow:auto;font-size:.95rem;margin:6px 0;white-space:pre-wrap;word-break:break-all}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;min-height:38px;font:inherit;font-weight:600;cursor:pointer;color:inherit}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.chip{display:inline-block;font-size:.8rem;font-weight:700;padding:1px 7px;border-radius:6px;background:var(--chip);color:var(--muted)}
+.chip.warn{background:var(--warn);color:var(--warn-ink)}.chip.bad{background:var(--alert);color:#fff}
+ul.check{margin:6px 0 0;padding-left:20px}ul.check li{margin:3px 0}
+.muted{color:var(--muted)}.hidden{display:none}
+table{border-collapse:collapse;width:100%;font-size:.95rem}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left}th{color:var(--muted);font-weight:600}
+.err{color:var(--alert);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Flash a board</h1>
+<p class="sub">Pick the board and what it will do; the page gives you the one command to run and what to check. Open this file from the repo (tools/flash.html), nothing to install.</p>
+
+<div class="card"><div class="step"><div class="n">1</div><div style="flex:1">
+<h2>Which board is on the USB cable?</h2>
+<div class="opts" id="boards">
+  <button class="opt" data-board="heltec"><b>Heltec WiFi LoRa 32 V3</b><small>LoRa + ESP-NOW + OLED. Chalet, hubs, relay.</small></button>
+  <button class="opt" data-board="wroom"><b>ESP32 WROOM devkit</b><small>Tip-up head: Hall latch, optional sonar shield.</small></button>
+  <button class="opt" data-board="c3"><b>ESP32-C3 Super Mini</b><small>Older tip-up with a reed switch.</small></button>
+</div></div></div></div>
+
+<div class="card hidden" id="s2"><div class="step"><div class="n">2</div><div style="flex:1">
+<h2>What will it do?</h2>
+<div class="opts" id="purposes"></div></div></div></div>
+
+<div class="card hidden" id="s3"><div class="step"><div class="n">3</div><div style="flex:1">
+<h2>Identity and port</h2>
+<div class="form">
+  <label class="f">Node ID <input id="id" type="number" min="1" max="100" value=""><small>Unique on the network, 1-100. <span id="idhint"></span></small></label>
+  <label class="f">Name <input id="name" type="text" maxlength="15" placeholder="Pointe"><small>Shown on the screens and the phone (15 chars max)</small></label>
+  <label class="f">Serial port <input id="port" type="text" placeholder="COM7"><small>Windows: Device Manager → Ports. Empty = let PlatformIO guess.</small></label>
+  <label class="tog" id="benchRow" style="display:none"><input type="checkbox" id="bench"> Bucket-test build (sonar from boot, no hub)</label>
+  <label class="tog"><input type="checkbox" id="mon" checked> Open the serial monitor after</label>
+</div>
+<p class="err" id="iderr"></p>
+<h2 style="margin-top:12px">Boards already flashed <span class="chip">devices.ini</span></h2>
+<p class="muted" style="margin:0 0 6px">Every board you flash is recorded in <code>devices.ini</code> at the repo root. Paste its content here to see the IDs in use and avoid a duplicate:</p>
+<textarea id="ini" rows="3" style="width:100%;font:13px/1.3 ui-monospace,monospace;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--bg);color:var(--ink)" placeholder="[env:hole7_sonar] ..."></textarea>
+<div id="fleet"></div>
+</div></div></div>
+
+<div class="card hidden" id="s4"><div class="step"><div class="n">4</div><div style="flex:1">
+<h2>Before flashing</h2><ul class="check" id="before"></ul>
+<h2 style="margin-top:12px">Run this, from the repo folder</h2>
+<pre id="cmd"></pre>
+<button class="btn primary" id="copy">Copy command</button> <span class="muted" id="copied"></span>
+<p class="muted" style="margin:8px 0 0">What it does: writes <code>[env:<span id="envname"></span>]</code> to <code>devices.ini</code>, builds, uploads<span id="monTxt"></span>. Re-flash the same board later: <code>python tools/flash.py --env <span id="envname2"></span> --port <span id="port2">COM7</span></code>. No Python? The equivalent PlatformIO command is <code id="piocmd"></code> after adding the env block by hand.</p>
+<h2 style="margin-top:12px">After flashing: what you should see</h2><ul class="check" id="after"></ul>
+</div></div></div>
+
+<div class="card"><h2>Reference</h2>
+<table><tr><th>ID range</th><th>Used for</th></tr>
+<tr><td>1-100</td><td>Your real boards. Convention so far: chalet 100, hubs 1-9, relay 90, tip-ups 2-49 (the hub's own hole = the hub's ID)</td></tr>
+<tr><td>101-124</td><td>Demo network inside the chalet (Settings → Simulation → Demo network): never give these to a board</td></tr>
+<tr><td>128-255</td><td>Test holes a hub invents in sonar test mode</td></tr></table>
+<p class="muted" style="margin:8px 0 0">Network ID 0x42 and the hotspot password live in <code>src/*/config.h</code>: same on every board. The chalet's cabin Wi-Fi (STA_SSID / STA_PASSWORD) is in <code>src/lora_node/config.h</code>, which is never committed. Builds without flashing, all envs: <code>tools/build_check.sh</code>.</p>
+</div>
+</div>
+<script>
+const PURPOSES = {
+  heltec: [
+    { k: 'chalet', t: 'Chalet (offshore box)', d: 'The master: beacon, web page, screen, buzzer, phone hotspot. One per network.', idDef: 100, nameDef: 'Chalet',
+      before: ['src/lora_node/config.h: STA_SSID / STA_PASSWORD = the cabin Wi-Fi (optional; the hotspot works without it)', 'Only one chalet per network'],
+      after: ['Screen: "Ice Fishing v2 / Chalet (offshore)" then the home page with "SETUP 5 min"', 'Esc opens the menu; Settings → Wi-Fi shows the hotspot IceFish-Remote', 'Phone: connect to IceFish-Remote (password in config.h), open http://192.168.4.1', 'Serial: type HELP for the commands (DEMO, KNOBS, BUZZ, PERF…)'] },
+    { k: 'hub', t: 'Hub (on the ice)', d: 'Collects its pocket of tip-ups over ESP-NOW, talks LoRa to the chalet. Has its own hole.', idDef: 1, nameDef: 'Hub 1',
+      before: ['Unique ID: this ID is also the ID of the hub\'s own hole', 'The hub\'s own tip-up sensor wired to the Heltec (or set HAS_LOCAL_SENSOR=false in devices.ini after)'],
+      after: ['Screen: "HUB n" with "Waiting for chalet" until the chalet beacon is heard, then "Chalet OK -xx dBm"', 'Chalet home page: the hub appears as Hn with its holes', 'Tip-ups near it show up on the hub screen within ~1 min'] },
+    { k: 'relay', t: 'Relay (LoRa repeater)', d: 'Extends the LoRa range between a far pocket and the chalet. Usually not needed.', idDef: 90, nameDef: 'Relay',
+      before: ['Only if a hub cannot reach the chalet directly (Radio tab: "via hub x" or lost)'],
+      after: ['Screen shows the chalet link; the far hub shows "Chalet via relay"'] },
+    { k: 'sensor_lora', t: 'LoRa tip-up (Heltec on a hole)', d: 'A Heltec used directly as a tip-up over LoRa, no hub. Rare.', idDef: 50, nameDef: 'Hole 50',
+      before: ['Reed/Hall sensor wired to the Heltec'], after: ['Appears on the chalet as a hole without a hub'] },
+  ],
+  wroom: [
+    { k: 'tipup_wroom', t: 'Tip-up, Hall latch', d: 'The v2 head: US1881 latch on GPIO 27, deep sleep, ESP-NOW to the nearest hub.', idDef: 2, nameDef: 'Hole 2',
+      before: ['Hall latch output → GPIO 27, VCC from the pack (≥ 3.5 V), GND', 'Battery divider on GPIO 34 (2:1)', 'A hub (or the chalet in demo) must be running to see it'],
+      after: ['Serial: "Hall latch: level x, 0 flips since power-on, trip off" then deep sleep', 'Turn the spool a quarter turn → wakes, ">>> Sending ALERT" → FISH ON on the chalet', 'Still for 30 s → "Flag reset - FISH OFF"'] },
+    { k: 'tipup_wroom', sonar: true, t: 'Tip-up + sonar (TUSS4470 shield)', d: 'Same, with the Open Echo shield and the transducer. Driver not yet proven on hardware.', idDef: 2, nameDef: 'Hole 2',
+      before: ['docs/SONAR_DRIVER.md: wiring table (VSPI 18/19/23/5, IO1 26, IO2 25, VOUT 36) and the MT3608 at 12.0 V', 'Shield VCC SELECT jumper on 3.3 V', 'First time: use the bucket-test build below, not this one'],
+      after: ['Serial: "Sonar TUSS4470: found" (else wiring / SPI)', 'The sonar runs only while a hub talks to it; the chalet Sonar tab shows the hole', 'Chalet: Set bait on the hole card, then the knobs (Settings → Sonar) as the water tells you'] },
+    { k: 'tipup_wroom', sonar: true, bench: true, t: 'Sonar bucket test', d: 'Real sonar from boot, no hub, one readable BENCH line every 2 s. For the first water tests.', idDef: 2, nameDef: 'Hole 2',
+      before: ['docs/SONAR_DRIVER.md, steps 0-10, in order', 'KNOB dead 1 and KNOB bmin 2 right after boot (a bucket is shallow)'],
+      after: ['Serial: BENCH adc=…Hz t0=… raw_max=… | bottom=… bot_snr=… noise=… ring=…', 'adc≈150000, no (CLIPPED), no (FALLBACK), bottom = the ruler ± 2.5 cm', 'REC ON for a minute, save the log, replay it on the PC (tools/sonar_replay.cpp)'] },
+  ],
+  c3: [
+    { k: 'tipup_c3', t: 'Tip-up, reed switch (v1 head)', d: 'ESP32-C3 with the reed switch on GPIO 4. Unchanged v1 logic.', idDef: 2, nameDef: 'Hole 2',
+      before: ['Reed switch GPIO 4 ↔ GND', 'USB CDC is on in the build (no jumper needed)'],
+      after: ['Serial: "Reed State: CLOSED (flag down)" then deep sleep', 'Flag up → ">>> Sending ALERT" → FISH ON on the chalet'] },
+  ],
+};
+const $ = id => document.getElementById(id);
+let board = null, pur = null;
+function sel(container, attr, val) { container.querySelectorAll('.opt').forEach(b => b.setAttribute('aria-pressed', String(b.dataset[attr] === val))); }
+$('boards').addEventListener('click', e => {
+  const b = e.target.closest('.opt'); if (!b) return;
+  board = b.dataset.board; sel($('boards'), 'board', board);
+  const list = PURPOSES[board];
+  $('purposes').innerHTML = list.map((p, i) => `<button class="opt" data-i="${i}"><b>${p.t}</b><small>${p.d}</small></button>`).join('');
+  $('s2').classList.remove('hidden'); $('s3').classList.add('hidden'); $('s4').classList.add('hidden'); pur = null;
+  if (list.length === 1) $('purposes').querySelector('.opt').click();
+});
+$('purposes').addEventListener('click', e => {
+  const b = e.target.closest('.opt'); if (!b) return;
+  pur = PURPOSES[board][+b.dataset.i]; sel($('purposes'), 'i', b.dataset.i);
+  $('id').value = pur.idDef; $('name').value = pur.nameDef;
+  $('benchRow').style.display = pur.sonar ? '' : 'none'; $('bench').checked = !!pur.bench;
+  $('idhint').textContent = pur.k === 'hub' ? 'Hubs: 1-9 by convention.' : pur.k === 'chalet' ? 'Convention: 100.' : '';
+  $('s3').classList.remove('hidden'); $('s4').classList.remove('hidden'); render();
+});
+function usedIds() {
+  const m = {}; const re = /\[env:([^\]]+)\][\s\S]*?NODE_ID=(\d+)[\s\S]*?NODE_NAME="([^"]*)"/g; let x;
+  while ((x = re.exec($('ini').value))) m[+x[2]] = { env: x[1], name: x[3] };
+  return m;
+}
+function render() {
+  if (!pur) return;
+  const id = +$('id').value, name = ($('name').value || pur.nameDef).replace(/"/g, ''), port = $('port').value.trim();
+  const bench = pur.sonar && $('bench').checked, sonar = !!pur.sonar;
+  const used = usedIds();
+  $('fleet').innerHTML = Object.keys(used).length ? '<table><tr><th>ID</th><th>Name</th><th>env</th></tr>' + Object.keys(used).sort((a, b) => a - b).map(k => `<tr><td>${k}</td><td>${used[k].name}</td><td>${used[k].env}</td></tr>`).join('') + '</table>' : '';
+  let err = '';
+  if (!(id >= 1 && id <= 100)) err = 'ID must be 1-100.';
+  else if (used[id] && used[id].name !== name) err = `ID ${id} is already "${used[id].name}" (${used[id].env}). Same board being re-flashed? Fine. A new board? Pick another ID.`;
+  $('iderr').textContent = err;
+  const base = { chalet: 'chalet', hub: 'hub', relay: 'relay', sensor_lora: 'lora', tipup_c3: 'hole', tipup_wroom: 'hole' }[pur.k];
+  const env = `${base}${id}${sonar ? '_sonar' : ''}${bench ? '_bench' : ''}`;
+  const cmd = `python tools/flash.py ${pur.k} --id ${id} --name "${name}"${port ? ' --port ' + port : ''}${bench ? ' --bench' : sonar ? ' --sonar' : ''}${$('mon').checked ? ' --monitor' : ''}`;
+  $('cmd').textContent = cmd;
+  $('envname').textContent = env; $('envname2').textContent = env; $('port2').textContent = port || 'COM7';
+  $('monTxt').textContent = $('mon').checked ? ' and opens the serial monitor (115200)' : '';
+  $('piocmd').textContent = `pio run -e ${env} -t upload${port ? ' --upload-port ' + port : ''}`;
+  $('before').innerHTML = ['Board on USB, no other serial monitor open on that port', ...pur.before].map(t => `<li>${t}</li>`).join('');
+  $('after').innerHTML = pur.after.map(t => `<li>${t}</li>`).join('');
+}
+['id', 'name', 'port', 'bench', 'mon', 'ini'].forEach(i => $(i).addEventListener('input', render));
+$('copy').addEventListener('click', () => { navigator.clipboard.writeText($('cmd').textContent).then(() => { $('copied').textContent = 'copied'; setTimeout(() => $('copied').textContent = '', 1500); }); });
+</script>
+</body>
+</html>
