@@ -7,12 +7,12 @@ Preview on a PC with fake data: python3 tools/web_preview.py (reads web/suite.ht
 """
 import os, sys
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = os.path.join(ROOT, "web", "suite.html")
-DST = os.path.join(ROOT, "src", "lora_node", "web_suite.h")
 MAX_CHUNK = 60000   # a raw string literal is split into chunks the compiler concatenates (MSVC-safe, gcc fine)
 
-def main():
+def main(root):
+    # root: the repo. Under PlatformIO this file is exec'd by SCons (no __file__): the env gives PROJECT_DIR.
+    SRC = os.path.join(root, "web", "suite.html")
+    DST = os.path.join(root, "src", "lora_node", "web_suite.h")
     html = open(SRC, encoding="utf-8").read()
     if ')rawliteral"' in html:
         sys.exit("suite.html must not contain )rawliteral\"")
@@ -29,11 +29,8 @@ def main():
         open(DST, "w", encoding="utf-8").write(text)
         print("web_suite.h: %d bytes of HTML" % len(html))
 
-if __name__ == "__main__":
-    main()
-# PlatformIO extra_scripts entry point
 try:
-    Import("env")  # noqa: F821
-    main()
+    Import("env")  # noqa: F821  (PlatformIO extra_scripts entry point)
+    main(env.subst("$PROJECT_DIR"))  # noqa: F821
 except NameError:
-    pass
+    main(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
