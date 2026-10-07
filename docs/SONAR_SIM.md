@@ -132,6 +132,7 @@ Real-water tests come late and may happen on the ice first, so the processing ha
 | sound | Sound speed | 1403 m/s | 1350 + value; fresh water near 0 °C ≈ 1403 |
 | bpf | Band-pass code | 0x1E | TUSS4470 reg 0x10 (200 kHz per open_echo) |
 | thresh | Edge threshold | 31 | TUSS4470 reg 0x17, OUT_4 comparator for edge timing |
+| vdrv | Drive voltage | 11 V | TUSS4470 VDRV (reg 0x16), 5-20 V; = MT3608 setting − 1 V; 2 × VDRV p-p on the transducer |
 
 Defaults = the prototype ("Processed"): `test_sonar_proc` stays bit-exact. **Noise filter** presets (OLED): Low 7/4/2/6, Normal 10/5/3/5, High 14/7/5/4 (snr/prom/confirm/keep).
 Path: chalet (OLED Settings › Sonar, web Sonar › Display › Processing, serial `KNOBS` / `KNOB <key> <v>`; bench: `KNOB <key> <v>` on the tip-up's own serial, this node only, not saved) → beacon `CMD_SONAR_PARAM` (one knob per command; whole set again when a hub appears after boot, or "Send to holes again") → hub (NVS) → tip-ups in the sonar control message (NVS). Demo network: the knobs act on the FOCUS hole (full fake sonar); the light demo summaries ignore them.

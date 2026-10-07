@@ -20,8 +20,9 @@
 // ---- wiring: PROPOSED GPIO numbers, NOT CONFIRMED ----
 // Frank's power/cable design (2026-10-07): 3 x L91 AA -> TPS63020 3.3 V (ESP32, Hall, shield logic) and
 // MT3608 boost 12-15 V straight off the pack -> shield VIN. NO converter enable wire: idle = TUSS4470
-// sleep mode over SPI (reg 0x1B bit 7). Cable up the mast: 3.3 V, GND, Hall out, VSPI SCLK/SDI/SDO/NCS,
-// IO1, IO2, echo. GPIO numbers below are still proposals. VOUT on an ADC1 pin (I2S-ADC works on ADC1
+// sleep mode over SPI (reg 0x1B bit 7). Mast cable (shielded 12-core): 3.3 V, GND, Hall out, SCLK, MOSI,
+// MISO, CS, IO1, IO2, echo (= VOUT) + echo-GND twisted, 1 spare. Frank's plan: VSPI 18/19/23/5, IO1/IO2 on
+// two free GPIOs (e.g. 25, 26), echo on ADC1, Hall on an RTC GPIO. IO1/IO2/echo numbers still to confirm. VOUT on an ADC1 pin (I2S-ADC works on ADC1
 // only: GPIO32-39). WROOM tip-up already uses 15 (Hall), 2 (LED), 34 (battery). GPIO5 is a strapping
 // pin: fine as SPI CS (idles high).
 #ifndef SONAR_PIN_SCK
@@ -31,7 +32,8 @@
 #define SONAR_PIN_CS    5
 #define SONAR_PIN_IO1   26
 #define SONAR_PIN_IO2   25      // burst (RMT out)
-#define SONAR_PIN_O4    27      // comparator OUT_4 (MCPWM capture), -1 = not wired (no edge timing)
+#define SONAR_PIN_O4    -1      // comparator OUT_4 (MCPWM capture): not in the 12-core mast cable (one echo
+                                // wire = VOUT). The spare core + a free GPIO here enables edge timing
 #define SONAR_PIN_VOUT  36      // ADC1_CH0 (VP)
 #define SONAR_PIN_BOOST -1      // converter enable: not in Frank's design (MT3608 always on). A GPIO here
                                 // = converter off while listening (roadmap item 2), if ever added
@@ -40,13 +42,10 @@
 // ---- acquisition constants (est.) ----
 #define SONAR_ADC_HZ          150000   // I2S-ADC sample rate: ~5 samples per 2.5 cm bin at 1403 m/s
 #define SONAR_CHARGE_MS       4        // pause before each burst (VDRV refill), est.
-// VDRV_CTRL (reg 0x16) bits 3:0: VDRV = level + 5 V (datasheet). It is regulated from VPWR (MT3608 12-15 V),
-// so it must stay below VPWR: 0x06 = 11 V for a 12 V MT3608 setting, est. (regulator headroom not checked).
-// Set to 15 V? 0x09 = 14 V. open_echo's 0x0F = 20 V needs a 24-28 V supply.
-#ifndef SONAR_VDRV_LEVEL
-#define SONAR_VDRV_LEVEL      0x06
-#endif
-#define SONAR_WAKE_MS         5        // sleep -> active before the first burst (VDRV recharge), est.
+// Drive voltage: knob "vdrv" (volts). VDRV_CTRL (reg 0x16) bits 3:0 = VDRV - 5 V, 5-20 V (datasheet), charged
+// from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet), so knob = MT3608 setting - 1 V. Default 11 V for the
+// 12.0 V setting. MT3608 at 21 V -> vdrv 20 = 40 V p-p across the transducer (full bridge, 2 x VDRV).
+#define SONAR_WAKE_MS         10       // sleep -> SPI ready (datasheet power-up time 10 ms; sleep exit likely faster)
 #define SONAR_FREQ_HZ_0       190000
 #define SONAR_FREQ_HZ_1       200000
 #define SONAR_FREQ_HZ_2       210000

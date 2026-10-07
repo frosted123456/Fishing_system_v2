@@ -97,7 +97,7 @@ bool begin() {
   // presence check: write/read back the threshold register
   writeReg(0x17, 0x5A);
   g_ok = readReg(0x17) == 0x5A;
-  writeReg(0x16, SONAR_VDRV_LEVEL & 0x0F);   // VDRV = level + 5 V, 10 mA charge (bit 4 = 0), see header
+  writeReg(0x16, 0x06);   // VDRV 11 V until the first ping sets the knob (safe with the 12 V MT3608 setting)
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0
   // input: mcpwm_gpio_init makes the pin input-only, so it runs FIRST, the RMT then takes the pin as
@@ -211,6 +211,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   const uint8_t avg = focus ? 1 : p[P_AVG];
+  writeReg(0x16, (uint8_t)((p[P_VDRV] - 5) & 0x0F));   // VDRV = knob volts (10 mA charge, bit 4 = 0)
   writeReg(0x13, p[P_GAIN] & 3);        // LNA gain
   writeReg(0x10, p[P_BPF] & 0x3F);      // band-pass centre (one code for the 3 frequencies: TODO per-frequency codes, datasheet Table 7.1)
   writeReg(0x17, p[P_THRESH]);          // OUT_4 threshold

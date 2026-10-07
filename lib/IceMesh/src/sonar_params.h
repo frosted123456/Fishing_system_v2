@@ -33,6 +33,8 @@ enum ParamId : uint8_t {
   P_BPF,             // TUSS4470 band-pass centre code (reg 0x10; 0x1E = 200 kHz per open_echo)
   P_THRESH,          // OUT_4 comparator threshold (reg 0x17), edge timing
   P_BOTTOM_MIN,      // D43: bottom search starts here (x0.1 m; prototype 0.6 m). Bucket test: 1-2
+  P_VDRV,            // D45: transducer drive VDRV in volts (reg 0x16 = V - 5, 5-20 V); must stay below the
+                     //      MT3608 output (VPWR > VDRV + 0.3 V). Full bridge: 2 x VDRV peak-to-peak
   P_COUNT
 };
 
@@ -61,6 +63,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"bpf", "Band-pass code", 0, 63, 30, "reg 0x10"},
     {"thresh", "Edge threshold", 0, 255, 31, "reg 0x17"},
     {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
+    {"vdrv", "Drive voltage", 5, 20, 11, "V (MT3608 - 1)"},
   };
   return T[id < P_COUNT ? id : 0];
 }
