@@ -282,6 +282,7 @@ typedef struct {
   uint8_t  grid_row;
   uint8_t  grid_col;
   uint32_t alarm_ms;          // v2: FISH ON alarm latched since (millis, 0 = none): stays after the line resets
+  bool alarm_acked;           // v2 (D47): silenced while still tripped -> cleared when the line resets (no comeback)
 } NodeState;
 
 // Network state

@@ -1157,6 +1157,9 @@ bool validateAndInitRtcData() {
     totalUptimeSec = 0;
     messageSeq = 0;
     lastReedState = false;
+#if HALL_LATCH
+    hall = icemesh::HallLatch();   // garbage here = a false trip at boot
+#endif
     expectedSleepSec = 0;
     lastWakeReason = ESP_SLEEP_WAKEUP_UNDEFINED;
     alertsSilenced = false;
@@ -1370,8 +1373,8 @@ static int16_t sonarKnobAskId = -1; static uint8_t sonarKnobAskVal = 0;   // ser
 static void sonarBenchLine(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   char edge[16];
   if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
-  Serial.printf("BENCH adc=%luHz(want %lu) t0=%d raw_max=%u%s edge=%s ping=%lums | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s |",
-                (unsigned long)pi.adc_hz, (unsigned long)SONAR_ADC_HZ, pi.t0, pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
+  Serial.printf("BENCH adc=%luHz(want %lu) t0=%d%s raw_max=%u%s edge=%s ping=%lums | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s |",
+                (unsigned long)pi.adc_hz, (unsigned long)SONAR_ADC_HZ, pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
                 edge, (unsigned long)(pi.us / 1000), (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                 o.ring_alarm ? "(RING ALARM)" : "");
   static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
@@ -1427,6 +1430,13 @@ void sonarLoop() {
     for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) knobs.set(i, v[i]);
     src.proc.prm = knobs;
   }
+  // v2 (D43) real sonar: started once; a node with a working TUSS4470 runs its sonar whenever its hub
+  // talks to it (sonar control seen), fake data only when the chalet asks for a sonar simulation
+  static bool hwTried = false, hwOk = false;
+  if (SONAR_REAL && !hwTried) {
+    hwTried = true; hwOk = tuss::begin();
+    DEBUG_PRINTF("Sonar TUSS4470: %s\n", hwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
+  }
   static uint8_t bait5 = 0;
   static bool baitLoaded = false;
   if (!baitLoaded) { baitLoaded = true; Preferences p; p.begin("node", true); bait5 = p.getUChar("bait", 0); p.end(); }
@@ -1435,6 +1445,7 @@ void sonarLoop() {
     if (v && v != bait5) { bait5 = v; Preferences p; p.begin("node", false); p.putUChar("bait", v); p.end(); }
   }
   if (bait5) { const float m = bait5 * 0.05f; if (src.proc.bait_m != m) { src.proc.bait_m = m; src.scene.setBait(m); } }
+  else if (SONAR_REAL && hwOk && src.proc.bait_m > 0) src.proc.bait_m = -1;   // real hole, no bait set: no bait labels / flags (D47)
   if (sonarKnobsNew) {
     sonarKnobsNew = false;
     bool changed = false;
@@ -1444,13 +1455,6 @@ void sonarLoop() {
       Preferences p; p.begin("sonar", false); p.putBytes("p", knobs.v, icemesh::sonar::P_COUNT); p.end();
       DEBUG_PRINTLN(F("Sonar knobs updated by the chalet"));
     }
-  }
-  // v2 (D43) real sonar: started once; a node with a working TUSS4470 runs its sonar whenever its hub
-  // talks to it (sonar control seen), fake data only when the chalet asks for a sonar simulation
-  static bool hwTried = false, hwOk = false;
-  if (SONAR_REAL && !hwTried) {
-    hwTried = true; hwOk = tuss::begin();
-    DEBUG_PRINTF("Sonar TUSS4470: %s\n", hwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
   }
   sonarSerial();
   if (sonarKnobAskId >= 0) {

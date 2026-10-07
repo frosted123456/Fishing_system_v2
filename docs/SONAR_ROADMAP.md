@@ -13,7 +13,7 @@ Status:
 | 2 | Converter off while listening | Dropped (hardware) | No enable wire in the design: MT3608 always on, TUSS4470 sleep mode instead. Driver still supports an enable GPIO if added |
 | 3 | Drive voltage | Knob + hardware | `vdrv` knob (5-20 V, default 11 V for the MT3608 at 12.0 V). Up to 40 V p-p (+5.2 dB) with the MT3608 at 21 V |
 | 4 | I2S-DMA ADC + calibration curve | Blind | 150 kHz, rate measured each ping (`adc=`); 17-point curve, serial `CAL`, NVS |
-| 5 | Band-pass / log-amp registers | Blind | `bpf` (reg 0x10), `gain` (0x13), `thresh` (0x17) knobs. Per-frequency BPF codes: open |
+| 5 | Band-pass / log-amp registers | Blind (datasheet-checked) | `bpf` knob ±1 per frequency (datasheet table), `gain` 10-20 V/V, `thresh` 0-15. Log-amp 29.7 mV/dB typ. |
 | 6 | Burst 16 base / 6-8 focus | Blind | `cycles` / `fcycles` knobs, RMT burst |
 | 7 | Rotate 190/200/210 kHz | Done (processing) + Blind | `freq` knob: 0 = 3 per ping, 1 = rotate (processing compounds the last 3 pings), 2 = 200 only |
 | 8 | OUT_4 edge timing | Blind | MCPWM capture, 12.5 ns; `edge=` on the BENCH line, `edge_um` in recordings. Not used by the processing yet |
@@ -22,7 +22,7 @@ Status:
 | 11 | Pulse coding + correlation | Data | Only if range is short |
 | 12 | Range compensation | Done | `tvg` |
 | 13 | Adaptive noise floor | Done | |
-| 14 | Bottom tracking, second echo | Done (hardness) / open (validation) | 2nd echo validating the bottom: not done. `bmin` knob (D43) for shallow water |
+| 14 | Bottom tracking, second echo | Done | 2nd echo validates the bottom (D47): a louder school / bait over a soft bottom no longer steals it. `bmin` knob for shallow water. Noise floor in deep holes (bottom near 12 m) from the quietest water above it |
 | 15 | Sub-sample peak fit | Done | |
 | 16 | Static scene | Done | `learn` |
 | 17 | Tracking and trend | Done | |

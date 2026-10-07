@@ -46,6 +46,14 @@
 // from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet), so knob = MT3608 setting - 1 V. Default 11 V for the
 // 12.0 V setting. MT3608 at 21 V -> vdrv 20 = 40 V p-p across the transducer (full bridge, 2 x VDRV).
 #define SONAR_WAKE_MS         10       // sleep -> SPI ready (datasheet power-up time 10 ms; sleep exit likely faster)
+// Log-amp output: 29.7 mV/dB typical with VOUT_SCALE_SEL = 0 (3.3 V map, datasheet; 25-33 mV/dB over parts),
+// ADC 12-bit over ~3.3 V -> 0.0271 dB per count (est.: the real ADC full scale and the part's slope differ;
+// the CAL curve corrects the ADC, the slope stays an estimate until a known-level test).
+#define SONAR_MV_PER_DB       29.7f
+#define SONAR_ADC_FS_MV       3300.0f
+// Time zero: the transmit leakage on VOUT in the first 3 ms, else (no leakage visible) this sample index,
+// measured on the bench: burst start after the ADC start (est.)
+#define SONAR_T0_FALLBACK     30
 #define SONAR_FREQ_HZ_0       190000
 #define SONAR_FREQ_HZ_1       200000
 #define SONAR_FREQ_HZ_2       210000
@@ -59,6 +67,7 @@ struct PingInfo {
   int32_t edge_um;        // OUT_4 first edge after the blind zone, depth in micrometres (-1 none)
   uint16_t raw_max;       // largest raw ADC value of the capture (clipping check, 4095 = clipped)
   uint32_t us;            // time the ping took
+  uint8_t t0_ok;          // 1 = time zero from the leakage, 0 = SONAR_T0_FALLBACK used (no leakage seen)
   uint32_t adc_hz;        // MEASURED sample rate of the last capture (samples / capture time). Must read
                           // ~SONAR_ADC_HZ: the depth scale depends on it (bench line / STAT, first bucket step)
 };

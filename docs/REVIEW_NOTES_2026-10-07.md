@@ -48,3 +48,22 @@ For the next reviewer. The last full review round was 1264584; everything after 
 | db27995 | Sonar matched to Frank's power design: no converter enable, TUSS4470 sleep (0x1B bit 7) before deep sleep, NCS held high in deep sleep, burst-count register never 0 (= continuous burst) | `tuss::sleep()` / `wake()` / `xfer()` hold handling |
 | 95e7d7e | Drive voltage knob `vdrv` (VDRV = V − 5 in reg 0x16, keep below the MT3608 output), OUT_4 off by default | Silent ping if `vdrv` > supply? (datasheet does not say) |
 | 363a4e1 | **WROOM alert path rewritten for the spool-shaft Hall latch** (flip counting, ext0 wake on the opposite level, RTC pull-up), Hall on GPIO 27 | Highest risk: the FISH ON path. `hall_latch.h` + `setupPins` / `readReedHw` / `hallArmWake` in `src/sensor_node/main.cpp`. C3 reed path must be unchanged (`HALL_LATCH` 0) |
+
+## Review round 2 (Fable, D47) — what was found and fixed
+
+| # | Where | Finding | Fix |
+|---|---|---|---|
+| 1 | driver `begin()` | Presence check wrote 0x5A to reg 0x17 whose bits 7:5 are read-only: `g_ok` could never be true on real hardware | Two-value write/read on 0x10 (all bits R/W) |
+| 2 | driver `ping()` | LNA gain codes are not in order (0=15, 1=10, 2=20, 3=12.5 V/V): knob was not monotonic | Mapped: knob 0..3 = 10/12.5/15/20 V/V |
+| 3 | driver | Threshold reg 0x17 is 4 bits + enable bit; knob 0-255 wrote junk into the enable | Knob 0-15, enable only when OUT_4 is wired |
+| 4 | driver | One BPF code for 3 frequencies; datasheet table = one code per ~10 kHz | knob−1 / knob / knob+1, default 0x1D |
+| 5 | driver | dB/count from the prototype (95 dB/4096), 15 % off the datasheet slope | 29.7 mV/dB typ. (est. ±10 %) |
+| 6 | driver | Time zero from a leakage that may not exist on VOUT → random offsets | Fallback constant + `(FALLBACK)` flag on the BENCH line |
+| 7 | driver | IO_MODE never written (relied on reset value) | 0x14 = 0 written in `begin()` |
+| 8 | processing | A louder school / bait over a soft bottom steals the bottom (strongest window rule) | 2nd-echo validation (#14); test fails on old code |
+| 9 | processing | Bottom near the end of the range: noise floor measured ON the bottom tail → no targets at all | Quietest 40 bins above the bottom; test: old −42 dB / 0 fish, new −83 dB / 18 fish |
+| 10 | sensor node | No bait set → prototype 4.57 m used: false "Bait" labels and near-bait beeps | bait_m = −1 on a real hole until set |
+| 11 | chalet | Silence while a hole is still tripped: alarm came back after the silence expired, once the line reset | `alarm_acked` → cleared on line reset |
+| 12 | tip-up | Hall state not reset with the RTC data → possible false trip after RTC corruption | Reset with the magic check |
+
+Still open (needs hardware or data): log-amp slope of this part, time-zero fallback value, ring-down / cover / near-bait thresholds, deconvolution, pulse coding, size class.

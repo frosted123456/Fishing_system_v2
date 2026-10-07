@@ -23,15 +23,15 @@ enum ParamId : uint8_t {
   P_TVG,             // range compensation (time-varied gain) 1 on / 0 off
   // acquisition (src/sensor_node/sonar_tuss4470.*, D43): written blind, to verify in the bucket
   P_PULSE_CYCLES,    // burst cycles in base mode (longer = more energy / range)
-  P_GAIN,            // TUSS4470 LNA gain code 0-3 (reg 0x13: 0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V)
+  P_GAIN,            // receiver gain 0-3 = 10 / 12.5 / 15 / 20 V/V (the driver maps to the TUSS4470 codes)
   P_PING_HZ_X4,      // ping rate while something moves (x0.25/s: 16 = 4/s)
   P_CYCLES_FOCUS,    // burst cycles in focus mode (shorter = 2-3 cm resolution)
   P_IDLE_HZ_X4,      // ping rate when nothing moves (x0.25/s: 4 = 1/s)
   P_AVG,             // bursts averaged per ping in base mode (1-4, +3-6 dB)
   P_FREQ_MODE,       // 0 = 3 bursts per ping (190/200/210), 1 = one frequency per ping, rotating, 2 = 200 kHz only
   P_SOUND,           // sound speed - 1350 m/s (53 = 1403 m/s, water 0-2 degC)
-  P_BPF,             // TUSS4470 band-pass centre code (reg 0x10; 0x1E = 200 kHz per open_echo)
-  P_THRESH,          // OUT_4 comparator threshold (reg 0x17), edge timing
+  P_BPF,             // TUSS4470 band-pass code for 200 kHz (reg 0x10; 0x1D = 196.8 kHz, datasheet); 190/210 = -1/+1
+  P_THRESH,          // OUT_4 comparator threshold 0-15 (reg 0x17 bits 3:0), edge timing
   P_BOTTOM_MIN,      // D43: bottom search starts here (x0.1 m; prototype 0.6 m). Bucket test: 1-2
   P_VDRV,            // D45: transducer drive VDRV in volts (reg 0x16 = V - 5, 5-20 V); must stay below the
                      //      MT3608 output (VPWR > VDRV + 0.3 V). Full bridge: 2 x VDRV peak-to-peak
@@ -53,15 +53,15 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"range", "Colour range", 20, 80, 46, "dB"},
     {"tvg", "Range compensation", 0, 1, 1, ""},
     {"cycles", "Burst cycles, base", 1, 32, 16, "cycles"},
-    {"gain", "Receiver gain code", 0, 3, 1, "0-3"},
+    {"gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"},
     {"pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"},
     {"fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"},
     {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
     {"avg", "Bursts averaged", 1, 4, 2, "per ping"},
     {"freq", "Frequency mode", 0, 2, 0, "0 3/ping 1 rot 2 200k"},
     {"sound", "Sound speed", 0, 255, 53, "+1350 m/s"},
-    {"bpf", "Band-pass code", 0, 63, 30, "reg 0x10"},
-    {"thresh", "Edge threshold", 0, 255, 31, "reg 0x17"},
+    {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
+    {"thresh", "Edge threshold", 0, 15, 7, "reg 0x17"},
     {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
     {"vdrv", "Drive voltage", 5, 20, 11, "V (MT3608 - 1)"},
   };

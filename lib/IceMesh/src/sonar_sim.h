@@ -131,6 +131,7 @@ class SonarSource {
   uint8_t computeStatus() const {
     uint8_t st = out_.ring_alarm ? ST_RING : 0;
     const sreal bait = proc.bait_m;
+    if (bait <= R(0)) return st;   // no bait depth set for this hole: only the ring-down flag
     for (uint8_t i = 0; i < out_.n; i++) {
       const TrackOut& t = out_.t[i];
       const sreal dd = t.depth - bait, ad = dd < 0 ? -dd : dd;

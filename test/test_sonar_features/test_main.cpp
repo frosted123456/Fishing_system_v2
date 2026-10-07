@@ -103,6 +103,77 @@ static void test_bucket_bottom_min(void) {
   TEST_ASSERT_TRUE(bucket > 0.36f && bucket < 0.44f);
 }
 
+// D47: synthetic pings (codes), noise -84 dB, ring-down, a bottom with a 2nd echo, and extras
+static void synthPing(uint8_t c[sp::NFREQ][BINS], int k, float bottom_m, float bottom_db, float fish_m, float fish_db, bool second) {
+  auto code = [](float db) { const float v = (db + 100.0f) * 255.0f / 95.0f; return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v + 0.5f)); };
+  const int bb = (int)(bottom_m / 0.025f + 0.5f), fb = fish_m > 0 ? (int)(fish_m / 0.025f + 0.5f) : -100;
+  for (int f = 0; f < sp::NFREQ; f++)
+    for (int i = 0; i < BINS; i++) {
+      float db = -84.0f + ((i * 7 + k * 3 + f) % 5) * 0.5f;
+      if (i < 4) db = -10.0f - 6.0f * i;
+      if (i >= bb && i <= bb + 1) db = bottom_db;
+      if (i >= bb + 2 && i <= bb + 4) db = bottom_db - 12.0f;         // echo tail
+      if (second && i >= 2 * bb && i <= 2 * bb + 1) db = bottom_db - 22.0f;
+      if (i >= fb && i <= fb + 1) db = fish_db;
+      c[f][i] = code(db);
+    }
+}
+static void test_bottom_second_echo_beats_school(void) {
+  static uint8_t c[sp::NFREQ][BINS]; Block b[2];
+  // soft mud bottom at 4.0 m (-45 dB, 2nd echo at 8.0 m), a dense school at 2.5 m louder (-38 dB)
+  S.begin(9, 0, 0);
+  for (int k = 0; k < 12; k++) { synthPing(c, k, 4.0f, -45.0f, 2.5f, -38.0f, true); S.process(c, sp::NFREQ, -1, 0.25f, false, b, 2); }
+  const float bot = static_cast<float>(S.lastProc().bottom);
+  // same without any second echo: the strongest window wins (prototype rule), i.e. the school
+  S.begin(9, 0, 0);
+  for (int k = 0; k < 12; k++) { synthPing(c, k, 4.0f, -45.0f, 2.5f, -38.0f, false); S.process(c, sp::NFREQ, -1, 0.25f, false, b, 2); }
+  const float noCheck = static_cast<float>(S.lastProc().bottom);
+  printf("school over soft bottom: bottom %.2f m with the 2nd-echo check, %.2f m without a 2nd echo\n", bot, noCheck);
+  TEST_ASSERT_TRUE(bot > 3.9f && bot < 4.1f);
+  TEST_ASSERT_TRUE(noCheck > 2.4f && noCheck < 2.6f);
+}
+static void test_deep_hole_noise_floor(void) {
+  static uint8_t c[sp::NFREQ][BINS]; Block b[2];
+  // bottom at 11.5 m: no water below it in the 12.2 m record; a fish at 6 m must still be found
+  S.begin(10, 0, 0); S.proc.prm.set(P_IDLE_HZ_X4, 16);
+  int seen = 0; float nf = 0;
+  for (int k = 0; k < 20; k++) {
+    synthPing(c, k, 11.5f, -30.0f, 6.0f, -55.0f, false);
+    for (int f = 0; f < sp::NFREQ; f++) for (int i = 465; i < BINS; i++) c[f][i] = (uint8_t)((-42.0f + 100.0f) * 255.0f / 95.0f);   // soft bottom: long tail to the end
+    S.process(c, sp::NFREQ, -1, 0.25f, false, b, 2);
+    nf = static_cast<float>(S.lastProc().nf);
+    for (uint8_t i = 0; i < S.lastProc().n; i++) if (S.lastProc().t[i].depth > 5.9f && S.lastProc().t[i].depth < 6.1f) seen++;
+  }
+  printf("deep hole 11.5 m: noise floor %.1f dB (real -84), fish at 6 m seen in %d pings\n", nf, seen);
+  TEST_ASSERT_TRUE(nf < -75.0f);
+  TEST_ASSERT_TRUE(seen > 10);
+}
+static void test_no_bait_no_bait_label(void) {
+  static uint8_t c[sp::NFREQ][BINS]; Block b[2];
+  // a still target exactly at the prototype bait depth (4.57 m); hole with no bait set -> a fish, no flags
+  S.begin(11, 0, 0); S.proc.prm.set(P_IDLE_HZ_X4, 16); S.proc.bait_m = R(-1);
+  int bait = 0, fish = 0; uint8_t st = 0;
+  for (int k = 0; k < 30; k++) {
+    synthPing(c, k, 6.0f, -30.0f, 4.57f, -50.0f, true);
+    S.process(c, sp::NFREQ, -1, 0.25f, false, b, 2);
+    st |= S.status();
+    for (uint8_t i = 0; i < S.lastProc().n; i++) { if (S.lastProc().t[i].label == LBL_BAIT) bait++; else if (S.lastProc().t[i].label == LBL_FISH) fish++; }
+  }
+  TEST_ASSERT_EQUAL(0, bait);
+  TEST_ASSERT_TRUE(fish > 0);
+  TEST_ASSERT_EQUAL(0, st & (ST_NEAR_BAIT | ST_BAIT_COVER));
+  // the same hole with the bait set there: labelled bait
+  S.begin(11, 0, 0); S.proc.prm.set(P_IDLE_HZ_X4, 16); S.proc.bait_m = R(4.57);
+  bait = 0;
+  for (int k = 0; k < 30; k++) {
+    synthPing(c, k, 6.0f, -30.0f, 4.57f, -50.0f, true);
+    S.process(c, sp::NFREQ, -1, 0.25f, false, b, 2);
+    for (uint8_t i = 0; i < S.lastProc().n; i++) if (S.lastProc().t[i].label == LBL_BAIT) bait++;
+  }
+  printf("still echo at 4.57 m: bait label x%d with the bait set, 0 without\n", bait);
+  TEST_ASSERT_TRUE(bait > 0);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ring_alarm);
@@ -110,5 +181,8 @@ int main(void) {
   RUN_TEST(test_rotation_finds_the_same);
   RUN_TEST(test_adaptive_rate);
   RUN_TEST(test_bucket_bottom_min);
+  RUN_TEST(test_bottom_second_echo_beats_school);
+  RUN_TEST(test_deep_hole_noise_floor);
+  RUN_TEST(test_no_bait_no_bait_label);
   return UNITY_END();
 }

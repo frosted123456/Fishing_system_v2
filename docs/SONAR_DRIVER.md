@@ -14,11 +14,12 @@ checks one thing.
 | Processing (bottom, noise floor, targets, ring-down, flags, rotation, adaptive rate) | Host only | `make -C test all` (fake sonar data), ASan/UBSan clean |
 | Recording line format → PC replay | Host only | `tools/sonar_replay.cpp` on a fake recording; file, stdin and Windows monitor logs (`12:00:01.123 > SONAR ...`, CRLF) read the same |
 | Driver compiles for the WROOM (IDF 4.4 legacy APIs: SPI, RMT, I2S-ADC, MCPWM capture) | Yes | arduino-cli, core 2.0.17 |
-| SPI register protocol (odd parity, mode 1, 1 MHz) | **No** | Ported from open_echo |
+| SPI register protocol (odd parity, mode 1, 1 MHz) | **No** | Ported from open_echo. Presence check = write/read two values in BPF_CONFIG_1 (all 8 bits R/W per datasheet) |
+| Register fields (IO_MODE 0, LNA codes, threshold bits, BPF table, VDRV, sleep) | Datasheet | Re-read 2026-10-07 against the TI datasheet: 4 fields were wrong before (D47) |
 | Burst on IO2 (RMT, 12.5 ns) | **No** | |
 | I2S-ADC real sample rate | **No** | Measured by the driver itself (`adc=` on the BENCH line) |
-| Time zero (transmit leakage onset) | **No** | Rule: first sample above 80 % of the max of the first 3 ms |
-| dB scale of the ADC (95 dB over 4096 counts) | **No, estimate** | Prototype scale; calibrate |
+| Time zero (transmit leakage onset) | **No** | Rule: first sample above 80 % of the max of the first 3 ms, if that max stands ~27 dB above the level after it; else `SONAR_T0_FALLBACK` (30 samples, est.) and `(FALLBACK)` on the BENCH line |
+| dB scale of the ADC | Datasheet typ. | 29.7 mV/dB (25-33 over parts) at the 3.3 V VOUT map, 3.3 V ADC full scale: 0.0271 dB/count. `CAL` corrects the ADC curve; the slope stays ±10 % until a known-level test |
 | OUT_4 edge timing (MCPWM capture) | **No** | IO2 is both RMT output and capture input (see "Risks") |
 | TUSS4470 sleep mode between sessions / before deep sleep | **No** | Reg 0x1B bit 7 (datasheet, 220 µA typ.); NCS held high in deep sleep |
 
@@ -101,7 +102,7 @@ BENCH adc=149800Hz(want 150000) t0=37 raw_max=3010 edge=0.412m ping=61ms | botto
 | 1 SPI | Boot message `Sonar TUSS4470: found`; type `REG 17` then `REG 17 5A` | Reads back what was written | `NOT answering` → SPI wiring, CS pin, shield power. Try `REG 10` (BPF) to see any non-zero answer |
 | 2 ADC rate | Read `adc=` | Within ~2 % of 150000 | ≈75000 or ≈300000 = I2S-ADC rate quirk: **every depth is off by that factor**. Note the value and send it (fix = `SONAR_ADC_HZ` or the I2S config) |
 | 3 Clipping | `raw_max` | Below 4095, no `(CLIPPED)` | Lower the LNA gain: `KNOB gain 0` (serial, this node, no hub needed) or the chalet knob `gain` once the value is known |
-| 4 Time zero | `t0` | Small and stable (a few tens of samples; < 450 = 3 ms) | Jumping around = the leakage onset rule is wrong for this shield: send a recording (step 8) |
+| 4 Time zero | `t0` | Small and stable (a few tens of samples; < 450 = 3 ms), no `(FALLBACK)` | `(FALLBACK)` on every line = no transmit leakage visible on VOUT: measure the real offset (ruler depth vs `bottom=`) and set `SONAR_T0_FALLBACK`. Jumping around = send a recording (step 8) |
 | 5 Known depth | Transducer facing down, measure the water depth with a ruler | `bottom=` = ruler ± 2.5 cm | Error proportional to depth → sound speed (`KNOB sound <v>`, speed = 1350 + v m/s, 53 = 1403; fresh water near 0 °C is ~1403) or the ADC rate (step 2). Constant offset → time zero (step 4) |
 | 6 Level | Tilt the transducer a few degrees | `bot_snr` drops when tilted | This is the setup level check (item 27) shown on the chalet |
 | 7 Edge | `edge=` | Close to `bottom=` (first echo above the threshold after the blind zone) | `-` = no edge: threshold too high (`KNOB thresh <lower>`) or the IO2 capture does not see the burst (see "Risks") |
@@ -136,9 +137,9 @@ No compiler on the Windows PC? Send the log file to Claude: the replay runs in i
 |---|---|---|---|
 | `SONAR_ADC_HZ` | 150000 | Depth scale | Step 2 (`adc=`) |
 | dB scale | -100 dB at 0, -5 dB at 4095 (95 dB over the ADC range) | Noise floor / SNR numbers, `snr` knob meaning | TUSS4470 datasheet log-amp slope (mV/dB) + VOUT divider, then `CAL` |
-| Time-zero rule | first sample > 80 % of max in the first 3 ms | Constant depth offset | Step 4 / recordings |
+| Time-zero rule / `SONAR_T0_FALLBACK` | 80 % of the max in the first 3 ms / 30 samples | Constant depth offset | Step 4 / recordings |
 | `SONAR_CHARGE_MS` | 4 ms | Burst strength in averages | Scope on VDRV, or `raw_max` over an average |
-| BPF code | one code (knob `bpf`, 0x1E) for all 3 frequencies | 190/210 kHz sensitivity | Datasheet BPF table |
+| BPF codes | knob `bpf` (0x1D = 196.8 kHz) ±1 for 190 / 210 kHz | 190/210 kHz sensitivity | Datasheet table, bench: `bot_snr` per `freq` mode |
 | Burst count register 0x1A | `cycles` (1-32), **never 0 = continuous burst** (datasheet) | Probably unused in IO mode: the RMT sends the real count | Datasheet: IO mode |
 | Wake time | 10 ms (datasheet power-up time; sleep exit is probably faster) | First ping after sleep | Bench |
 | Capture length | 2800 samples = 12.2 m at 1403 m/s | Max depth | Raise `MAX_SAMPLES` for deeper lakes (RAM: 2 B/sample) |
@@ -158,7 +159,8 @@ No compiler on the Windows PC? Send the log file to Claude: the replay runs in i
    (registers are written before the burst), but the IO2 burst at 200 kHz does: watch for a burst-shaped bump
    right after `t0` that is not in the water. Twisting VOUT with a GND wire helps.
 6. The TUSS4470 read: the register value is taken from the same 16-bit frame (as open_echo). If `REG` always
-   reads 0 or the previous value, the read needs a second frame.
+   reads 0 or the previous value, the read needs a second frame (then the presence check fails too: `REG 10`
+   by hand tells which).
 
 ## Open questions
 
@@ -166,6 +168,5 @@ No compiler on the Windows PC? Send the log file to Claude: the replay runs in i
    needed) or OUT_4 (edge timing, optional), or both?
 2. Transducer voltage rating, before raising the MT3608 above 12 V (`vdrv` table in "Power").
 3. Shield VOUT maximum vs the ESP32 ADC range: with the shield logic on 3.3 V it should stay under ~3.1 V; check.
-4. BPF codes for 190 and 210 kHz (per-frequency `REG 10` before each burst).
-5. Log-amp slope in mV/dB, for a real dB scale.
-6. Transducer: beam angle, Q / bandwidth, ring-down time (sets the `dead` knob and burst cycles).
+4. Log-amp slope of this part (datasheet 25-33 mV/dB): a known-level test, or accept ±10 % on all dB numbers.
+5. Transducer: beam angle, Q / bandwidth, ring-down time (sets the `dead` knob and burst cycles).

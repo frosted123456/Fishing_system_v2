@@ -530,6 +530,7 @@ void nearBaitWatch();
 extern uint8_t nearBaitNode;
 extern uint32_t nearBaitAt;
 void alarmAck();
+void alarmLineReset(NodeState* n);
 void loopAlarmHold();
 void handleWebApiNodeName();
 void handleWebApiNodeBait();
@@ -2507,6 +2508,7 @@ void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t
     DEBUG_PRINTF("Node %d: FISH_ON started at %lu\n", nodeId, node->fish_on_time);
   } else if (!nowFishOn && wasFishOn) {
     node->fish_on_time = 0;
+    alarmLineReset(node);
     // Mark alert as inactive in history
     for (int i = 0; i < ALERT_HISTORY_SIZE; i++) {
       if (alertHistory[i].nodeId == nodeId && alertHistory[i].active) {
@@ -2545,13 +2547,20 @@ bool nodeAlarm(const NodeState& n) { return HAS_FLAG(n.flags, FLAG_FISH_ON) || n
 
 void alarmStart(NodeState* n) {
   n->alarm_ms = millis(); if (n->alarm_ms == 0) n->alarm_ms = 1;   // (recordAlert turns the sound back on)
+  n->alarm_acked = false;
   tripRecord(n->node_id);   // v2 (D43): keep the sonar of the minute before
 }
 
 void alarmAck() {
-  for (int i = 0; i < network.node_count; i++)
+  for (int i = 0; i < network.node_count; i++) {
     if (!HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON)) network.nodes[i].alarm_ms = 0;
+    else network.nodes[i].alarm_acked = true;   // still tripped: shown until the line resets, then gone
+  }
   updateAlertState();
+}
+// the line of a hole went back to normal: an alarm silenced during the trip ends here (D47)
+void alarmLineReset(NodeState* n) {
+  if (n->alarm_acked) { n->alarm_ms = 0; n->alarm_acked = false; }
 }
 
 void loopAlarmHold() {
@@ -2760,6 +2769,7 @@ void loopLocalSensor() {
       localFishOn = false;
       CLEAR_FLAG(network.nodes[0].flags, FLAG_FISH_ON);
       network.nodes[0].fish_on_time = 0;  // Clear fish_on_time
+      alarmLineReset(&network.nodes[0]);
       DEBUG_PRINTF("LOCAL: Reset seq=%d\n", localSequence);
 
       // Update our own state
@@ -6950,6 +6960,7 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   } else if (!fish && wasFish) {
     CLEAR_FLAG(n->flags, FLAG_FISH_ON);
     n->fish_on_time = 0;
+    alarmLineReset(n);
     for (int i = 0; i < ALERT_HISTORY_SIZE; i++)
       if (alertHistory[i].nodeId == u.node && alertHistory[i].active) alertHistory[i].active = false;
   }

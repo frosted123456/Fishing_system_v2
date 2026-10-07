@@ -94,10 +94,14 @@ bool begin() {
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
   spiUp();
   wake();                                                              // out of sleep (if a deep sleep left it there)
-  // presence check: write/read back the threshold register
-  writeReg(0x17, 0x5A);
-  g_ok = readReg(0x17) == 0x5A;
-  writeReg(0x16, 0x06);   // VDRV 11 V until the first ping sets the knob (safe with the 12 V MT3608 setting)
+  // presence check: BPF_CONFIG_1 (0x10) has 8 R/W bits (datasheet); two values, so a floating or stuck
+  // MISO (0x00 / 0xFF) cannot pass. (0x17 was used before: its bits 7:5 are read-only = always failed.)
+  writeReg(0x10, 0x1A); const uint8_t r1 = readReg(0x10);
+  writeReg(0x10, 0x25); const uint8_t r2 = readReg(0x10);
+  g_ok = r1 == 0x1A && r2 == 0x25;
+  writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
+  writeReg(0x14, 0x00);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2)
+  writeReg(0x16, 0x06);   // VDRV 11 V (regulator on: bit 5 = 0) until the first ping sets the knob
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0
   // input: mcpwm_gpio_init makes the pin input-only, so it runs FIRST, the RMT then takes the pin as
@@ -186,10 +190,16 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   for (size_t i = 0; i + 1 < n; i += 2) { const uint16_t a = g_raw[i]; g_raw[i] = g_raw[i + 1]; g_raw[i + 1] = a; }
   for (size_t i = 0; i < n; i++) { g_raw[i] = cal(g_raw[i] & 0x0FFF); if (g_raw[i] > mx) mx = g_raw[i]; }
   info.raw_max = mx;
-  // time zero: first sample above 80 % of the largest value of the first 3 ms (transmit leakage on VOUT)
+  // time zero: first sample above 80 % of the largest value of the first 3 ms (transmit leakage on VOUT),
+  // if that leakage stands clearly (> ~27 dB) above the level a few ms later; else a fixed bench value
   const size_t lim = n < SONAR_ADC_HZ * 3 / 1000 ? n : SONAR_ADC_HZ * 3 / 1000;
   uint16_t m0 = 0; for (size_t i = 0; i < lim; i++) if (g_raw[i] > m0) m0 = g_raw[i];
-  size_t t0 = 0; while (t0 < lim && g_raw[t0] < (uint16_t)(m0 * 4 / 5)) t0++;
+  uint32_t later = 0; size_t nl = 0;
+  for (size_t i = lim; i < n && nl < 300; i++, nl++) later += g_raw[i];
+  const uint16_t ref = nl ? (uint16_t)(later / nl) : 0;
+  size_t t0 = 0;
+  if (m0 > ref + 1000) { while (t0 < lim && g_raw[t0] < (uint16_t)(m0 * 4 / 5)) t0++; info.t0_ok = 1; }
+  else { t0 = SONAR_T0_FALLBACK; info.t0_ok = 0; }
   info.t0 = (int16_t)t0;
   // bins: depth d -> round trip 2 d / c -> sample t0 + 2 d / c * rate; mean of the samples of each bin
   const float spb = 2.0f * 0.025f / sound * SONAR_ADC_HZ;   // samples per bin (~5.3)
@@ -197,8 +207,9 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
     const size_t s0 = t0 + (size_t)(b * spb), s1 = t0 + (size_t)((b + 1) * spb);
     uint32_t sum = 0; size_t k = 0;
     for (size_t s = s0; s < s1 && s < n; s++, k++) sum += g_raw[s];
-    // raw -> dB (prototype scale -100..-5 dB over the ADC range: 95 dB / 4096 counts, est. - calibrate)
-    const float db = k ? -100.0f + 95.0f * (float)sum / (float)k / 4096.0f : -100.0f;
+    // raw -> dB: log-amp slope (datasheet typ.) over the ADC full scale; -100 dB at code 0 (relative scale,
+    // the processing works on differences to its noise floor). Clipped above code 255 (-5 dB) later.
+    const float db = k ? -100.0f + (float)sum / (float)k * (SONAR_ADC_FS_MV / 4096.0f / SONAR_MV_PER_DB) : -100.0f;
     acc[b] += powf(10.0f, db / 10.0f);
   }
   return true;
@@ -211,10 +222,13 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   const uint8_t avg = focus ? 1 : p[P_AVG];
-  writeReg(0x16, (uint8_t)((p[P_VDRV] - 5) & 0x0F));   // VDRV = knob volts (10 mA charge, bit 4 = 0)
-  writeReg(0x13, p[P_GAIN] & 3);        // LNA gain
-  writeReg(0x10, p[P_BPF] & 0x3F);      // band-pass centre (one code for the 3 frequencies: TODO per-frequency codes, datasheet Table 7.1)
-  writeReg(0x17, p[P_THRESH]);          // OUT_4 threshold
+  writeReg(0x16, (uint8_t)((p[P_VDRV] - 5) & 0x0F));   // VDRV = knob volts (regulator on, 10 mA)
+  // DEV_CTRL_2 (0x13): bits 1:0 LNA_GAIN codes are NOT in order (0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V,
+  // datasheet): knob 0..3 = 10, 12.5, 15, 20 V/V. Bit 2 VOUT_SCALE_SEL = 0 (3.3 V map), both log-amp stages on.
+  static const uint8_t LNA_CODE[4] = {1, 3, 0, 2};
+  writeReg(0x13, LNA_CODE[p[P_GAIN] & 3]);
+  // ECHO_INT_CONFIG (0x17): bits 3:0 threshold, bit 4 comparator enable (only with OUT_4 wired)
+  writeReg(0x17, (uint8_t)((p[P_THRESH] & 0x0F) | (SONAR_PIN_O4 >= 0 ? 0x10 : 0)));
   // BURST_PULSE bits 5:0 = pulse count, and 0 = CONTINUOUS burst (datasheet): never write 0. Bits 7:6
   // (half-bridge, pre-driver mode) stay 0. The RMT on IO2 sends the real count.
   writeReg(0x1A, (uint8_t)((cycles < 1 ? 1 : cycles) & 0x3F));
@@ -229,6 +243,10 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   static float acc[BINS];
   for (uint8_t f = 0; f < nf; f++) {
     for (int b = 0; b < BINS; b++) acc[b] = 0;
+    // BPF_CONFIG_1 (0x10) centre frequency, datasheet table: 0x1C 185.8, 0x1D 196.8, 0x1E 206.1, 0x1F 218.3 kHz:
+    // one code step per 10 kHz here, so knob = the 200 kHz code, 190 = knob - 1, 210 = knob + 1
+    const int bpf = (int)p[P_BPF] + ((int)fset[f] - 1);
+    writeReg(0x10, (uint8_t)(bpf < 0 ? 0 : (bpf > 63 ? 63 : bpf)));
     uint8_t good = 0;
     for (uint8_t a = 0; a < avg; a++) {
       delay(SONAR_CHARGE_MS);

@@ -45,7 +45,8 @@ class SonarProc {
     TrackOut t[MAX_TRACKS];
   };
 
-  sreal bait_m = R(4.57);   // bait (lure) depth: prototype constant; real system: set per hole
+  sreal bait_m = R(4.57);   // bait (lure) depth: prototype constant; real system: set per hole, <= 0 = no bait
+                            // known (no "Bait" label, no near-bait / cover flags)
   Params prm;               // knobs (sonar_params.h); defaults = prototype
   sreal dt = R(0.25);       // s between processed pings (prototype 4/s); the caller sets it when the rate changes
   enum { RING_LEARN = 40, RING_ALARM_PINGS = 8 };
@@ -78,6 +79,23 @@ class SonarProc {
     sreal e = R(0); int best = b0; sreal bestE = R(-1);
     for (int i = b0; i < b0 + 8; i++) e += static_cast<sreal>(lin[i]);
     for (int i = b0; i + 8 < N; i++) { if (e > bestE) { bestE = e; best = i; } e += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }
+    // D47 second-echo check (roadmap #14): a true bottom at depth D usually has a second echo near 2D
+    // (surface -> bottom -> surface -> bottom). If the strongest window has none but a weaker candidate
+    // (within 12 dB) does, that candidate is the bottom (a fish school or the bait can out-echo soft mud).
+    // Only applies when 2D is inside the range; the prototype scenes are unchanged (bottom = strongest).
+    if (bestE > R(0)) {
+      const sreal bestDb = R(10) * std::log10(bestE);
+      if (!secondEcho(lin, best, N)) {
+        sreal e2 = R(0); int alt = -1; sreal altE = R(-1);
+        for (int i = b0; i < b0 + 8; i++) e2 += static_cast<sreal>(lin[i]);
+        for (int i = b0; i + 8 < N; i++) {
+          const bool local = i > b0 && i + 9 < N && e2 >= static_cast<sreal>(lin[i - 1]) + e2 - static_cast<sreal>(lin[i + 7]);
+          if (local && std::abs(i - best) > 8 && e2 > altE && R(10) * std::log10(std::max(e2, R(1e-20))) > bestDb - R(12) && secondEcho(lin, i, N)) { altE = e2; alt = i; }
+          e2 += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]);
+        }
+        if (alt >= 0) best = alt;
+      }
+    }
     int pk = best; for (int i = best; i < std::min(N, best + 8); i++) if (d[i] > d[pk]) pk = i;
     int on = pk; while (on > b0 && static_cast<sreal>(d[on - 1]) > static_cast<sreal>(d[pk]) - R(10)) on--;
     const sreal bNow = static_cast<sreal>(on) * BIN_M();
@@ -88,9 +106,22 @@ class SonarProc {
 
     // Noise floor: median of the quiet water below the bottom
     int a = bI + roundi(R(0.9) / BIN_M()), z = std::min(N, 2 * bI - roundi(R(0.4) / BIN_M()));
-    if (z - a < 30) { a = N - 40; z = N; }
     int na = 0;
-    for (int i = a; i < z; i++) S.arr[na++] = d[i];
+    if (z - a < 30 && bI + 30 < N) { a = N - 40; z = N; }   // shallow: the far range is quiet water
+    if (z - a < 30) {
+      // D47: bottom near the end of the range (deep hole): no water below it in the record. Take the
+      // quietest 40-bin stretch between the dead zone and the bottom instead of the bottom echo itself.
+      const int lo = std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M())), hi = bI - 8;
+      a = lo; z = std::min(N, lo + 40);
+      if (hi - lo > 40) {
+        sreal w = R(0); for (int i = lo; i < lo + 40; i++) w += static_cast<sreal>(d[i]);
+        sreal wMin = w; int at = lo;
+        for (int i = lo; i + 40 < hi; i++) { w += static_cast<sreal>(d[i + 40]) - static_cast<sreal>(d[i]); if (w < wMin) { wMin = w; at = i + 1; } }
+        a = at; z = at + 40;
+      }
+    }
+    for (int i = a; i < z && i < N; i++) S.arr[na++] = d[i];
+    if (na == 0) { S.arr[0] = d[N - 1]; na = 1; }
     for (int i = 1; i < na; i++) { const float v = S.arr[i]; int j = i - 1; while (j >= 0 && S.arr[j] > v) { S.arr[j + 1] = S.arr[j]; j--; } S.arr[j + 1] = v; }
     const sreal med = S.arr[na >> 1];
     if (!have_nf_) { nf_ = med; have_nf_ = true; } else nf_ = nf_ + R(0.15) * (med - nf_);
@@ -298,6 +329,18 @@ class SonarProc {
     return x * sp::smooth(R(3), R(9), dv - nf_);
   }
 
+  // energy of the 8 bins around 2x the window start, compared to the window itself: a second bottom echo
+  // is 15-35 dB weaker (prototype: hardness from the same ratio); anything above -40 dB and 6 dB over
+  // its surroundings counts. false when 2x is out of range (then nothing can be checked).
+  static bool secondEcho(const float* lin, int i, int N) {
+    const int s2 = 2 * i - 4;
+    if (s2 + 12 >= N || i < 8) return false;
+    sreal e1 = R(0), e2 = R(0), around = R(0);
+    for (int k = 0; k < 8; k++) { e1 += static_cast<sreal>(lin[i + k]); e2 += static_cast<sreal>(lin[s2 + k]); }
+    for (int k = -12; k < -4; k++) around += static_cast<sreal>(lin[s2 + k]);
+    return e2 > e1 * R(1e-4) && e2 > around * R(4);
+  }
+
   sreal flick(const Track& T) const {   // last 12, oldest first like slice(-12)
     const int n = T.hn < 12 ? T.hn : 12;
     sreal sum = R(0); for (int k = n - 1; k >= 0; k--) sum += T.back(k).s;
@@ -320,7 +363,7 @@ class SonarProc {
     const int n = T.hn < 30 ? T.hn : 30;
     sreal lo = R(1e30), hi = R(-1e30);
     for (int k = 0; k < n; k++) { const sreal dd = T.back(k).depth; if (dd < lo) lo = dd; if (dd > hi) hi = dd; }
-    if (std::fabs(T.depth - bait_m) < R(0.32) && T.age >= 4 && T.hn >= 4 && spread(T) < R(2.5)) return LBL_BAIT;
+    if (bait_m > R(0) && std::fabs(T.depth - bait_m) < R(0.32) && T.age >= 4 && T.hn >= 4 && spread(T) < R(2.5)) return LBL_BAIT;
     if (T.depth > bottom_ - R(0.5)) return (T.age > 30 && hi - lo < R(0.06)) ? LBL_COVER : LBL_NEAR_BOTTOM;
     return LBL_FISH;
   }
