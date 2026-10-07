@@ -6,7 +6,7 @@
     .preview/sonar_trace 300 > .preview/trace.json
     python3 tools/web_preview.py            # then open http://localhost:8000/
 
-The page is read from src/lora_node/main.cpp (SUITE_PAGE); set SUITE_PAGE=file.html to try a page file.
+The page is read from web/suite.html; set SUITE_PAGE=file.html to try another file.
 Sonar data is the trace recorded with the real codec and store (replayed in real time, looped).
 Status, radio and settings are invented: node 3 trips for 20 s every minute to show the alert.
 """
@@ -21,10 +21,7 @@ PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8000
 def page_html():
     if os.environ.get("SUITE_PAGE"):
         return open(os.environ["SUITE_PAGE"], encoding="utf-8").read()
-    src = open(os.path.join(ROOT, "src", "lora_node", "main.cpp"), encoding="utf-8").read()
-    i = src.index("SUITE_PAGE[] PROGMEM")
-    a = src.index('R"rawliteral(', i) + len('R"rawliteral(')
-    return src[a:src.index(')rawliteral"', a)]
+    return open(os.path.join(ROOT, "web", "suite.html"), encoding="utf-8").read()
 
 frames = json.load(open(TRACE))
 t0 = time.time()
@@ -32,7 +29,26 @@ state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "s
          "names": {3: "Pointe", 4: "Baie"}, "test": 0, "adaptive": False,
          "simreq": {}, "simrate": 6,
          "transport": 0, "ch_setting": "auto", "ch": 0, "moves": 0, "relay_req": {}, "lr_only": False,
-         "settings": {"buzzerEnabled": True, "alertHoldSec": 30, "heartbeatSec": 60, "reedActiveHigh": True}}
+         "settings": {"buzzerEnabled": True, "alertHoldSec": 30, "heartbeatSec": 60, "reedActiveHigh": True,
+                      "alarmHoldMin": 0, "nearBaitBeep": False, "unitsMetric": False, "buzzerPassive": False},
+         "bait": {3: 457}, "knobs": None, "trips": []}
+# the same knob table as lib/IceMesh/src/sonar_params.h (key, name, lo, hi, def, unit)
+KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contrast", 1, 15, 5, "dB"),
+         ("confirm", "Confirm pings", 1, 10, 3, ""), ("keep", "Keep without echo", 1, 20, 5, "pings"),
+         ("gate", "Max target move", 5, 100, 32, "cm/ping"), ("dead", "Dead zone", 0, 50, 9, "x0.1 m"),
+         ("bsmooth", "Bottom smoothing", 5, 100, 25, "%"), ("learn", "Static scene learning", 1, 100, 12, "x0.001"),
+         ("range", "Colour range", 20, 80, 46, "dB"), ("tvg", "Range compensation", 0, 1, 1, ""),
+         ("cycles", "Burst cycles, base", 1, 32, 16, "cycles"), ("gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"),
+         ("pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"), ("fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"),
+         ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 2, "per ping"),
+         ("freq", "Frequency mode", 0, 2, 0, "0 3/ping 1 rot 2 200k"), ("sound", "Sound speed", 0, 255, 53, "+1350 m/s"),
+         ("bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"), ("thresh", "Edge threshold", 0, 15, 7, "reg 0x17"),
+         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 11, "V (MT3608 - 1)")]
+state["knobs"] = {k[0]: k[4] for k in KNOBS}
+def knobs_json():
+    v = state["knobs"]
+    preset = {(7, 4, 2, 6): 0, (10, 5, 3, 5): 1, (14, 7, 5, 4): 2}.get((v["snr"], v["prom"], v["confirm"], v["keep"]), 3)
+    return {"preset": preset, "knobs": [{"key": k, "name": nm, "lo": lo, "hi": hi, "def": d, "unit": u, "v": v[k]} for k, nm, lo, hi, d, u in KNOBS]}
 TESTS = ["off", "rotate", "SF9/500", "SF8/500", "SF7/500"]
 
 def now_index():
@@ -69,12 +85,13 @@ def status():
         nodes.append({"id": n["node"], "role": "Sensor", "online": True, "fish": False, "lowbat": False, "battery": 4500, "via_lora": True, "last_seen_sec": 1})
     for n in nodes:
         n["name"] = state["names"].get(n["id"], "")
+        n["line"] = n["fish"]; n["bait"] = state["bait"].get(n["id"], 0)
         n["sim"] = state["simreq"].get(n["id"], 0) != 0 or n["id"] >= 128
     if state["silenced"] and time.time() > state["sil_until"]:
         state["silenced"] = False
     return {"network_id": 66, "node_count": len(nodes), "uptime": int(el) + 7380, "role": "Chalet", "node_id": 100, "fw": "v2",
             "silenced": state["silenced"], "silence_left_sec": max(0, int(state["sil_until"] - time.time())) if state["silenced"] else 0,
-            "sonar_sim": state["sim"], "radio_test": TESTS[state["test"]],
+            "sonar_sim": state["sim"], "radio_test": TESTS[state["test"]], "trips": len(state["trips"]),
             "setup_arm_s": max(0, 260 - int(el)), "transport": ["auto", "lora", "espnow"][state["transport"]],
             "lora_ch": state["ch"] + 1, "master": "chalet",
             "wifi": {"ap_active": True, "ap_ip": "192.168.4.1", "sta_connected": False, "sta_ip": ""},
@@ -156,6 +173,10 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, json.dumps(radio()))
         if u.path == "/api/settings":
             d = dict(state["settings"]); d.update({"nodeId": 100, "role": 3}); return self.send(200, json.dumps(d))
+        if u.path == "/api/sonar/knobs":
+            return self.send(200, json.dumps(knobs_json()))
+        if u.path == "/api/trips":
+            return self.send(200, json.dumps({"uptime": int(time.time() - t0), "trips": state["trips"]}))
         self.send(404, "{}")
 
     def do_POST(self):
@@ -191,6 +212,15 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, json.dumps(radio()))
         if u.path == "/api/settings":
             state["settings"].update({k: v for k, v in b.items() if k in state["settings"]}); return self.send(200, '{"success":true}')
+        if u.path == "/api/sonar/knobs":
+            if "key" in b and b["key"] in state["knobs"]: state["knobs"][b["key"]] = int(b["v"])
+            if "preset" in b:
+                p = {0: (7, 4, 2, 6), 1: (10, 5, 3, 5), 2: (14, 7, 5, 4)}.get(int(b["preset"]))
+                if p: state["knobs"].update(dict(zip(("snr", "prom", "confirm", "keep"), p)))
+            if b.get("defaults"): state["knobs"] = {k[0]: k[4] for k in KNOBS}
+            return self.send(200, json.dumps(knobs_json()))
+        if u.path == "/api/node/bait":
+            state["bait"][int(b.get("nodeId", 0))] = int(b.get("cm", 0)); return self.send(200, '{"success":true}')
         self.send(404, "{}")
 
 print("Web suite preview on http://localhost:%d/" % PORT)

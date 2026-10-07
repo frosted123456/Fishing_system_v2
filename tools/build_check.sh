@@ -41,6 +41,7 @@ env_cfg() {  # sets FW FQBN FLAGS for an env name
   return 0
 }
 
+python3 "$REPO/tools/gen_web.py" || echo "(gen_web.py skipped: the committed web_suite.h is used)"
 rc=0
 for e in "${ENVS[@]}"; do
   env_cfg "$e" || { rc=1; continue; }
