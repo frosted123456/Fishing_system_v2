@@ -40,3 +40,11 @@ For the next reviewer. The last full review round was 1264584; everything after 
 - Edge timing (`edge_um`) is recorded but not used by the processing.
 - Near-bait / cover / ring-down thresholds are guesses until real recordings exist.
 - Never commit `src/lora_node/config.h` (real Wi-Fi credentials, locally modified). Stage explicit paths only.
+
+## Added later the same day (db27995..363a4e1)
+
+| Commit | Area | Review focus |
+|---|---|---|
+| db27995 | Sonar matched to Frank's power design: no converter enable, TUSS4470 sleep (0x1B bit 7) before deep sleep, NCS held high in deep sleep, burst-count register never 0 (= continuous burst) | `tuss::sleep()` / `wake()` / `xfer()` hold handling |
+| 95e7d7e | Drive voltage knob `vdrv` (VDRV = V − 5 in reg 0x16, keep below the MT3608 output), OUT_4 off by default | Silent ping if `vdrv` > supply? (datasheet does not say) |
+| 363a4e1 | **WROOM alert path rewritten for the spool-shaft Hall latch** (flip counting, ext0 wake on the opposite level, RTC pull-up), Hall on GPIO 27 | Highest risk: the FISH ON path. `hall_latch.h` + `setupPins` / `readReedHw` / `hallArmWake` in `src/sensor_node/main.cpp`. C3 reed path must be unchanged (`HALL_LATCH` 0) |
