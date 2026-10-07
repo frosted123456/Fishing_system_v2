@@ -74,11 +74,41 @@ static void test_adaptive_rate(void) {
   TEST_ASSERT_TRUE(pings >= 10 && pings <= 40);
 }
 
+// Bucket test (D43 bmin knob): water 0.40 m deep. The default search starts at 0.6 m (prototype) and
+// can only find the 2nd bottom echo at 0.80 m; bmin=2 (0.2 m) finds the real bottom.
+static void bucketPings(uint8_t bmin, float& bottom) {
+  static uint8_t c[sp::NFREQ][BINS];
+  auto code = [](float db) { const float v = (db + 100.0f) * 255.0f / 95.0f; return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v + 0.5f)); };
+  S.begin(8, 0, 0); S.proc.prm.set(P_BOTTOM_MIN, bmin); S.proc.prm.set(P_DEADZONE_DM, 1);
+  Block b[2];
+  for (int k = 0; k < 12; k++) {
+    for (int f = 0; f < sp::NFREQ; f++)
+      for (int i = 0; i < BINS; i++) {
+        float db = -84.0f + ((i * 7 + k * 3 + f) % 5) * 0.5f;          // noise
+        if (i < 4) db = -10.0f - 6.0f * i;                              // ring-down
+        if (i >= 16 && i <= 17) db = -20.0f;                            // bottom 0.40 m
+        if (i >= 32 && i <= 33) db = -40.0f;                            // 2nd echo 0.80 m
+        if (i >= 48 && i <= 49) db = -55.0f;                            // 3rd echo 1.20 m
+        c[f][i] = code(db);
+      }
+    S.process(c, sp::NFREQ, -1, 0.25f, false, b, 2);
+  }
+  bottom = static_cast<float>(S.lastProc().bottom);
+}
+static void test_bucket_bottom_min(void) {
+  float def = 0, bucket = 0;
+  bucketPings(6, def); bucketPings(2, bucket);
+  printf("bucket 0.40 m: bottom with bmin 0.6 m (default) %.2f m, with bmin 0.2 m %.2f m\n", def, bucket);
+  TEST_ASSERT_TRUE(def > 0.7f);                          // the trap the knob exists for
+  TEST_ASSERT_TRUE(bucket > 0.36f && bucket < 0.44f);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ring_alarm);
   RUN_TEST(test_level_and_flags);
   RUN_TEST(test_rotation_finds_the_same);
   RUN_TEST(test_adaptive_rate);
+  RUN_TEST(test_bucket_bottom_min);
   return UNITY_END();
 }

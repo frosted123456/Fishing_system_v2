@@ -62,6 +62,7 @@
 
 #include "config.h"
 #include "messages.h"
+#include "sonar_tuss4470.h"    // v2 (D43): real sonar (TUSS4470), only with SONAR_REAL=1
 #include <sonar_sim.h>      // v2: fake sonar for the sonar test mode (lib/IceMesh)
 #include <eb_link.h>        // v2: ESP-NOW backbone relay (lib/IceMesh)
 #include <rx_ring.h>
@@ -108,6 +109,10 @@ void ebRelayLoop();
 #endif
 #ifndef SONAR_SIM_FORCE
 #define SONAR_SIM_FORCE 0           // 1 = bench test: fake sonar from boot, no chalet needed
+#endif
+#ifndef SONAR_BENCH
+#define SONAR_BENCH 0               // 1 = bucket test (with SONAR_REAL): real sonar from boot, no hub needed,
+                                    //     stays awake, prints a BENCH line every 2 s (docs/SONAR_DRIVER.md)
 #endif
 #define SONAR_CTRL_WAIT_MS     120  // listen after each wake-up TX (est.: hub answers from its loop)
 #define SONAR_CTRL_TIMEOUT_MS  30000UL   // no control for this long: test mode off, back to sleep
@@ -176,6 +181,8 @@ volatile bool sendSuccess = false;
 void setupPins();
 void sonarListenCtrl(uint32_t wait_ms);
 void sonarLoop();
+void sonarSerial();
+void sonarRecord(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], const tuss::PingInfo& pi);
 void setupEspNow();
 void readBattery();
 bool readReedSwitch();
@@ -357,7 +364,7 @@ void setup() {
   
   // v2: the hub answers our TX with its sonar control and pending commands (backbone relay).
   // Sonar test mode or relay on: stay awake, loop() keeps reed, heartbeat and alerts working.
-  if (SONAR_SIM_ALLOWED && SONAR_SIM_FORCE) sonarSimOn = true;
+  if (SONAR_SIM_ALLOWED && (SONAR_SIM_FORCE || SONAR_BENCH)) sonarSimOn = true;
   else sonarListenCtrl(SONAR_CTRL_WAIT_MS);
   ebRelayApplyCmd();
   simApplyCmd();
@@ -1289,6 +1296,73 @@ void ebRelayLoop() {
   }
 }
 
+// v2 (D43) recording + bench commands on the serial port (real sonar builds). Lines:
+//   SONAR <ms> <nfreq> <rot_f> <t0> <edge_um> <raw_max> <us> <hex codes freq 0> [<hex freq 1> <hex freq 2>]
+// tools/sonar_replay.cpp replays them through the same processing on the PC.
+static bool sonarRec = false;
+void sonarRecord(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], const tuss::PingInfo& pi) {
+  if (!sonarRec) return;
+  static const char H[] = "0123456789ABCDEF";
+  Serial.printf("SONAR %lu %u %d %d %ld %u %lu", millis(), pi.nfreq, pi.rot_f, pi.t0, (long)pi.edge_um, pi.raw_max, (unsigned long)pi.us);
+  char line[2 * icemesh::sonar::BINS + 2];
+  for (uint8_t f = 0; f < pi.nfreq; f++) {
+    line[0] = ' ';
+    for (int b = 0; b < icemesh::sonar::BINS; b++) { line[1 + 2 * b] = H[codes[f][b] >> 4]; line[2 + 2 * b] = H[codes[f][b] & 15]; }
+    line[1 + 2 * icemesh::sonar::BINS] = 0;
+    Serial.print(line);
+  }
+  Serial.println();
+}
+
+// one readable line per ping for the bucket test: is the hardware right, where is the bottom
+static bool sonarStatAsk = false;
+static int16_t sonarKnobAskId = -1; static uint8_t sonarKnobAskVal = 0;   // serial KNOB, applied in sonarLoop
+static void sonarBenchLine(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
+  char edge[16];
+  if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
+  Serial.printf("BENCH adc=%luHz(want %lu) t0=%d raw_max=%u%s edge=%s ping=%lums | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s |",
+                (unsigned long)pi.adc_hz, (unsigned long)SONAR_ADC_HZ, pi.t0, pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
+                edge, (unsigned long)(pi.us / 1000), (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
+                o.ring_alarm ? "(RING ALARM)" : "");
+  static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
+  for (uint8_t k = 0; k < o.n; k++) Serial.printf(" %.2fm:%s", (double)o.t[k].depth, L[o.t[k].label & 3]);
+  Serial.println();
+}
+
+// REC ON|OFF, STAT, KNOB <name> <value>, REG <hex addr> [<hex value>], CAL <17 numbers> | CAL (show)
+void sonarSerial() {
+  if (!SONAR_REAL || !Serial.available()) return;
+  String l = Serial.readStringUntil('\n'); l.trim(); l.toUpperCase();
+  if (l == "REC ON" || l == "REC OFF") { sonarRec = (l == "REC ON"); Serial.printf("Sonar recording %s\n", sonarRec ? "ON" : "off"); }
+  else if (l.startsWith("KNOB")) {   // bench: set one knob on this node only (not saved; the chalet's set wins later)
+    String a = l.substring(4); a.trim(); a.toLowerCase(); const int sp = a.indexOf(' ');
+    bool found = false;
+    for (uint8_t k = 0; sp > 0 && k < icemesh::sonar::P_COUNT; k++)
+      if (a.substring(0, sp) == icemesh::sonar::paramInfo(k).key) { sonarKnobAskId = k; sonarKnobAskVal = (uint8_t)a.substring(sp + 1).toInt(); found = true; }
+    if (!found) {
+      Serial.print(F("KNOB <name> <value>, names:"));
+      for (uint8_t k = 0; k < icemesh::sonar::P_COUNT; k++) Serial.printf(" %s", icemesh::sonar::paramInfo(k).key);
+      Serial.println();
+    }
+  }
+  else if (l == "STAT") { sonarStatAsk = true; if (!tuss::ok()) Serial.println(F("TUSS4470 not answering (SPI wiring / SONAR_PIN_*)")); }
+  else if (l.startsWith("REG ")) {
+    String a = l.substring(4); a.trim(); const int sp = a.indexOf(' ');
+    const uint8_t addr = (uint8_t)strtol(a.substring(0, sp > 0 ? sp : a.length()).c_str(), nullptr, 16);
+    if (sp > 0) tuss::writeReg(addr, (uint8_t)strtol(a.substring(sp + 1).c_str(), nullptr, 16));
+    Serial.printf("TUSS4470 reg 0x%02X = 0x%02X\n", addr, tuss::readReg(addr));
+  } else if (l.startsWith("CAL")) {
+    uint16_t pts[17]; tuss::getCalibration(pts);
+    String a = l.substring(3); a.trim();
+    if (a.length()) {
+      int k = 0; char* c = const_cast<char*>(a.c_str()); char* e;
+      while (k < 17) { const long v = strtol(c, &e, 10); if (e == c) break; pts[k++] = (uint16_t)v; c = e; }
+      if (k == 17) tuss::setCalibration(pts); else Serial.println(F("CAL needs 17 numbers (raw 0, 256 ... 4096 -> corrected)"));
+    }
+    Serial.print(F("ADC calibration:")); for (int k = 0; k < 17; k++) Serial.printf(" %u", pts[k]); Serial.println();
+  } else if (l.length()) Serial.println(F("Sonar: REC ON|OFF, STAT, KNOB <name> <value>, REG <addr hex> [<value hex>], CAL [17 numbers]"));
+}
+
 void sonarLoop() {
   static icemesh::sonar::SonarSource src;
   static bool started = false;
@@ -1321,12 +1395,26 @@ void sonarLoop() {
       DEBUG_PRINTLN(F("Sonar knobs updated by the chalet"));
     }
   }
+  // v2 (D43) real sonar: started once; a node with a working TUSS4470 runs its sonar whenever its hub
+  // talks to it (sonar control seen), fake data only when the chalet asks for a sonar simulation
+  static bool hwTried = false, hwOk = false;
+  if (SONAR_REAL && !hwTried) {
+    hwTried = true; hwOk = tuss::begin();
+    DEBUG_PRINTF("Sonar TUSS4470: %s\n", hwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
+  }
+  sonarSerial();
+  if (sonarKnobAskId >= 0) {
+    const uint8_t id = (uint8_t)sonarKnobAskId; sonarKnobAskId = -1;
+    knobs.set(id, sonarKnobAskVal); src.proc.prm = knobs;
+    Serial.printf("knob %s = %u %s (this node, not saved)\n", icemesh::sonar::paramInfo(id).key, knobs[id], icemesh::sonar::paramInfo(id).unit);
+  }
   if (sonarCtrlSeen) {
     sonarCtrlSeen = false;
     lastCtrl = millis();
     focus = sonarCtrlFocus;
-    sonarSimOn = (sonarCtrlSim && (simBits & 0x01)) || SONAR_SIM_FORCE;
+    sonarSimOn = (sonarCtrlSim && (simBits & 0x01)) || SONAR_SIM_FORCE || SONAR_BENCH || hwOk;   // (name kept: "sonar running")
   }
+  const bool fake = !hwOk || (sonarCtrlSim && (simBits & 0x01)) || SONAR_SIM_FORCE;
   if (sonarSimOn && !started) {
     src.begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());
     started = true; lastTick = millis(); lastCtrl = millis();
@@ -1343,7 +1431,7 @@ void sonarLoop() {
     }
     return;
   }
-  if (!SONAR_SIM_FORCE && millis() - lastCtrl > SONAR_CTRL_TIMEOUT_MS) {   // hub gone or test mode off
+  if (!SONAR_SIM_FORCE && !SONAR_BENCH && millis() - lastCtrl > SONAR_CTRL_TIMEOUT_MS) {   // hub gone or test mode off
     sonarSimOn = false;
     return;
   }
@@ -1353,7 +1441,32 @@ void sonarLoop() {
     icemesh::sonar::Block out[2];
     static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0;
     const uint32_t t0 = micros();
-    const uint8_t n = src.tick(focus == NODE_ID, out, 2);   // fake raw ping -> processing -> blocks
+    uint8_t n;
+    if (fake) {
+      if (SONAR_BENCH && SONAR_REAL && !hwOk) {   // bucket test with no TUSS4470 answer: say it, loudly
+        static unsigned long warned = 0;
+        if (millis() - warned >= 5000UL) { warned = millis(); Serial.println(F("BENCH: TUSS4470 NOT answering -> fake data. Check SPI wiring, SONAR_PIN_*, 3.3 V / 5 V to the shield")); }
+      }
+      n = src.tick(focus == NODE_ID, out, 2);   // fake raw ping -> processing -> blocks
+    } else {   // real ping when due (adaptive rate), processing, blocks; recording on serial if asked
+      static uint8_t tick_n = 0;
+      static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
+      const uint8_t tpp = src.ticksPerPing(focus == NODE_ID);
+      n = 0;
+      if (++tick_n >= tpp) {
+        tick_n = 0;
+        tuss::PingInfo pi;
+        if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
+          n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 2);
+          sonarRecord(codes, pi);
+          static unsigned long lastBench = 0;
+          if (sonarStatAsk || (SONAR_BENCH && !sonarRec && millis() - lastBench >= 2000UL)) {
+            sonarStatAsk = false; lastBench = millis();
+            sonarBenchLine(pi, src.lastProc());
+          }
+        }
+      }
+    }
     const uint32_t dt = micros() - t0;
     if (dt > usMax) usMax = dt;
     usSum += dt; cnt++;

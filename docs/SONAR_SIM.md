@@ -116,9 +116,24 @@ Real-water tests come late and may happen on the ice first, so the processing ha
 | learn | Static scene learning | 0.012 | how fast bottom / weeds become grey background |
 | range | Colour range | 46 dB | smaller = more contrast |
 | tvg | Range compensation | on | deeper echoes boosted for spreading/absorption |
-| cycles, gain, pinghz | (driver) | 8, 8, 4/s | kept and sent, used by the TUSS4470 driver when written |
+| bmin | Bottom search from | 0.6 m | bottom is searched deeper than this (prototype 0.6 m). **Bucket**: just past the ring-down (`ring=` on the BENCH line) and below the water depth, or the 2nd bottom echo is taken (0.40 m bucket reads 0.80 m). Too low in a lake locks onto the ring-down (replay: 0.20 m) |
+
+**Driver knobs** (D43, used by the TUSS4470 driver `src/sensor_node/sonar_tuss4470.cpp`; ignored by the fake sonar except the ping rates):
+
+| Key | Knob | Default | What it does |
+|---|---|---|---|
+| cycles | Burst cycles, base | 16 | longer = more energy, longer ring-down and blind zone |
+| fcycles | Burst cycles, focus | 8 | shorter = sharper depth resolution in focus |
+| gain | Receiver gain code | 1 | TUSS4470 LNA (reg 0x13), 0-3. Lower if `raw_max` clips |
+| pinghz | Ping rate, active | 4/s | when targets are present / in focus |
+| idlehz | Ping rate, idle | 1/s | nothing in the water column: saves battery |
+| avg | Bursts averaged | 2 | base mode only (power average) |
+| freq | Frequency mode | 0 | 0 = 190/200/210 kHz each ping, 1 = one per ping rotating, 2 = 200 kHz only |
+| sound | Sound speed | 1403 m/s | 1350 + value; fresh water near 0 °C ≈ 1403 |
+| bpf | Band-pass code | 0x1E | TUSS4470 reg 0x10 (200 kHz per open_echo) |
+| thresh | Edge threshold | 31 | TUSS4470 reg 0x17, OUT_4 comparator for edge timing |
 
 Defaults = the prototype ("Processed"): `test_sonar_proc` stays bit-exact. **Noise filter** presets (OLED): Low 7/4/2/6, Normal 10/5/3/5, High 14/7/5/4 (snr/prom/confirm/keep).
-Path: chalet (OLED Settings › Sonar, web Sonar › Display › Processing, serial `KNOBS` / `KNOB <key> <v>`) → beacon `CMD_SONAR_PARAM` (one knob per command; whole set again when a hub appears after boot, or "Send to holes again") → hub (NVS) → tip-ups in the sonar control message (NVS). Demo network: the knobs act on the FOCUS hole (full fake sonar); the light demo summaries ignore them.
+Path: chalet (OLED Settings › Sonar, web Sonar › Display › Processing, serial `KNOBS` / `KNOB <key> <v>`; bench: `KNOB <key> <v>` on the tip-up's own serial, this node only, not saved) → beacon `CMD_SONAR_PARAM` (one knob per command; whole set again when a hub appears after boot, or "Send to holes again") → hub (NVS) → tip-ups in the sonar control message (NVS). Demo network: the knobs act on the FOCUS hole (full fake sonar); the light demo summaries ignore them.
 
 **Display knobs** (no radio): OLED Settings › Display (units, Sonar / Focus depth Auto or fixed, hide weak echoes; CardKB `+` `-` `a` on the Sonar / Focus pages); web Sonar › Display (depth scale Auto/fixed, colour gain, weak echoes, per phone); web Holes cards: scale "same for all" / "each hole" / fixed.

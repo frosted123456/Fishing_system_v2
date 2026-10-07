@@ -74,7 +74,7 @@ class SonarProc {
     }
 
     // Bottom: strongest 8-bin energy window, then walk back to the onset
-    const int b0 = roundi(R(0.6) / BIN_M());
+    const int b0 = roundi(R(prm[P_BOTTOM_MIN] / 10.0) / BIN_M());   // default 6 -> 0.6 m (prototype)
     sreal e = R(0); int best = b0; sreal bestE = R(-1);
     for (int i = b0; i < b0 + 8; i++) e += static_cast<sreal>(lin[i]);
     for (int i = b0; i + 8 < N; i++) { if (e > bestE) { bestE = e; best = i; } e += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }

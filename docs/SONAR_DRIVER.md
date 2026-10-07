@@ -1,0 +1,137 @@
+# TUSS4470 sonar driver: bucket-test guide (D43, 2026-10-07)
+
+`src/sensor_node/sonar_tuss4470.h/.cpp`, ESP32 WROOM tip-up + Open Echo TUSS4470 shield, 200 kHz transducer.
+
+**Status: WRITTEN BLIND.** It compiles (envs `sensor_wroom_sonar`, `sensor_wroom_sonar_bench`, no warnings in these
+files) and the processing it feeds is host-tested, but **not one line of the driver has run on hardware**. Expect
+the first bucket session to find wiring / register / timing mistakes. The steps below are ordered so each one
+checks one thing.
+
+## What is verified and what is not
+
+| Part | Verified? | How |
+|---|---|---|
+| Processing (bottom, noise floor, targets, ring-down, flags, rotation, adaptive rate) | Host only | `make -C test all` (fake sonar data), ASan/UBSan clean |
+| Recording line format → PC replay | Host only | `tools/sonar_replay.cpp` on a fake recording; file, stdin and Windows monitor logs (`12:00:01.123 > SONAR ...`, CRLF) read the same |
+| Driver compiles for the WROOM (IDF 4.4 legacy APIs: SPI, RMT, I2S-ADC, MCPWM capture) | Yes | arduino-cli, core 2.0.17 |
+| SPI register protocol (odd parity, mode 1, 1 MHz) | **No** | Ported from open_echo |
+| Burst on IO2 (RMT, 12.5 ns) | **No** | |
+| I2S-ADC real sample rate | **No** | Measured by the driver itself (`adc=` on the BENCH line) |
+| Time zero (transmit leakage onset) | **No** | Rule: first sample above 80 % of the max of the first 3 ms |
+| dB scale of the ADC (95 dB over 4096 counts) | **No, estimate** | Prototype scale; calibrate |
+| OUT_4 edge timing (MCPWM capture) | **No** | IO2 is both RMT output and capture input (see "Risks") |
+| Converter off while listening (GPIO33) | **No** | Needs an enable pin on the converter, see "Power" |
+
+## Wiring: PROPOSED pins, Frank to confirm
+
+None of these are confirmed. If the mast-head wiring differs, define **all** of them in the env's `build_flags`
+(they are one `#ifndef SONAR_PIN_SCK` block: defining only some fails to compile).
+
+| Signal | TUSS4470 / shield | WROOM GPIO | Why this pin |
+|---|---|---|---|
+| SPI SCK | SCLK | 18 | VSPI default |
+| SPI MISO | SDO | 19 | VSPI default |
+| SPI MOSI | SDI | 23 | VSPI default |
+| SPI CS | NCS | 5 | VSPI default; strapping pin, fine as CS (idles high) |
+| IO1 | IO1 | 26 | Held HIGH (as open_echo) |
+| IO2 burst | IO2 | 25 | RMT output + MCPWM CAP0 input |
+| OUT_4 comparator | OUT_4 | 27 | MCPWM CAP1 |
+| VOUT log-amp | VOUT | 36 (VP, ADC1_CH0) | I2S-ADC works on ADC1 only (GPIO 32-39); ADC1 works with the radio on |
+| Converter enable | converter EN | 33 | LOW while listening; `-D SONAR_PIN_BOOST=-1` if not wired |
+| Already used | | 15 Hall, 2 LED, 34 battery | unchanged |
+
+Check before powering: **VOUT must stay below about 3.1 V** at the ESP32 pin (ADC at 12 dB attenuation). If the
+shield's VOUT can go higher, add a divider and tell Claude (the dB scale changes).
+
+## Power (items 2-3)
+
+- 3 AA (≈4.5 V) to the 24-28 V drive is a **boost** converter (e.g. MT3608), not a buck: a buck only steps down.
+- Quiet receive needs the converter's **EN** pin on GPIO33. Check your module: on many cheap MT3608 boards EN is
+  tied to VIN on the PCB and is not reachable without lifting a pin. If there is no EN: build with
+  `-D SONAR_PIN_BOOST=-1` (the driver then leaves it alone) and compare the noise floor (`noise=`) with the
+  converter on vs unplugged during the test.
+- `SONAR_CHARGE_MS` (4 ms, estimate): converter on before each burst to refill VDRV. Too short → weaker bursts
+  later in an average (watch `raw_max` drop across pings).
+
+## Bucket test, step by step
+
+Build and flash the bench firmware (stays awake, real sonar from boot, no hub needed, one `BENCH` line every 2 s):
+
+```
+pio run -e sensor_wroom_sonar_bench -t upload
+pio device monitor -b 115200
+```
+
+A BENCH line:
+```
+BENCH adc=149800Hz(want 150000) t0=37 raw_max=3010 edge=0.412m ping=61ms | bottom=0.41m bot_snr=38dB noise=-84dB ring=0.12m | 0.25m:fish
+```
+
+| Step | Do | Expect | If not |
+|---|---|---|---|
+| 0 Shallow water | **First thing in a bucket**: `KNOB dead 1` (0.1 m) and `KNOB bmin <v>` (x0.1 m) just past the ring-down (`ring=`) and below the water depth. Defaults (dead 0.9 m, bottom search from 0.6 m) hide a bucket bottom or take its 2nd echo (0.40 m reads 0.80 m) | `knob dead = 1`, `knob bmin = …` | `bottom=` jumps to `ring=`: bmin too low. Put both back to defaults (9 and 6) before the lake |
+| 1 SPI | Boot message `Sonar TUSS4470: found`; type `REG 17` then `REG 17 5A` | Reads back what was written | `NOT answering` → SPI wiring, CS pin, shield power. Try `REG 10` (BPF) to see any non-zero answer |
+| 2 ADC rate | Read `adc=` | Within ~2 % of 150000 | ≈75000 or ≈300000 = I2S-ADC rate quirk: **every depth is off by that factor**. Note the value and send it (fix = `SONAR_ADC_HZ` or the I2S config) |
+| 3 Clipping | `raw_max` | Below 4095, no `(CLIPPED)` | Lower the LNA gain: `KNOB gain 0` (serial, this node, no hub needed) or the chalet knob `gain` once the value is known |
+| 4 Time zero | `t0` | Small and stable (a few tens of samples; < 450 = 3 ms) | Jumping around = the leakage onset rule is wrong for this shield: send a recording (step 8) |
+| 5 Known depth | Transducer facing down, measure the water depth with a ruler | `bottom=` = ruler ± 2.5 cm | Error proportional to depth → sound speed (`KNOB sound <v>`, speed = 1350 + v m/s, 53 = 1403; fresh water near 0 °C is ~1403) or the ADC rate (step 2). Constant offset → time zero (step 4) |
+| 6 Level | Tilt the transducer a few degrees | `bot_snr` drops when tilted | This is the setup level check (item 27) shown on the chalet |
+| 7 Edge | `edge=` | Close to `bottom=` (first echo above the threshold after the blind zone) | `-` = no edge: threshold too high (`KNOB thresh <lower>`) or the IO2 capture does not see the burst (see "Risks") |
+| 8 Record | `REC ON`, a minute or two, `REC OFF` (BENCH lines stop while recording) | Long `SONAR ...` lines | Monitor to a file: `pio device monitor -b 115200 --filter log2file` |
+| 9 Ring-down | Note `ring=` with clean water; then stir in crushed ice | Larger `ring=`; after a few pings `(RING ALARM)` | Item 26 thresholds are guesses: send a recording |
+| 10 Frequencies | `KNOB freq 0` (3 per ping), `1` (rotate), `2` (200 kHz only) | All give the same bottom | 190/210 kHz weaker = expected until per-frequency BPF codes are set (open question 3) |
+
+## Serial commands (sonar builds only)
+
+| Command | Does |
+|---|---|
+| `STAT` | One BENCH line after the next ping (any sonar build, not only bench) |
+| `KNOB <name> <value>` | Set one processing/driver knob on this node only, for the bench (not saved; the chalet's set replaces it when a hub sends one). `KNOB` alone lists the names |
+| `REC ON` / `REC OFF` | Recording lines: `SONAR <ms> <nfreq> <rot_f> <t0> <edge_um> <raw_max> <us> <hex codes freq0> [freq1 freq2]` (488 bins × 2 hex each) |
+| `REG <addr hex>` / `REG <addr hex> <value hex>` | Read / write a TUSS4470 register (the next ping rewrites 0x10 0x13 0x17 0x1A from the knobs) |
+| `CAL` / `CAL <17 numbers>` | Show / set the ADC calibration curve: corrected value for raw 0, 256, … 4096. Kept in NVS `sonarcal`. Identity until set |
+
+## Replay a recording on the PC (tune knobs without water)
+
+```
+g++ -std=c++11 -O2 -Ilib/IceMesh/src tools/sonar_replay.cpp -o .preview/sonar_replay
+.preview/sonar_replay log.txt                     # CSV: ms, nfreq, bottom_m, noise_db, bottom_snr_db, ring_m, ring_alarm, status, targets
+.preview/sonar_replay snr=8 learn=20 log.txt      # same with knobs changed (names: see SONAR_SIM.md "Knobs")
+.preview/sonar_replay --trace log.txt > t.json    # JSON trace for tools/web_preview.py
+.preview/sonar_replay --make-fake 200 > fake.txt  # fake recording, to test the tool
+```
+No compiler on the Windows PC? Send the log file to Claude: the replay runs in its workspace.
+
+## Constants that are estimates (search `est.` in the code)
+
+| Constant | Value | Where it matters | Fix from |
+|---|---|---|---|
+| `SONAR_ADC_HZ` | 150000 | Depth scale | Step 2 (`adc=`) |
+| dB scale | -100 dB at 0, -5 dB at 4095 (95 dB over the ADC range) | Noise floor / SNR numbers, `snr` knob meaning | TUSS4470 datasheet log-amp slope (mV/dB) + VOUT divider, then `CAL` |
+| Time-zero rule | first sample > 80 % of max in the first 3 ms | Constant depth offset | Step 4 / recordings |
+| `SONAR_CHARGE_MS` | 4 ms | Burst strength in averages | Scope on VDRV, or `raw_max` over an average |
+| BPF code | one code (knob `bpf`, 0x1E) for all 3 frequencies | 190/210 kHz sensitivity | Datasheet BPF table |
+| Burst count register 0x1A | `cycles-1` (open_echo writes 0x0F for 16) | Probably unused: the RMT sends the real count | Datasheet: IO mode |
+| Capture length | 2800 samples = 12.2 m at 1403 m/s | Max depth | Raise `MAX_SAMPLES` for deeper lakes (RAM: 2 B/sample) |
+| Ping time | ~20 ms per capture + 4 ms charge; base = 3 freq × avg 2 → ~140 ms | Must stay under the 250 ms tick | `ping=` on the BENCH line |
+
+## Risks to check first (for the reviewer)
+
+1. **IO2 shared by RMT (output) and MCPWM CAP0 (input).** Order in `begin()`: MCPWM GPIO init → RMT config →
+   `PIN_INPUT_ENABLE` on IO2. If `edge=` is always `-`, this is the first suspect; fallback: jumper IO2 to a
+   second free GPIO and capture there.
+2. **I2S built-in ADC on the classic ESP32**: sample-rate and swapped-pair quirks are handled but unproven;
+   `adc=` measures the real rate on every ping.
+3. **OUT_4 edge rate**: if OUT_4 toggles at the carrier frequency during echoes, the capture ISR runs at up to
+   200 kHz for the echo length. Only the first edge is used; the ISR is short, but watch for watchdog resets.
+4. **ADC during radio TX**: ESP-NOW sends happen after the ping in the same loop (never during a capture).
+5. The TUSS4470 read: the register value is taken from the same 16-bit frame (as open_echo). If `REG` always
+   reads 0 or the previous value, the read needs a second frame.
+
+## Open questions
+
+1. Pins (table above) and whether the converter has a usable EN pin.
+2. Shield VOUT maximum vs the ESP32 ADC range (divider?).
+3. BPF codes for 190 and 210 kHz (per-frequency `REG 10` before each burst).
+4. Log-amp slope in mV/dB, for a real dB scale.
+5. Transducer: beam angle, Q / bandwidth, ring-down time (sets the `dead` knob and burst cycles).

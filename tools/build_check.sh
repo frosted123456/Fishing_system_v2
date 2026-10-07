@@ -31,6 +31,10 @@ env_cfg() {  # sets FW FQBN FLAGS for an env name
                   FLAGS='-DBOARD_ESP32C3 -DNODE_ID=2' ;;
     sensor_wroom) FW=sensor_node; FQBN=espressif:esp32:esp32
                   FLAGS='-DBOARD_ESP32WROOM -DNODE_ID=3' ;;
+    sensor_wroom_sonar) FW=sensor_node; FQBN=espressif:esp32:esp32
+                  FLAGS='-DBOARD_ESP32WROOM -DNODE_ID=3 -DSONAR_REAL=1' ;;
+    sensor_wroom_sonar_bench) FW=sensor_node; FQBN=espressif:esp32:esp32
+                  FLAGS='-DBOARD_ESP32WROOM -DNODE_ID=3 -DSONAR_REAL=1 -DSONAR_BENCH=1' ;;
     *) echo "unknown env $1"; return 1 ;;
   esac
   [ -n "${EXTRA_FLAGS:-}" ] && FLAGS="$FLAGS $EXTRA_FLAGS"

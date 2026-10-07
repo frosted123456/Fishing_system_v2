@@ -32,6 +32,7 @@ enum ParamId : uint8_t {
   P_SOUND,           // sound speed - 1350 m/s (53 = 1403 m/s, water 0-2 degC)
   P_BPF,             // TUSS4470 band-pass centre code (reg 0x10; 0x1E = 200 kHz per open_echo)
   P_THRESH,          // OUT_4 comparator threshold (reg 0x17), edge timing
+  P_BOTTOM_MIN,      // D43: bottom search starts here (x0.1 m; prototype 0.6 m). Bucket test: 1-2
   P_COUNT
 };
 
@@ -59,6 +60,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"sound", "Sound speed", 0, 255, 53, "+1350 m/s"},
     {"bpf", "Band-pass code", 0, 63, 30, "reg 0x10"},
     {"thresh", "Edge threshold", 0, 255, 31, "reg 0x17"},
+    {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
   };
   return T[id < P_COUNT ? id : 0];
 }
