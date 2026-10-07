@@ -19,6 +19,6 @@
 | `tools/flash.html` + `tools/flash.py` | Flash a board: pick board + purpose + ID on the page, run the one command; each board gets an env in `devices.ini` (the fleet) | |
 | `include/messages.h` | Frames and `NodeState` shared by the two firmwares | |
 
-Rules kept from v1: `config.h` holds the Wi-Fi credentials and is never committed; every global of the Heltec
+Rules: the cabin Wi-Fi credentials are in `src/lora_node/secrets.h` (gitignored; copy `secrets.example.h`), `config.h` holds no secrets and is committed; every global of the Heltec
 firmware is defined in `main.cpp` and declared in `chalet.h`; a `static` in one file is invisible to the others
 (the compiler says so: "was declared 'extern' and later 'static'" means remove the `static`).

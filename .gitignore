@@ -11,3 +11,5 @@ test/bin/
 Thumbs.db
 .preview/
 __pycache__/
+# credentials (see src/lora_node/secrets.example.h)
+src/lora_node/secrets.h

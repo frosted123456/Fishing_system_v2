@@ -84,8 +84,17 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define WIFI_MODE_SETTING   WIFI_MODE_APSTA  // <<< CHANGE THIS
 
 // If using STA mode, set your network credentials here:
-#define STA_SSID            "YourWiFi"       // <<< Your WiFi/hotspot name
-#define STA_PASSWORD        "YourPassword"   // <<< Your WiFi/hotspot password
+// The cabin Wi-Fi name and password live in secrets.h (NOT in git: copy secrets.example.h to secrets.h
+// and fill it in). Without the file the chalet still works on its own hotspot.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef STA_SSID
+#define STA_SSID            ""              // empty = no cabin network, hotspot only
+#endif
+#ifndef STA_PASSWORD
+#define STA_PASSWORD        ""
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PIN DEFINITIONS - HELTEC LORA32 V3 (ESP32-S3)

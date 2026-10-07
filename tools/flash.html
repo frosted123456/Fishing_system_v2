@@ -80,14 +80,14 @@ table{border-collapse:collapse;width:100%;font-size:.95rem}td,th{border-bottom:1
 <tr><td>1-100</td><td>Your real boards. Convention so far: chalet 100, hubs 1-9, relay 90, tip-ups 2-49 (the hub's own hole = the hub's ID)</td></tr>
 <tr><td>101-124</td><td>Demo network inside the chalet (Settings → Simulation → Demo network): never give these to a board</td></tr>
 <tr><td>128-255</td><td>Test holes a hub invents in sonar test mode</td></tr></table>
-<p class="muted" style="margin:8px 0 0">Network ID 0x42 and the hotspot password live in <code>src/*/config.h</code>: same on every board. The chalet's cabin Wi-Fi (STA_SSID / STA_PASSWORD) is in <code>src/lora_node/config.h</code>, which is never committed. Builds without flashing, all envs: <code>tools/build_check.sh</code>.</p>
+<p class="muted" style="margin:8px 0 0">Network ID 0x42 and the hotspot password live in <code>src/*/config.h</code>: same on every board. The chalet's cabin Wi-Fi goes in <code>src/lora_node/secrets.h</code> (copy secrets.example.h; ignored by git). Builds without flashing, all envs: <code>tools/build_check.sh</code>.</p>
 </div>
 </div>
 <script>
 const PURPOSES = {
   heltec: [
     { k: 'chalet', t: 'Chalet (offshore box)', d: 'The master: beacon, web page, screen, buzzer, phone hotspot. One per network.', idDef: 100, nameDef: 'Chalet',
-      before: ['src/lora_node/config.h: STA_SSID / STA_PASSWORD = the cabin Wi-Fi (optional; the hotspot works without it)', 'Only one chalet per network'],
+      before: ['src/lora_node/secrets.h: the cabin Wi-Fi (copy secrets.example.h; optional, the hotspot works without it)', 'Only one chalet per network'],
       after: ['Screen: "Ice Fishing v2 / Chalet (offshore)" then the home page with "SETUP 5 min"', 'Esc opens the menu; Settings → Wi-Fi shows the hotspot IceFish-Remote', 'Phone: connect to IceFish-Remote (password in config.h), open http://192.168.4.1', 'Serial: type HELP for the commands (DEMO, KNOBS, BUZZ, PERF…)'] },
     { k: 'hub', t: 'Hub (on the ice)', d: 'Collects its pocket of tip-ups over ESP-NOW, talks LoRa to the chalet. Has its own hole.', idDef: 1, nameDef: 'Hub 1',
       before: ['Unique ID: this ID is also the ID of the hub\'s own hole', 'The hub\'s own tip-up sensor wired to the Heltec (or set HAS_LOCAL_SENSOR=false in devices.ini after)'],

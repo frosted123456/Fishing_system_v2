@@ -39,7 +39,7 @@ For the next reviewer. The last full review round was 1264584; everything after 
 - One BPF code for 190/200/210 kHz; per-frequency codes need the datasheet table.
 - Edge timing (`edge_um`) is recorded but not used by the processing.
 - Near-bait / cover / ring-down thresholds are guesses until real recordings exist.
-- Never commit `src/lora_node/config.h` (real Wi-Fi credentials, locally modified). Stage explicit paths only.
+- Credentials live in `src/lora_node/secrets.h` (gitignored). `config.h` is clean and committed.
 
 ## Added later the same day (db27995..363a4e1)
 
