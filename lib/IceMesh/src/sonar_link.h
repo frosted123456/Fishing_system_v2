@@ -17,7 +17,12 @@ namespace sonar {
 class SonarOutbox {
  public:
   enum { CAP = 12, MAX_AGE_FRAMES = 4 };   // a block older than ~4 s is stale for the display (est.)
-  uint32_t pushed = 0, sent = 0, dropped = 0, expired = 0;
+  // D48: no ACK on sonar blocks, so a DATA or BASE block goes out a second time in the NEXT frame when the
+  // slot has room left after everything new (the chalet drops duplicate pings). Through a relay at 20 %
+  // loss per hop this takes focus pings from ~50 % to ~80 % delivered (test_tdma_sim). BG segments are
+  // not repeated (they cycle every 2 s anyway). 0 = off.
+  uint8_t repeats = 1;
+  uint32_t pushed = 0, sent = 0, dropped = 0, expired = 0, resent = 0;
 
   SonarOutbox() { clear(); }
   void clear() { memset(items_, 0, sizeof(items_)); order_ = 0; }
@@ -35,50 +40,67 @@ class SonarOutbox {
     for (uint8_t i = 0; i < CAP && slot < 0; i++) if (!items_[i].used) slot = i;
     if (slot < 0) { slot = victim(); dropped++; }
     Item& it = items_[slot];
-    it.used = true; it.node = node; it.type = type; it.seg = seg; it.len = len; it.frame = frame; it.order = ++order_;
+    it.used = true; it.node = node; it.type = type; it.seg = seg; it.len = len; it.frame = frame; it.order = ++order_; it.sends = 0;
     memcpy(it.data, blk, len);
     pushed++;
     return true;
   }
 
-  // Adds whole blocks as SEC_SONAR sections: BASE first, then DATA oldest first, then BG.
+  // Adds whole blocks as SEC_SONAR sections: BASE (new), DATA oldest first (a repeat of an older block
+  // BEFORE a newer block: the chalet drops a ping that arrives behind a newer one as late), BG, then
+  // a BASE repeat if room is left.
   uint16_t fill(tdma::PacketWriter& w, uint16_t frame) {
     expire(frame);
     uint16_t added = 0;
-    static const uint8_t prio[3] = {BT_BASE, BT_DATA, BT_BG};
-    for (uint8_t p = 0; p < 3; p++) {
-      for (;;) {
-        int best = -1;
-        for (uint8_t i = 0; i < CAP; i++) {
-          const Item& it = items_[i];
-          if (!it.used || it.type != prio[p] || it.len > w.freeForValue()) continue;
-          if (best < 0 || it.order < items_[best].order) best = i;
-        }
-        if (best < 0) break;
-        Item& it = items_[best];
-        if (!w.add(tdma::SEC_SONAR, it.data, it.len)) break;
-        added = static_cast<uint16_t>(added + it.len + 2);
-        it.used = false;
-        sent++;
-      }
-    }
+    added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, false, frame));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_DATA, true, frame));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_BG, false, frame));
+    if (repeats) added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, true, frame));
     return added;
   }
 
   uint8_t count() const { uint8_t n = 0; for (uint8_t i = 0; i < CAP; i++) n += items_[i].used ? 1 : 0; return n; }
 
  private:
-  struct Item { bool used; uint8_t node, type, seg, len; uint16_t frame; uint32_t order; uint8_t data[MAX_BLOCK]; };
+  struct Item { bool used; uint8_t node, type, seg, len; uint16_t frame; uint32_t order; uint8_t sends; uint8_t data[MAX_BLOCK]; };
+
+  // One block type, oldest first. with_repeats: blocks already sent once (in an EARLIER frame) go out
+  // again in their place in the order; without: only unsent blocks. A block is kept for one repeat
+  // (DATA, BASE) when repeats is on, else freed at its first send.
+  uint16_t fillPass(tdma::PacketWriter& w, uint8_t type, bool with_repeats, uint16_t frame) {
+    uint16_t added = 0;
+    for (;;) {
+      int best = -1;
+      for (uint8_t i = 0; i < CAP; i++) {
+        const Item& it = items_[i];
+        if (!it.used || it.type != type || it.len > w.freeForValue()) continue;
+        if (it.sends > 0 && (!with_repeats || it.frame == frame)) continue;
+        if (best < 0 || it.order < items_[best].order) best = i;
+      }
+      if (best < 0) break;
+      Item& it = items_[best];
+      if (!w.add(tdma::SEC_SONAR, it.data, it.len)) break;
+      added = static_cast<uint16_t>(added + it.len + 2);
+      if (it.sends > 0) resent++; else sent++;
+      it.sends++;
+      if (it.sends <= repeats && (type == BT_DATA || type == BT_BASE)) it.frame = frame; else it.used = false;
+    }
+    return added;
+  }
 
   void expire(uint16_t frame) {
     for (uint8_t i = 0; i < CAP; i++)
       if (items_[i].used && seqDiff(frame, items_[i].frame) > static_cast<int16_t>(MAX_AGE_FRAMES)) { items_[i].used = false; expired++; }
   }
-  // Oldest block of the least useful type: BG, then DATA, then BASE.
+  // A block already sent once first (its repeat is the least valuable); then the oldest block of the
+  // least useful type: BG, then DATA, then BASE.
   int victim() const {
+    int best = -1;
+    for (uint8_t i = 0; i < CAP; i++)
+      if (items_[i].used && items_[i].sends > 0 && (best < 0 || items_[i].order < items_[best].order)) best = i;
+    if (best >= 0) return best;
     static const uint8_t order[3] = {BT_BG, BT_DATA, BT_BASE};
     for (uint8_t p = 0; p < 3; p++) {
-      int best = -1;
       for (uint8_t i = 0; i < CAP; i++)
         if (items_[i].used && items_[i].type == order[p] && (best < 0 || items_[i].order < items_[best].order)) best = i;
       if (best >= 0) return best;
@@ -155,7 +177,8 @@ class SonarStore : public SonarSink {
       case BT_BASE: {
         Summary s;
         if (!decodeSummary(blk, len, s)) { blocks_bad++; return; }
-        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && s.ping != ns->sum.ping && ++ns->old_run < 2) { old_pings++; return; }
+        if (ns->has_sum && s.ping == ns->sum.ping) { ns->hub = hub; ns->frame = frame; old_pings++; return; }   // the same BASE again (repeat / relay): heard, not new
+        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && ++ns->old_run < 2) { old_pings++; return; }
         ns->old_run = 0;
         ns->sum = s; ns->has_sum = true;
         record(ns, frame, true);

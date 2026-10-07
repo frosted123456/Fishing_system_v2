@@ -284,17 +284,18 @@ static void test_sonar_focus_through_relay(void) {
     results[L] = static_cast<int>(100u * got / (x->focus_pings_made ? x->focus_pings_made : 1));
     printf("sonar sim, loss %u%%: focus pings %u/%u (%d%%), summaries %d/6, bg mask 0x%02X, alert %d frames, max hub pkt %d B, outbox drops C=%u\n",
            losses[L], got, static_cast<unsigned>(x->focus_pings_made), results[L], with_sum, fn ? fn->bg_mask : 0, alert,
-           x->max_hub_packet, static_cast<unsigned>(x->hub[2].sonar.dropped + x->hub[2].sonar.expired));
+           x->max_hub_packet, static_cast<unsigned>(x->hub[2].sonar.dropped + x->hub[2].sonar.expired)); printf("   outbox C: pushed %u sent %u resent %u dropped %u expired %u; src pings_dropped %u blocks_out %u; store ok %u bad %u old %u\n", (unsigned)x->hub[2].sonar.pushed, (unsigned)x->hub[2].sonar.sent, (unsigned)x->hub[2].sonar.resent, (unsigned)x->hub[2].sonar.dropped, (unsigned)x->hub[2].sonar.expired, (unsigned)x->src[2][1].pings_dropped, (unsigned)x->src[2][1].blocks_out, (unsigned)x->store.blocks_ok, (unsigned)x->store.blocks_bad, (unsigned)x->store.old_pings);
     TEST_ASSERT_EQUAL(6, with_sum);
     TEST_ASSERT_NOT_NULL(fn);
     TEST_ASSERT_TRUE(alert <= (L == 0 ? 1 : 10));
     if (L == 0) { TEST_ASSERT_GREATER_OR_EQUAL(95, results[L]); TEST_ASSERT_EQUAL(0xFF, fn->bg_mask); }
     delete x;
   }
-  // No ACK on sonar: at 20 % loss per link a block from remote C needs beacon->B, echo->C, C->B and B->chalet
-  // (plus free-run when one beacon is missed): ~0.8^3 to 0.8^4 = 41-51 % expected.
-  TEST_ASSERT_GREATER_OR_EQUAL(35, results[2]);
-  TEST_ASSERT_GREATER_OR_EQUAL(70, results[1]);
+  // No ACK on sonar: a block from remote C needs beacon->B, echo->C, C->B and B->chalet. Before D48 (each
+  // DATA / BASE block sent once more in the next frame, in ping order): 83 % at 10 % loss, 50 % at 20 %.
+  // With it: 95 % and 74 % (the sync path beacon->B->C is what is left).
+  TEST_ASSERT_GREATER_OR_EQUAL(65, results[2]);
+  TEST_ASSERT_GREATER_OR_EQUAL(90, results[1]);
 }
 
 int main(int, char**) {

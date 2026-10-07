@@ -67,3 +67,11 @@ For the next reviewer. The last full review round was 1264584; everything after 
 | 12 | tip-up | Hall state not reset with the RTC data → possible false trip after RTC corruption | Reset with the magic check |
 
 Still open (needs hardware or data): log-amp slope of this part, time-zero fallback value, ring-down / cover / near-bait thresholds, deconvolution, pulse coding, size class.
+
+## Round 3 (D48): sonar over LoRa
+
+Checked: codec sizes (≈7.3 B/ping, 35 B/s focus vs 180 B/s allowance), outbox, store, planner. The codec is
+not the limit; the absence of any repeat was. `SonarOutbox` now sends DATA/BASE once more in the next frame,
+in ping order. Measured in `test_tdma_sim` (remote hub through a relay): 83 → 95 % at 10 % loss per link,
+50 → 74 % at 20 %. What is left at 20 % is the sync path (beacon → B → echo → C). Review focus:
+`fillPass()` ordering and `victim()` (a sent-once block is evicted first).

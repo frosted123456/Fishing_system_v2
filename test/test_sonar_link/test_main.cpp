@@ -32,7 +32,7 @@ static size_t makeBg(uint8_t node, uint8_t seg, uint8_t ver, uint8_t* b) {
 }
 
 static void test_outbox_replace_and_priority(void) {
-  SonarOutbox ob;
+  SonarOutbox ob; ob.repeats = 0;   // the original one-shot semantics
   uint8_t b[MAX_BLOCK];
   ob.push(b, static_cast<uint8_t>(makeBase(130, 1, b)), 0);
   ob.push(b, static_cast<uint8_t>(makeBase(130, 17, b)), 0);   // replaces
@@ -59,7 +59,7 @@ static void test_outbox_replace_and_priority(void) {
 }
 
 static void test_outbox_whole_blocks_and_expiry(void) {
-  SonarOutbox ob;
+  SonarOutbox ob; ob.repeats = 0;
   uint8_t b[MAX_BLOCK];
   const uint8_t big = static_cast<uint8_t>(makeData(131, 0, 8, b, 7));
   ob.push(b, big, 10);
@@ -75,6 +75,47 @@ static void test_outbox_whole_blocks_and_expiry(void) {
   ob.fill(w2, 20);                                     // 10 frames later: stale, dropped
   TEST_ASSERT_EQUAL(0, ob.count());
   TEST_ASSERT_EQUAL(1, ob.expired);
+}
+
+// D48: DATA and BASE go out once more in a LATER frame, in ping order (a repeat of an older block before
+// a newer block), never twice in one packet; BG only once; a newer BASE replaces a waiting repeat.
+static void test_outbox_repeat_in_order(void) {
+  SonarOutbox ob;   // repeats = 1 by default
+  uint8_t b[MAX_BLOCK];
+  ob.push(b, static_cast<uint8_t>(makeBase(130, 1, b)), 0);
+  ob.push(b, static_cast<uint8_t>(makeData(130, 100, 4, b)), 0);
+  ob.push(b, static_cast<uint8_t>(makeBg(130, 2, 0, b)), 0);
+  uint8_t pkt[MAX_PACKET];
+  PacketWriter w(pkt, sizeof pkt); w.beginHub(0x42, 1, 0, 0);
+  ob.fill(w, 0);
+  TEST_ASSERT_EQUAL(2, ob.count());                    // BASE + DATA kept for their repeat, BG gone
+  TEST_ASSERT_EQUAL(3, ob.sent); TEST_ASSERT_EQUAL(0, ob.resent);
+  SectionReader r0(pkt + HDR_LEN + 1, w.size() - HDR_LEN - 1);
+  uint8_t t, n; const uint8_t* v; int k = 0; while (r0.next(t, v, n)) k++;
+  TEST_ASSERT_EQUAL(3, k);                             // nothing twice in the same packet
+  // next frame: a new DATA block and a newer BASE arrived
+  ob.push(b, static_cast<uint8_t>(makeData(130, 104, 4, b)), 1);
+  ob.push(b, static_cast<uint8_t>(makeBase(130, 9, b)), 1);
+  PacketWriter w1(pkt, sizeof pkt); w1.beginHub(0x42, 1, 1, 0);
+  ob.fill(w1, 1);
+  SectionReader rd(pkt + HDR_LEN + 1, w1.size() - HDR_LEN - 1);
+  uint8_t types[8]; uint16_t firstPing[8]; k = 0;
+  while (rd.next(t, v, n) && k < 8) {
+    uint8_t nd = 0, ty = 0; peekBlock(v, n, nd, ty); types[k] = ty; firstPing[k] = 0;
+    if (ty == BT_DATA) { DataBlock d; TEST_ASSERT_TRUE(decodeData(v, n, d)); firstPing[k] = d.pings[0].index; }
+    if (ty == BT_BASE) { Summary s; TEST_ASSERT_TRUE(decodeSummary(v, n, s)); firstPing[k] = s.ping; }
+    k++;
+  }
+  TEST_ASSERT_EQUAL(3, k);                             // BASE 9 (new), DATA 100 (repeat), DATA 104 (new)
+  TEST_ASSERT_EQUAL(BT_BASE, types[0]); TEST_ASSERT_EQUAL(9, firstPing[0]);
+  TEST_ASSERT_EQUAL(BT_DATA, types[1]); TEST_ASSERT_EQUAL(100, firstPing[1]);
+  TEST_ASSERT_EQUAL(BT_DATA, types[2]); TEST_ASSERT_EQUAL(104, firstPing[2]);
+  TEST_ASSERT_EQUAL(1, ob.resent);
+  TEST_ASSERT_EQUAL(2, ob.count());                    // BASE 9 + DATA 104 wait for their repeat; DATA 100 done
+  PacketWriter w2(pkt, sizeof pkt); w2.beginHub(0x42, 1, 2, 0);
+  ob.fill(w2, 2);
+  TEST_ASSERT_EQUAL(0, ob.count());
+  TEST_ASSERT_EQUAL(3, ob.resent);
 }
 
 static void test_outbox_eviction(void) {
@@ -207,6 +248,7 @@ int main(int, char**) {
   RUN_TEST(test_outbox_replace_and_priority);
   RUN_TEST(test_outbox_whole_blocks_and_expiry);
   RUN_TEST(test_outbox_eviction);
+  RUN_TEST(test_outbox_repeat_in_order);
   RUN_TEST(test_store_dedup_restart_bg);
   RUN_TEST(test_store_history);
   RUN_TEST(test_relay_keeps_whole_sonar_blocks);

@@ -85,7 +85,11 @@ Every block decodes on its own (review fixes): node ID in each block, length = i
 | DATA (FOCUS, 4 pings/block, 1 block/s) | header 6 B (node, type, N, first ping, noise floor −dB, scene version, hardness, info flag); per ping: bottom (abs 11 b, then ±7 cm / escape), counts (3 + 3 b), targets (slot 3 b; first in block: depth 11 b + strength 5 b + width 3 b; then ±31 cm / escape + strength 5 b), changed cells (Rice gaps k=6 + level 2 b); every 2nd block: echo character per target (slot, flicker 0.25 dB, frequency spread 0.5 dB, echo length bins, mature) | ≈ 7.3 B/ping |
 | BG (FOCUS, 1 of 8 segments every 2 s) | 4-level static scene (prototype's grey layer), RLE + Rice, new version when > 12 bins changed | ≈ 6 B/segment |
 FOCUS total ≈ 35 B/s incl. section headers. Strength = the prototype's display value × 31.
-- Hub: `SonarOutbox` (12 blocks, stale after 4 frames, eviction BG → DATA → BASE). No ACK.
+- Hub: `SonarOutbox` (12 blocks, stale after 4 frames, eviction: a block already sent once, then BG → DATA → BASE). No ACK;
+  instead (D48) every DATA and BASE block goes out once more in the next frame when the slot has room, in ping
+  order (an older repeat before a newer block, or the chalet drops the late ping). Inside the existing FOCUS
+  allowance (~100 B/frame instead of ~55). test_tdma_sim through a relay: 83 → 95 % of focus pings at 10 % loss
+  per link, 50 → 74 % at 20 %. The chalet drops the duplicates (same ping index).
 - Chalet: `SonarStore` (16 nodes, ring of 128 pings, duplicate/late pings dropped, node restart detected, **~3 min of summaries per hole** for the at-a-glance views: `/api/sonar/glance`).
 - Planner: the hub reporting the FOCUS node gets 180 B (est.) instead of 96 B; a remote FOCUS hub
   gets at most 255 − 96 so its relay can carry it; FOCUS shrinks first when the plan is too long.
