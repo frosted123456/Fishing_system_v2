@@ -13,6 +13,7 @@ void setupWebServer() {
   server.on("/api/silence", HTTP_POST, handleWebApiSilence);
   server.on("/api/node/name", HTTP_POST, handleWebApiNodeName);
   server.on("/api/node/bait", HTTP_POST, handleWebApiNodeBait);    // v2 (D43): bait depth per hole
+  server.on("/api/node/pos", HTTP_POST, handleWebApiNodePos);      // v2 (D51): position on the pocket map
   server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
   server.on("/api/settings", HTTP_GET, handleWebApiSettingsGet);
@@ -101,6 +102,10 @@ void handleWebApi() {
     n["fish"] = nodeAlarm(network.nodes[i]);   // v2: the alarm (latched), not only the line state
     n["line"] = HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON);
     n["bait"] = baitCm5[network.nodes[i].node_id] * 5;   // v2 (D43): cm, 0 = not set
+    if (holePosDm[network.nodes[i].node_id][0] != POS_UNSET) {   // v2 (D51): pocket map position, metres
+      n["px"] = holePosDm[network.nodes[i].node_id][0] / 10.0;
+      n["py"] = holePosDm[network.nodes[i].node_id][1] / 10.0;
+    }
     n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
     n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
     n["battery"] = network.nodes[i].battery_mv;
@@ -140,6 +145,20 @@ void handleWebApiNodeBait() {
   const int id = doc["nodeId"] | 0, cm = doc["cm"] | 0;
   if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id >= 255 || cm < 0 || cm > 1275) { server.send(400, "application/json", "{\"error\":\"bad hole or depth\"}"); return; }
   baitSet((uint8_t)id, (uint8_t)((cm + 2) / 5));
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// v2 (D51) POST {"nodeId":n,"x":m,"y":m} metres from the chalet (x east, y north); {"nodeId":n} alone removes it
+void handleWebApiNodePos() {
+  StaticJsonDocument<128> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  if (doc.containsKey("x") && doc.containsKey("y")) {
+    const float x = doc["x"], y = doc["y"];
+    if (x < -3000 || x > 3000 || y < -3000 || y > 3000) { server.send(400, "application/json", "{\"error\":\"out of range\"}"); return; }
+    posSet((uint8_t)id, (int16_t)lroundf(x * 10), (int16_t)lroundf(y * 10));
+  } else posSet((uint8_t)id, POS_UNSET, POS_UNSET);
   server.send(200, "application/json", "{\"ok\":true}");
 }
 

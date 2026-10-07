@@ -123,14 +123,6 @@ a{color:var(--accent)}
 /* ---- Suite shell ---- */
 .app{background:var(--bg)}
 .app .bar{max-width:1240px;margin:0 auto;padding:10px 14px 6px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between}
-@media (max-width:600px){
-  .app .bar{padding:8px 12px 4px;gap:4px 8px}
-  .app .bar>div:first-child{order:0;flex:1 1 auto}.app .actions{order:1;flex:0 0 auto}
-  .app .sub{order:2;flex-basis:100%;margin:0;font-size:.86rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .app h1{font-size:1.35rem}
-  .actions .btn{min-height:34px;padding:4px 9px;font-size:.92rem}
-  .simb{font-size:.74rem;padding:2px 6px}
-}
 .app h1{margin:0;font-size:1.6rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
 .app .sub{margin:3px 0 0;color:var(--muted);font-size:.92rem}
 .actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
@@ -152,6 +144,12 @@ body.has-alert{padding-bottom:84px}
 .stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 .stat{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
 .stat span{display:block;color:var(--muted);font-size:.85rem}.stat strong{display:block;font-size:1.35rem;font-weight:700;line-height:1.2}
+.pmap .pmhd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+#pmap{display:block;width:100%;height:300px;border-radius:10px;background:#DCE9EC;touch-action:none}
+@media (max-width:520px){#pmap{height:240px}}
+.pmlegend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:.86rem;color:var(--muted)}.pmlegend .sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.pmchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.pmchips .btn{min-height:32px;padding:3px 10px;font-size:.9rem}.pmchips .btn[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.small.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .ngrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
 @media (max-width:520px){.ngrid{grid-template-columns:minmax(0,1fr)}}
 .node{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:10px 12px;display:grid;gap:3px;align-content:start}
@@ -196,6 +194,14 @@ table.rt th{color:var(--muted);font-weight:600}
 .sgrid{grid-template-columns:minmax(0,1fr)}
 @media (min-width:920px){.sgrid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}}
 dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt{color:var(--muted)}dl.kv dd{margin:0;font-weight:600}
+@media (max-width:600px){
+  .app .bar{padding:8px 12px 4px;gap:4px 8px}
+  .app .bar>div:first-child{order:0;flex:1 1 100%}.app .actions{order:2;flex:1 1 100%;justify-content:flex-start}
+  .app .sub{order:1;flex-basis:100%;margin:0;font-size:.86rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .app h1{font-size:1.35rem}
+  .actions .btn{min-height:34px;padding:4px 9px;font-size:.92rem}
+  .simb{font-size:.74rem;padding:2px 6px}
+}
 </style>
 </head>
 <body>
@@ -225,6 +231,14 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div class="stat"><span>Fish on</span><strong id="sFish">–</strong></div>
       <div class="stat"><span>LoRa mesh</span><strong id="sLora">–</strong></div>
       <div class="stat"><span>Wi-Fi</span><strong id="sWifi">–</strong></div>
+    </div>
+    <div class="card pmap" id="pmapCard">
+      <div class="pmhd"><h2 style="margin:0">Pocket map</h2>
+        <div class="btnrow"><button class="btn small" id="pmEdit" type="button" aria-pressed="false">Place holes</button><button class="btn small" id="pmRemove" type="button" hidden>Remove from map</button></div></div>
+      <canvas id="pmap" aria-label="Top view of the holes around the chalet: depth shading and bottom type"></canvas>
+      <div class="pmlegend"><span><i class="sw" style="background:#9ED3D9"></i>shallow</span><span><i class="sw" style="background:#15404C"></i>deep</span><span><i class="sw" style="background:#C9A25C"></i>hard</span><span><i class="sw" style="background:#A89A6A"></i>medium</span><span><i class="sw" style="background:#7E8A5A"></i>soft</span><span><i class="sw" style="background:var(--alert)"></i>fish on</span></div>
+      <p class="hint" id="pmHint" style="margin:6px 0 0"></p>
+      <div class="pmchips" id="pmChips"></div>
     </div>
     <label class="hint" style="display:flex;gap:8px;align-items:center;margin:0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
     <div class="ngrid" id="ngrid"></div>
@@ -944,6 +958,7 @@ function renderNodes() {
   });
   $('ngrid').innerHTML = h || '<p class="empty">No hole heard yet.</p>';
   drawGlances();
+  if (!pm.drag) drawPmap();
 }
 
 /* ---------- Sonar at a glance: last ~3 min of every hole (summaries every 2 s) ---------- */
@@ -962,6 +977,91 @@ function loadGlance() {
 }
 function cssVar(n, f) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || f; }
 // v2 (D42) depth scale of the hole cards: same auto scale for all, each hole its own auto scale, or fixed
+/* ---------- Pocket map (D51): holes placed by hand around the chalet, depth shading between them ---------- */
+const pm = { edit: false, sel: null, drag: null, view: null };
+const PM_FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
+function pmFit(cv) { const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr)); if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } return { w, h, dpr }; }
+const pmClamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const pmC = $('pmap'), pmX = pmC.getContext('2d');
+const PM_DEEP = [[0.0, [158, 211, 217]], [0.5, [60, 135, 150]], [1.0, [21, 64, 76]]];
+function pmColor(t) { t = pmClamp(t, 0, 1); let a = PM_DEEP[0], b = PM_DEEP[PM_DEEP.length - 1]; for (let i = 1; i < PM_DEEP.length; i++) if (t <= PM_DEEP[i][0]) { a = PM_DEEP[i - 1]; b = PM_DEEP[i]; break; } const u = (t - a[0]) / (b[0] - a[0] || 1); return a[1].map((c, k) => Math.round(c + (b[1][k] - c) * u)); }
+function pmHoles() {
+  const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {}; (L.nodes || []).forEach(x => { sonar[x.node] = x; });
+  return (st && st.nodes || []).map(n => { const s = sonar[n.id]; return { id: n.id, name: nodeName(n), x: n.px, y: n.py, placed: n.px != null, fish: !!n.fish && n.online !== false, off: n.online === false,
+    depth: s && s.bottom < 2047 ? s.bottom / 100 : null, hard: s ? s.hard : 3 }; });
+}
+function pmView(w, h, holes) {
+  const pts = holes.filter(x => x.placed).map(x => [x.x, x.y]).concat([[0, 0]]);
+  let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0])), y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, span = Math.max(x1 - x0, y1 - y0, 40) * 1.3;
+  const k = Math.min(w, h) / span;   // px per metre, same both axes; y up = north
+  return { k, cx, cy, w, h, toPx: (x, y) => [w / 2 + (x - cx) * k, h / 2 - (y - cy) * k], toM: (px, py) => [cx + (px - w / 2) / k, cy - (py - h / 2) / k] };
+}
+function drawPmap() {
+  if (tab !== 'holes') return;
+  const { w, h, dpr } = pmFit(pmC), g = pmX, holes = pmHoles(), v = pmView(w, h, holes); pm.view = v;
+  const fmt = SON() ? SON().fmtD : m => m.toFixed(1) + ' m';
+  g.clearRect(0, 0, w, h);
+  const known = holes.filter(x => x.placed && x.depth != null);
+  if (known.length) {   // inverse-distance depth field, faded away from the holes (no guessing far out)
+    const ds = known.map(x => x.depth), dmin = Math.min(...ds), dmax = Math.max(...ds), rng = Math.max(dmax - dmin, 1);
+    const cell = 6 * dpr, reach = Math.max(25, v.k ? 0 : 0) ;
+    const img = g.createImageData(Math.ceil(w / cell), Math.ceil(h / cell)), d = img.data;
+    for (let j = 0; j < img.height; j++) for (let i = 0; i < img.width; i++) {
+      const [mx, my] = v.toM((i + 0.5) * cell, (j + 0.5) * cell);
+      let sw = 0, sv = 0, near = 1e9;
+      for (const hh of known) { const dd = Math.hypot(hh.x - mx, hh.y - my); near = Math.min(near, dd); const wgt = 1 / (dd * dd + 4); sw += wgt; sv += wgt * hh.depth; }
+      const t = ((sv / sw) - dmin) / rng, c = pmColor(t), a = pmClamp(1 - (near - 12) / 25, 0, 1);   // solid within 12 m of a hole, gone past ~37 m
+      const o = (j * img.width + i) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = Math.round(a * 230);
+    }
+    const tmp = document.createElement('canvas'); tmp.width = img.width; tmp.height = img.height; tmp.getContext('2d').putImageData(img, 0, 0);
+    g.imageSmoothingEnabled = true; g.drawImage(tmp, 0, 0, w, h);
+    // contour-ish: label the field every 1 m / 5 ft is overkill at this density; depth labels sit on the holes instead
+  }
+  // grid every 10 m
+  g.strokeStyle = 'rgba(19,38,45,0.08)'; g.lineWidth = 1 * dpr;
+  const step = v.k * 10; if (step > 12 * dpr) { const [ox, oy] = v.toPx(0, 0); for (let x = ox % step; x < w; x += step) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); } for (let y = oy % step; y < h; y += step) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); } }
+  g.fillStyle = 'rgba(19,38,45,0.5)'; g.font = `${10 * dpr}px ${PM_FONT}`; g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('N ↑  grid 10 m', 6 * dpr, 4 * dpr);
+  // chalet
+  { const [x, y] = v.toPx(0, 0); g.fillStyle = '#13262D'; g.beginPath(); g.moveTo(x, y - 9 * dpr); g.lineTo(x + 8 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y - 1 * dpr); g.lineTo(x - 8 * dpr, y - 1 * dpr); g.closePath(); g.fill();
+    g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'top'; g.fillText('chalet', x, y + 9 * dpr); }
+  // holes
+  const HC = ['#C9A25C', '#A89A6A', '#7E8A5A', '#86A2AB'];
+  for (const hh of holes) {
+    if (!hh.placed) continue;
+    const [x, y] = v.toPx(hh.x, hh.y), r = (hh.id === pm.sel ? 11 : 9) * dpr;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fillStyle = hh.fish ? '#C2412D' : hh.off ? '#B8C6CA' : '#FFFFFF'; g.fill();
+    g.lineWidth = 3 * dpr; g.strokeStyle = hh.depth != null ? HC[hh.hard] || HC[3] : '#86A2AB'; g.stroke();
+    if (hh.id === pm.sel) { g.lineWidth = 2 * dpr; g.strokeStyle = '#1C6C77'; g.beginPath(); g.arc(x, y, r + 4 * dpr, 0, Math.PI * 2); g.stroke(); }
+    g.fillStyle = '#13262D'; g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'bottom'; g.fillText(hh.name, x, y - r - 2 * dpr);
+    if (hh.depth != null) { g.font = `${10 * dpr}px ${PM_FONT}`; g.textBaseline = 'top'; g.fillStyle = '#13262D'; g.fillText(fmt(hh.depth), x, y + r + 2 * dpr); }
+  }
+  // chips: unplaced holes (edit mode) and the hint
+  const un = holes.filter(x => !x.placed);
+  $('pmChips').innerHTML = pm.edit ? un.map(x => `<button class="btn" type="button" data-pm="${x.id}" aria-pressed="${pm.sel === x.id}">${esc(x.name)}</button>`).join('') : '';
+  $('pmRemove').hidden = !(pm.edit && pm.sel != null && holes.find(x => x.id === pm.sel && x.placed));
+  $('pmHint').textContent = pm.edit ? (pm.sel != null && !holes.find(x => x.id === pm.sel && x.placed) ? 'Tap the map where this hole is.' : 'Tap a hole name, then the map; drag a hole to move it. Distances are from the chalet, north up: pace them or use the phone map.') :
+    (un.length ? `${un.length} hole${un.length > 1 ? 's' : ''} not on the map yet: Place holes.` : (known.length < 3 ? 'Depth shading needs 3 holes with a sonar bottom.' : ''));
+}
+function pmHit(px, py) { const v = pm.view; if (!v) return null; let best = null, bd = 18 * (window.devicePixelRatio || 1); for (const hh of pmHoles()) { if (!hh.placed) continue; const [x, y] = v.toPx(hh.x, hh.y), d = Math.hypot(x - px, y - py); if (d < bd) { bd = d; best = hh; } } return best; }
+function pmEvt(e) { const r = pmC.getBoundingClientRect(), dpr = window.devicePixelRatio || 1; return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr]; }
+function pmPost(id, x, y) { fetch('/api/node/pos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(x == null ? { nodeId: id } : { nodeId: id, x: +x.toFixed(1), y: +y.toFixed(1) }) }).then(() => loadStatus()).catch(() => {}); }
+pmC.addEventListener('pointerdown', e => {
+  if (!pm.edit) { const hh = pmHit(...pmEvt(e)); if (hh) { pm.sel = hh.id; drawPmap(); } return; }
+  const [px, py] = pmEvt(e), hh = pmHit(px, py);
+  if (hh) { pm.sel = hh.id; pm.drag = { id: hh.id, moved: false }; pmC.setPointerCapture(e.pointerId); drawPmap(); return; }
+  if (pm.sel != null && !pmHoles().find(x => x.id === pm.sel && x.placed)) { const [mx, my] = pm.view.toM(px, py); pmPost(pm.sel, mx, my); pm.sel = null; }
+});
+pmC.addEventListener('pointermove', e => {
+  if (!pm.drag) return; const [px, py] = pmEvt(e), [mx, my] = pm.view.toM(px, py);
+  const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n) { n.px = mx; n.py = my; pm.drag.moved = true; drawPmap(); }
+});
+pmC.addEventListener('pointerup', e => { if (!pm.drag) return; const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n && pm.drag.moved) pmPost(n.id, n.px, n.py); pm.drag = null; });
+$('pmEdit').addEventListener('click', () => { pm.edit = !pm.edit; pm.sel = null; $('pmEdit').setAttribute('aria-pressed', String(pm.edit)); $('pmEdit').classList.toggle('on', pm.edit); $('pmEdit').textContent = pm.edit ? 'Done' : 'Place holes'; drawPmap(); });
+$('pmRemove').addEventListener('click', () => { if (pm.sel != null) { pmPost(pm.sel, null); pm.sel = null; } });
+$('pmChips').addEventListener('click', e => { const b = e.target.closest('[data-pm]'); if (b) { pm.sel = pm.sel === +b.dataset.pm ? null : +b.dataset.pm; drawPmap(); } });
+new ResizeObserver(() => drawPmap()).observe(pmC);
+
 let glScale = 'common', glUnitKey = '';
 try { glScale = localStorage.getItem('glScale') || 'common'; } catch (e) { /* private mode */ }
 function fillGlScale() {

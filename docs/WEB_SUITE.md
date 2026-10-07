@@ -41,3 +41,12 @@ Channels are shown 1-8 to the user (1 = 915.0 MHz) and are 0-7 in the API and co
   SIM badge on holes running a simulation.
 - Settings → Test & simulation (`GET/POST /api/sim`): everything on/off, test holes on the hubs, fake-fish rate, and per
   hole fake sonar / fake fish switches with the reported SIM state.
+
+## Pocket map (D51, 2026-10-07)
+Holes tab, above the cards: a top view with the chalet at the centre, north up, grid 10 m. "Place holes": tap a
+hole name, then the map where it is; drag to move; "Remove from map". Positions are metres from the chalet
+(x east, y north), kept on the chalet (NVS "pos", `POST /api/node/pos {nodeId, x, y}`, `px`/`py` in
+`/api/status`), so every phone sees the same map. Between holes that have a sonar bottom the water is shaded by
+depth (inverse-distance weighting, solid within 12 m of a hole, fading out by ~37 m: no guessing far from the
+data); the ring colour is the bottom type; red fill = FISH ON; grey = offline. One transducer measures one cone:
+this map is as detailed as the number of holes, not more.

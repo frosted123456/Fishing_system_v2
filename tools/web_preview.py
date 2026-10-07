@@ -31,7 +31,7 @@ state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "s
          "transport": 0, "ch_setting": "auto", "ch": 0, "moves": 0, "relay_req": {}, "lr_only": False,
          "settings": {"buzzerEnabled": True, "alertHoldSec": 30, "heartbeatSec": 60, "reedActiveHigh": True,
                       "alarmHoldMin": 0, "nearBaitBeep": False, "unitsMetric": False, "buzzerPassive": False},
-         "bait": {3: 457}, "knobs": None, "trips": []}
+         "bait": {3: 457}, "knobs": None, "trips": [], "pos": {2: (-18.0, 42.0), 3: (14.0, 55.0), 4: (31.0, 30.0), 136: (-40.0, 70.0), 137: (-12.0, 88.0)}}
 # the same knob table as lib/IceMesh/src/sonar_params.h (key, name, lo, hi, def, unit)
 KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contrast", 1, 15, 5, "dB"),
          ("confirm", "Confirm pings", 1, 10, 3, ""), ("keep", "Keep without echo", 1, 20, 5, "pings"),
@@ -86,6 +86,7 @@ def status():
     for n in nodes:
         n["name"] = state["names"].get(n["id"], "")
         n["line"] = n["fish"]; n["bait"] = state["bait"].get(n["id"], 0)
+        if n["id"] in state["pos"]: n["px"], n["py"] = state["pos"][n["id"]]
         n["sim"] = state["simreq"].get(n["id"], 0) != 0 or n["id"] >= 128
     if state["silenced"] and time.time() > state["sil_until"]:
         state["silenced"] = False
@@ -219,6 +220,11 @@ class H(BaseHTTPRequestHandler):
                 if p: state["knobs"].update(dict(zip(("snr", "prom", "confirm", "keep"), p)))
             if b.get("defaults"): state["knobs"] = {k[0]: k[4] for k in KNOBS}
             return self.send(200, json.dumps(knobs_json()))
+        if u.path == "/api/node/pos":
+            nid = int(b.get("nodeId", 0))
+            if "x" in b and "y" in b: state["pos"][nid] = (float(b["x"]), float(b["y"]))
+            else: state["pos"].pop(nid, None)
+            return self.send(200, '{"ok":true}')
         if u.path == "/api/node/bait":
             state["bait"][int(b.get("nodeId", 0))] = int(b.get("cm", 0)); return self.send(200, '{"success":true}')
         self.send(404, "{}")

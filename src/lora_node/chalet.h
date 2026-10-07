@@ -426,6 +426,13 @@ void sonarKnobsNewHubs();
 // v2 (D43) bait depth per hole, 5 cm steps (0 = not set: the processing keeps its default)
 extern uint8_t baitCm5[256];
 extern uint16_t baitGen;
+// v2 (D51) hole positions on the pocket map (chalet, NVS "pos"): metres from the chalet, x east, y north,
+// in decimetres; POS_UNSET = not placed yet
+static const int16_t POS_UNSET = 0x7FFF;
+extern int16_t holePosDm[256][2];
+void posLoad();
+void posSet(uint8_t hole, int16_t x_dm, int16_t y_dm);   // POS_UNSET, POS_UNSET = remove from the map
+void handleWebApiNodePos();
 void baitLoad();
 void baitToSource(icemesh::sonar::SonarSource* src, uint8_t id);   // hub: this hole's bait depth into its fake sonar
 void baitSet(uint8_t hole, uint8_t v5);      // chalet: save + send (CMD_SET_BAIT) + demo

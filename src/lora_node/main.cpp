@@ -25,6 +25,7 @@ uint32_t sonarTickUsMax = 0, sonarTickUsSum = 0, sonarTickCount = 0;   // hub: C
 uint32_t sonarPrmChangedMs = 0;   // hub: when the knobs last changed (sonar control repeats them for 1 min)
 uint16_t sonarPrmGen = 0;         // bumps on every change: local fake sonars re-apply
 uint8_t baitCm5[256];
+int16_t holePosDm[256][2];
 uint16_t baitGen = 0;
 uint32_t buttonHeldMs = 0;            // > 0 while the button is held (display shows the hold bar)
 uint32_t connectInfoUntil = 0;        // show the "how to connect" screen until then
@@ -166,6 +167,7 @@ void setup() {
   loadSettings();
   sonarKnobsLoad();
   baitLoad();
+  posLoad();
   
   // BUG FIX #8: Initialize self-node completely at startup
   // Previously missing: last_seen, last_uptime, last_seq, initialized

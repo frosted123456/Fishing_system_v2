@@ -76,6 +76,20 @@ void baitLoad() {
   baitGen++;
 }
 
+// v2 (D51) positions on the pocket map
+void posLoad() {
+  for (int i = 0; i < 256; i++) holePosDm[i][0] = holePosDm[i][1] = POS_UNSET;
+  Preferences p; p.begin("pos", true);
+  p.getBytes("p", holePosDm, sizeof(holePosDm));
+  p.end();
+}
+void posSet(uint8_t hole, int16_t x_dm, int16_t y_dm) {
+  if (hole == 0 || hole == 255) return;
+  if (holePosDm[hole][0] == x_dm && holePosDm[hole][1] == y_dm) return;
+  holePosDm[hole][0] = x_dm; holePosDm[hole][1] = y_dm;
+  Preferences p; p.begin("pos", false); p.putBytes("p", holePosDm, sizeof(holePosDm)); p.end();
+}
+
 static bool myTestHole(uint8_t id) {   // hub: its own hole or one of its virtual test holes
   if (id == NODE_ID) return true;
   for (uint8_t k = 0; k < 8; k++) if (meshSonarVirtualId(NODE_ID, k) == id) return true;
