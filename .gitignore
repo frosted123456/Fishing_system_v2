@@ -13,3 +13,6 @@ Thumbs.db
 __pycache__/
 # credentials (see src/lora_node/secrets.example.h)
 src/lora_node/secrets.h
+# review scratch copies and duplicate downloads
+.review/
+*-1.png
