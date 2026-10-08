@@ -1,0 +1,1813 @@
+diff --git a/lib/IceMesh/src/chalet_nodes.h b/lib/IceMesh/src/chalet_nodes.h
+index 7738e99..909e4eb 100644
+--- a/lib/IceMesh/src/chalet_nodes.h
++++ b/lib/IceMesh/src/chalet_nodes.h
+@@ -79,6 +79,13 @@ class ChaletNodes {
+   }
+   const NodeView* at(uint8_t i) const { return (i < MAX_NODES && v_[i].used) ? &v_[i] : nullptr; }
+   static uint8_t capacity() { return MAX_NODES; }
++  // Drops a node from the table (demo network switched off). Returns false if it was not there.
++  bool forget(uint8_t node) {
++    NodeView* v = findMut(node);
++    if (v == nullptr) return false;
++    v->used = false;
++    return true;
++  }
+ 
+  private:
+   NodeView* findMut(uint8_t node) {
+diff --git a/src/lora_node/main.cpp b/src/lora_node/main.cpp
+index 6a27264..7724b56 100644
+--- a/src/lora_node/main.cpp
++++ b/src/lora_node/main.cpp
+@@ -113,8 +113,20 @@
+ // HARDWARE OBJECTS
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+-// Use software I2C for reliable custom pin operation on Heltec V3
++// v2: hardware I2C for the OLED (v1 used software I2C: one full screen took tens of ms of bit-banging
++// in loop(), 5 times a second, which slowed the web page). Set OLED_HW_I2C to 0 to go back to software
++// I2C if a board shows a blank screen. OLED_I2C_HZ: 400 kHz = SSD1306 fast mode (spec).
++#ifndef OLED_HW_I2C
++#define OLED_HW_I2C 1
++#endif
++#ifndef OLED_I2C_HZ
++#define OLED_I2C_HZ 400000UL
++#endif
++#if OLED_HW_I2C
++U8G2_SSD1306_128X64_NONAME_F_HW_I2C display(U8G2_R0, OLED_RST, OLED_SCL, OLED_SDA);
++#else
+ U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(U8G2_R0, OLED_SCL, OLED_SDA, OLED_RST);
++#endif
+ // LoRa radio (SX1262) is owned by mesh_radio.cpp (TDMA radio task)
+ WebServer server(WEB_SERVER_PORT);
+ Preferences preferences;
+@@ -338,6 +350,7 @@ void readBattery();
+ // Display sleep/wake functions
+ void wakeDisplay();
+ void sleepDisplay();
++extern bool scrDirty;
+ void registerActivity();
+ 
+ void loopLocalSensor();
+@@ -346,7 +359,10 @@ static void scrDraw();
+ static void apName(char* out, size_t n);
+ void drawRadioTest();
+ static void scrStep(int dir);
+-static void scrAction();
++static void scrAction(bool kb = false);
++void loopOptions();
++static void optBuild(ScrOptions* o);
++static void menuBuild(ScrOptions* o);
+ void loopWebServer();
+ void loopBuzzer();
+ void loopNodeTimeout();
+@@ -375,6 +391,7 @@ static void devCmdQueue(uint8_t node, uint8_t cmd, uint8_t value);
+ static void relayRequest(uint8_t dev, bool on);
+ void simRequest(uint8_t node, bool sonar, bool hall);
+ void simAll(bool on);
++void demoSet(uint8_t hubs, uint8_t holes);
+ bool simAnyOn();
+ static inline uint8_t simValueOf(bool sonar, bool hall, uint8_t tph) {
+   return static_cast<uint8_t>((sonar ? MESH_SIM_SONAR : 0) | (hall ? MESH_SIM_HALL : 0) | ((tph > 63 ? 63 : tph) << 2));
+@@ -508,6 +525,7 @@ void setup() {
+   Serial.printf("Node Name:   %s\n", NODE_NAME);
+   Serial.printf("Role:        %s\n", getRoleName(currentRole));
+   Serial.printf("Network ID:  0x%02X\n", NETWORK_ID);
++  Serial.printf("Firmware:    v2, built %s %s\n", __DATE__, __TIME__);
+   Serial.println();
+ 
+   // BUG FIX #8: Enable hardware watchdog timer (30 second timeout)
+@@ -612,9 +630,12 @@ void setup() {
+ 
+   // Startup display
+   display.clearBuffer();
++  display.setFont(u8g2_font_6x12_tr);
++  display.drawStr(0, 11, "Ice Fishing v2");
+   display.setFont(u8g2_font_6x10_tr);
+-  display.drawStr(10, 30, "READY");
+-  display.drawStr(10, 45, getRoleName(currentRole));
++  display.drawStr(0, 27, currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet (offshore)" :
++                         currentRole == ROLE_GATEWAY_ONSHORE ? "Hub (on the ice)" : getRoleName(currentRole));
++  display.drawStr(0, 60, cardKbAvailable ? "Ready - Esc = menu" : "Ready");
+   display.sendBuffer();
+   
+   triggerBuzzer(1);
+@@ -627,7 +648,31 @@ void setup() {
+ // MAIN LOOP
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
++// v2 loop timing (serial PERF): where loop() spends its time, to find what makes the page or screen slow
++enum PerfSlot : uint8_t { PF_LOOP = 0, PF_DISPLAY, PF_WEB, PF_DEMO, PF_MESH, PF_COUNT };
++struct PerfAcc { uint32_t sum_us, max_us, n; };
++static PerfAcc perfAcc[PF_COUNT];
++static uint32_t perfSince = 0;
++struct PerfScope {
++  uint8_t i; uint32_t t0;
++  explicit PerfScope(uint8_t k) : i(k), t0(micros()) {}
++  ~PerfScope() { const uint32_t d = micros() - t0; PerfAcc& a = perfAcc[i]; a.sum_us += d; if (d > a.max_us) a.max_us = d; a.n++; }
++};
++void perfPrint() {
++  static const char* const NAMES[PF_COUNT] = {"loop", "display", "web", "demo", "mesh"};
++  const uint32_t ms = millis() - perfSince;
++  Serial.printf("Loop timing over %lu s (avg / max per call, share of time):\n", (unsigned long)(ms / 1000));
++  for (uint8_t i = 0; i < PF_COUNT; i++) {
++    const PerfAcc& a = perfAcc[i];
++    Serial.printf("  %-8s %6lu calls  %7.2f ms / %7.2f ms  %5.1f %%\n", NAMES[i], (unsigned long)a.n,
++                  a.n ? a.sum_us / 1000.0f / a.n : 0.0f, a.max_us / 1000.0f, ms ? a.sum_us / 10.0f / ms : 0.0f);
++  }
++  Serial.printf("  free heap %u B, min %u B\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
++  memset(perfAcc, 0, sizeof(perfAcc)); perfSince = millis();
++}
++
+ void loop() {
++  PerfScope perfLoop(PF_LOOP);
+   // BUG FIX #8: Feed hardware watchdog to prevent reset
+   esp_task_wdt_reset();
+ 
+@@ -645,12 +690,13 @@ void loop() {
+   // Handle keyboard input
+   loopCardKB();
+   loopButton();  // Handle PRG button for silencing
++  loopOptions(); // v2: Wi-Fi scan started from Options > Wi-Fi
+ 
+   // ESP-NOW frames queued by the Wi-Fi task callback (C9)
+   if (espNowReady) loopEspNowRx();
+ 
+   // v2: TDMA mesh <-> node table, silence, commands, counters (the radio runs in its own task)
+-  meshLoop();
++  { PerfScope p(PF_MESH); meshLoop(); }
+ 
+   // Check for auto-unsilence timeout
+   loopAutoUnsilence();
+@@ -693,7 +739,8 @@ void loop() {
+       break;
+ 
+     case ROLE_GATEWAY_OFFSHORE:
+-      if (settings.webServerEnabled) loopWebServer();
++      { PerfScope p(PF_DEMO); meshDemoTick(); }   // v2: demo network (fake hubs inside this box), when on
++      if (settings.webServerEnabled) { PerfScope p(PF_WEB); loopWebServer(); }
+       checkWiFiStatus();
+       checkSerialWifiConfig();
+ 
+@@ -726,7 +773,7 @@ void loop() {
+   }
+   
+   // Display current screen
+-  loopDisplay();
++  { PerfScope p(PF_DISPLAY); loopDisplay(); }
+   loopBuzzer();
+   loopNodeTimeout();
+ 
+@@ -753,11 +800,23 @@ void setupDisplay() {
+   digitalWrite(VEXT_PIN, LOW);  // LOW = power ON
+   delay(100);  // Let power stabilize
+ 
+-  // Initialize display (software I2C handles pins internally)
++  // Initialize display (I2C pins from the constructor; hardware I2C: bus clock first)
++#if OLED_HW_I2C
++  display.setBusClock(OLED_I2C_HZ);
++#endif
+   display.begin();
+-  display.setFont(u8g2_font_6x10_tr);
++  // v2 boot screen: firmware generation, role and build date, so the board says what it runs
+   display.clearBuffer();
+-  display.drawStr(10, 30, "Starting...");
++  display.setFont(u8g2_font_6x12_tr);
++  display.drawStr(0, 11, "Ice Fishing v2");
++  display.setFont(u8g2_font_6x10_tr);
++  display.drawStr(0, 27, currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet (offshore)" :
++                         currentRole == ROLE_GATEWAY_ONSHORE ? "Hub (on the ice)" : getRoleName(currentRole));
++  {
++    char b[32]; snprintf(b, sizeof(b), "built %.6s %.5s", __DATE__, __TIME__);
++    display.drawStr(0, 41, b);
++  }
++  display.drawStr(0, 60, "Starting...");
+   display.sendBuffer();
+ 
+   DEBUG_PRINTLN(F("Display ready"));
+@@ -765,6 +824,7 @@ void setupDisplay() {
+ 
+ void wakeDisplay() {
+   if (!displaySleeping) return;
++  scrDirty = true;
+ 
+   DEBUG_PRINTLN(F("Waking display..."));
+ 
+@@ -853,6 +913,7 @@ void drawCurrentScreen() {
+  * Used for: "Saved!", "Sent!", "Silenced", etc.
+  */
+ void showOverlayMessage(const char* message, uint16_t delayMs) {
++  scrDirty = true;
+   display.clearBuffer();
+   display.setFont(u8g2_font_6x10_tr);
+ 
+@@ -1815,7 +1876,7 @@ void setupEbChalet() {
+   esp_now_register_recv_cb(onEspNowRecv);
+   esp_now_peer_info_t peer = {};
+   memcpy(peer.peer_addr, ESPNOW_BROADCAST, 6);
+-  peer.channel = ESPNOW_CHANNEL;
++  peer.channel = 0;   // v2: 0 = the current Wi-Fi channel (the router's when the chalet joined one)
+   peer.ifidx = ebIf;
+   peer.encrypt = false;
+   if (esp_now_add_peer(&peer) != ESP_OK) { Serial.println(F("Backbone: broadcast peer failed")); return; }
+@@ -1887,6 +1948,8 @@ static uint8_t simRequested(uint8_t node) {
+ 
+ void simRequest(uint8_t node, bool sonar, bool hall) {
+   const uint8_t v = (sonar || hall) ? simValueOf(sonar, hall, simRate) : 0;
++  if (node == 255) meshDemoSetSim(255, v);                              // demo holes: at once (they live here)
++  else if (meshDemoSim(node) != 0xFF) { meshDemoSetSim(node, v); return; }
+   if (node == 255) {
+     chSimAllSet = true; chSimAllValue = v;
+     memset(simReqs, 0, sizeof(simReqs));
+@@ -1906,6 +1969,23 @@ void simAll(bool on) {
+   simRequest(255, on, on);
+ }
+ 
++// v2 demo network (chalet): fake hubs + holes inside this box (mesh_radio.cpp meshDemo*). Turning it
++// off or smaller removes the demo holes from the tables, so no offline ghosts stay on the pages.
++void demoSet(uint8_t hubs, uint8_t holes) {
++  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
++  meshDemoSet(hubs, holes);
++  int w = 1;
++  for (int i = 1; i < network.node_count; i++) {
++    const NodeState& n = network.nodes[i];
++    const bool gone = meshDemoNode(n.node_id) && meshDemoSim(n.node_id) == 0xFF;
++    if (!gone) { if (w != i) network.nodes[w] = network.nodes[i]; w++; }
++  }
++  for (int i = w; i < network.node_count; i++) memset(&network.nodes[i], 0, sizeof(NodeState));
++  network.node_count = w;
++  updateAlertState();
++  Serial.printf("Demo network: %u hub(s) x %u hole(s)%s\n", meshDemoHubs(), meshDemoHoles(), meshDemoHubs() ? "" : " - off");
++}
++
+ bool simAnyOn() {
+   if (settings.sonarSim) return true;
+   for (int i = 1; i < network.node_count; i++) if (HAS_FLAG(network.nodes[i].flags, FLAG_SIM)) return true;
+@@ -2649,23 +2729,26 @@ void loopBuzzer() {
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+ void loadWifiCredentials() {
+-  preferences.begin("wifi", true);  // Read-only
+-  
++  // v2: the Wi-Fi written in config.h wins once after it is changed and flashed (before: a network
++  // saved earlier from the web page / serial / OLED always won, so a new config.h was silently ignored).
++  // Afterwards the OLED / web page / serial can change it again; "Forget network" saves an empty one.
++  uint32_t h = 2166136261u;   // FNV-1a of the config.h name + password
++  for (const char* c = STA_SSID "\x1f" STA_PASSWORD; *c; c++) { h ^= (uint8_t)*c; h *= 16777619u; }
++  preferences.begin("wifi", false);
++  if (preferences.getUInt("cfgHash", 0) != h) {
++    preferences.putString("ssid", STA_SSID);
++    preferences.putString("pass", STA_PASSWORD);
++    preferences.putUInt("cfgHash", h);
++    Serial.printf("Wi-Fi: config.h network changed -> using %s\n", STA_SSID);
++  }
+   String ssid = preferences.getString("ssid", "");
+   String pass = preferences.getString("pass", "");
+-  
+   preferences.end();
+-  
+-  if (ssid.length() > 0) {
+-    strncpy(storedSsid, ssid.c_str(), sizeof(storedSsid) - 1);
+-    strncpy(storedPassword, pass.c_str(), sizeof(storedPassword) - 1);
+-    DEBUG_PRINTF("Loaded WiFi credentials: %s\n", storedSsid);
+-  } else {
+-    // Use defaults from config.h
+-    strncpy(storedSsid, STA_SSID, sizeof(storedSsid) - 1);
+-    strncpy(storedPassword, STA_PASSWORD, sizeof(storedPassword) - 1);
+-    DEBUG_PRINTLN(F("Using default WiFi credentials from config"));
+-  }
++
++  memset(storedSsid, 0, sizeof(storedSsid)); memset(storedPassword, 0, sizeof(storedPassword));
++  strncpy(storedSsid, ssid.c_str(), sizeof(storedSsid) - 1);
++  strncpy(storedPassword, pass.c_str(), sizeof(storedPassword) - 1);
++  Serial.printf("Wi-Fi: cabin network %s\n", storedSsid[0] ? storedSsid : "(none)");
+ }
+ 
+ void saveWifiCredentials(const char* ssid, const char* password) {
+@@ -2821,6 +2904,13 @@ void checkSerialWifiConfig() {
+     else if (a == "ON") hubHotspotOn();
+     else if (a == "OFF") hubHotspotOff();
+     else Serial.printf("Hotspot %s. Usage: HOTSPOT ON|OFF\n", wifiApActive ? "ON" : "off");
++  } else if (line.startsWith("DEMO")) {
++    // v2 demo network (chalet): DEMO <hubs 0-4> [holes 1-4] | DEMO OFF
++    String a = line.substring(4); a.trim(); a.toUpperCase();
++    if (currentRole != ROLE_GATEWAY_OFFSHORE) Serial.println(F("The demo network runs on the chalet"));
++    else if (a == "OFF" || a == "0") demoSet(0, 3);
++    else if (a.toInt() >= 1 && a.toInt() <= 4) { const int sp = a.indexOf(' '); demoSet((uint8_t)a.toInt(), sp > 0 ? (uint8_t)a.substring(sp + 1).toInt() : 3); }
++    else Serial.printf("Demo network: %u hub(s) x %u hole(s). Usage: DEMO <1-4> [holes 1-4] | DEMO OFF\n", meshDemoHubs(), meshDemoHoles());
+   } else if (line.startsWith("SIM")) {
+     // v2 simulation (chalet): SIM ALL ON|OFF, SIM <hole> SONAR|HALL|BOTH|OFF, SIM RATE <trips/hour>, SIM
+     String a = line.substring(3); a.trim(); a.toUpperCase();
+@@ -2853,6 +2943,8 @@ void checkSerialWifiConfig() {
+     } else {
+       Serial.println(F("Usage (chalet only): EBMODE NORMAL|LR  (reboot; LR removes the phone hotspot)"));
+     }
++  } else if (line == "PERF") {
++    perfPrint();   // v2: loop timing since the last PERF
+   } else if (line == "RADIO") {
+     meshPrintStatus(Serial);
+   } else if (line == "RADIO RESET") {
+@@ -2866,6 +2958,83 @@ void checkSerialWifiConfig() {
+   }
+ }
+ 
++// =============================================================================================
++// v2 CABIN WI-FI (chalet): why it is not connected, retry, join from the OLED (Options > Wi-Fi)
++//   - the reason of the last drop/failure is kept (ESP-IDF wifi_err_reason_t) and shown as words
++//   - if the router was not there at boot, retry after 2 min, then 4, 8 ... 30 min. Each try scans
++//     the channels for ~1-2 s (phones on the hotspot and ESP-NOW may miss that moment), hence the back-off
++//   - joining a network from the OLED saves it (same NVS keys as the web page / serial WIFI:) and
++//     connects without a reboot
++// =============================================================================================
++static const uint32_t STA_RETRY_FIRST_MS = 2UL * 60UL * 1000UL, STA_RETRY_MAX_MS = 30UL * 60UL * 1000UL;
++static volatile uint8_t staReason = 0;        // last disconnect reason, 0 = none yet
++static uint32_t staTryAt = 0;                 // millis() of the last WiFi.begin from here
++static uint32_t staNextTry = 0, staBackoffMs = STA_RETRY_FIRST_MS;
++static bool wifiScanBusy = false;
++
++static void onStaDisconnected(arduino_event_id_t, arduino_event_info_t info) {
++  const uint8_t r = info.wifi_sta_disconnected.reason;
++  if (r != 8) staReason = r;   // 8 = ASSOC_LEAVE: our own WiFi.disconnect(), keeps the real reason
++}
++
++static bool staWanted() {
++  return currentRole == ROLE_GATEWAY_OFFSHORE && storedSsid[0] && settings.wifiModeSetting != 0;
++}
++
++static void staBegin() {
++  staReason = 0;
++  staTryAt = millis(); if (staTryAt == 0) staTryAt = 1;
++  WiFi.begin(storedSsid, storedPassword);
++  Serial.printf("Wi-Fi: trying %s\n", storedSsid);
++}
++
++// called every 5 s while not connected (checkWiFiStatus)
++static void staRetryTick() {
++  if (!staWanted() || wifiScanBusy) return;
++  const uint32_t now = millis();
++  if (staNextTry == 0 || static_cast<int32_t>(now - staNextTry) < 0) return;
++  staBegin();
++  staNextTry = now + staBackoffMs;
++  staBackoffMs = staBackoffMs * 2 > STA_RETRY_MAX_MS ? STA_RETRY_MAX_MS : staBackoffMs * 2;
++}
++
++void wifiRetryNow() {
++  if (!staWanted()) return;
++  staBackoffMs = STA_RETRY_FIRST_MS;
++  staNextTry = millis() + staBackoffMs;
++  staBegin();
++}
++
++void wifiJoin(const char* ssid, const char* pass) {
++  saveWifiCredentials(ssid, pass);
++  storedSsid[sizeof(storedSsid) - 1] = 0; storedPassword[sizeof(storedPassword) - 1] = 0;
++  if (settings.wifiModeSetting == 0) { settings.wifiModeSetting = 2; saveSettings(); }   // AP only would never join
++  if (WiFi.getMode() == WIFI_MODE_AP) WiFi.mode(WIFI_AP_STA);
++  wifiStaConnected = false; staIpAddress = "";
++  WiFi.disconnect(false);
++  wifiRetryNow();
++}
++
++void wifiForget() {
++  saveWifiCredentials("", "");
++  WiFi.disconnect(false);
++  wifiStaConnected = false; staIpAddress = ""; staReason = 0; staTryAt = 0;
++  Serial.println(F("Wi-Fi: cabin network forgotten (hotspot only)"));
++}
++
++// short words for the OLED
++void wifiStateText(char* out, size_t n) {
++  const uint8_t r = staReason;
++  if (!storedSsid[0]) snprintf(out, n, "none set");
++  else if (wifiStaConnected) snprintf(out, n, "connected");
++  else if (settings.wifiModeSetting == 0) snprintf(out, n, "off (AP only)");
++  else if (staTryAt && millis() - staTryAt < 15000 && r == 0) snprintf(out, n, "connecting...");
++  else if (r == 201) snprintf(out, n, "not found");                                         // NO_AP_FOUND
++  else if (r == 2 || r == 15 || r == 202 || r == 204) snprintf(out, n, "bad password?");  // AUTH_EXPIRE, 4WAY/HANDSHAKE timeout, AUTH_FAIL
++  else if (r == 0) snprintf(out, n, "not connected");
++  else snprintf(out, n, "failed (%u)", r);
++}
++
+ void setupWiFiAP() {
+   DEBUG_PRINTLN(F("Setting up WiFi..."));
+ 
+@@ -2887,6 +3056,8 @@ void setupWiFiAP() {
+ 
+   // Load credentials from NVS (or use defaults)
+   loadWifiCredentials();
++  // v2: keep why the cabin Wi-Fi fails or drops (OLED: not found / bad password?) - registered before the first try
++  WiFi.onEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+ 
+   char apSsid[32];
+   snprintf(apSsid, sizeof(apSsid), "%s-%s",
+@@ -2976,15 +3147,24 @@ void setupWiFiAP() {
+       break;
+   }
+   
++  staNextTry = millis() + STA_RETRY_FIRST_MS;   // v2: boot try done above, retries after 2 min (staRetryTick)
++
+   // Set channel for ESP-NOW compatibility
+   // CRITICAL: Wait for AP to stabilize, then force channel and verify
+   delay(100);  // Let AP stabilize
++  uint8_t primary;
++  wifi_second_chan_t secondary;
++  if (WiFi.status() == WL_CONNECTED) {
++    // v2: joined the cabin router - its channel wins. Forcing another channel here would fight the
++    // router link (ESP-IDF: do not set the channel while the station is connected). ESP-NOW follows it.
++    esp_wifi_get_channel(&primary, &secondary);
++    Serial.printf("Wi-Fi: on the cabin router, channel %u (hubs use %u for ESP-NOW; LoRa is not affected)\n", primary, ESPNOW_CHANNEL);
++    return;
++  }
+   esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+   delay(50);
+ 
+   // VERIFY channel alignment
+-  uint8_t primary;
+-  wifi_second_chan_t secondary;
+   esp_wifi_get_channel(&primary, &secondary);
+   DEBUG_PRINTF("WiFi channel verified: %d (expected: %d)\n", primary, ESPNOW_CHANNEL);
+ 
+@@ -3015,6 +3195,8 @@ void checkWiFiStatus() {
+       staIpAddress = "";
+       DEBUG_PRINTLN(F("STA disconnected"));
+     }
++    if (wifiStaConnected) staBackoffMs = STA_RETRY_FIRST_MS;
++    else staRetryTick();
+   }
+ }
+ 
+@@ -3029,6 +3211,13 @@ void verifyWiFiChannel() {
+ 
+   DEBUG_PRINTF("WiFi channel check: current=%d, expected=%d\n", primary, ESPNOW_CHANNEL);
+ 
++  if (primary != ESPNOW_CHANNEL && currentRole == ROLE_GATEWAY_OFFSHORE) {
++    // v2: the chalet keeps the router's channel (forcing it would fight the router link). LoRa is not
++    // affected; the ESP-NOW backup with the hubs needs the router on channel ESPNOW_CHANNEL.
++    Serial.printf("Wi-Fi: router on channel %u, hubs use %u - ESP-NOW backup with the hubs needs the router on %u\n",
++                  primary, ESPNOW_CHANNEL, ESPNOW_CHANNEL);
++    return;
++  }
+   if (primary != ESPNOW_CHANNEL) {
+     DEBUG_PRINTLN("WARNING: WiFi channel mismatch detected after STA connection!");
+ 
+@@ -3461,6 +3650,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
+       <h2>Test &amp; simulation</h2>
+       <div class="form">
+         <div class="btnrow"><button class="btn" type="button" id="simAllOn">Everything ON</button><button class="btn" type="button" id="simAllOff">Everything OFF</button></div>
++        <label class="f">Demo network on this box (no other hardware)<select id="simDemo"><option value="0">Off</option><option value="1x3">1 hub x 3 holes</option><option value="2x3">2 hubs x 3 holes</option><option value="3x3">3 hubs x 3 holes</option><option value="4x3">4 hubs x 3 holes</option><option value="3x4">3 hubs x 4 holes</option><option value="4x4">4 hubs x 4 holes</option></select><small>Fake hubs and holes inside the chalet, marked DEMO / SIM. Off after a reboot.</small></label>
+         <span class="tog"><span id="lblSim2">Test holes on the hubs (virtual tip-ups)</span><button type="button" class="switch" role="switch" id="fSim" aria-labelledby="lblSim2" aria-checked="false"></button></span>
+         <label class="f">Fake fish (flag up) per hole<select id="simRate"><option value="2">about 2 per hour</option><option value="6">about 6 per hour</option><option value="12">about 12 per hour</option><option value="30">about 30 per hour</option><option value="60">about 1 per minute</option></select><small>Applies to the next switch you turn on</small></label>
+         <div class="tablewrap"><table class="simt" id="simTable"></table></div>
+@@ -3517,15 +3707,18 @@ function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of
+ 
+ /* ---------- Server ---------- */
+ function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+-function loadList() { fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
++// v2: one request of each kind at a time (the ESP32 serves one request at a time; overlapping polls piled up)
++let listBusy = false, pingBusy = false;
++function loadList() { if (listBusy) return; listBusy = true; fetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}).then(() => { listBusy = false; }); }
+ function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }   // called by the suite with /api/status
+ function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
+ function loadPings() {
+-  if (!focus) return; const n = focus;
++  if (!focus || pingBusy) return; const n = focus;
++  pingBusy = true;
+   fetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
+     if (n !== focus) return;
+     (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
+-  }).catch(() => {});
++  }).catch(() => {}).then(() => { pingBusy = false; });
+ }
+ 
+ /* ---------- Holes ---------- */
+@@ -3811,7 +4004,8 @@ setInterval(() => {
+   while (n-- && queue.length) addPing(queue.shift());
+   render();
+ }, 250);
+-setInterval(() => { if (visible()) loadPings(); }, 700); setInterval(loadList, 2000);
++setInterval(() => { if (visible() && !document.hidden) loadPings(); }, 700);
++setInterval(() => { if (visible() && !document.hidden) loadList(); }, 2000);   // v2: only while the Sonar tab is shown
+ let rz = null;
+ new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length && visible()) render(); }); }).observe(document.body);
+ window.sonarApi = {
+@@ -3827,6 +4021,9 @@ syncControls(); loadList();
+ const $ = id => document.getElementById(id);
+ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+ const api = (url, body) => fetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
++// v2: a poll is skipped while the same one is still waiting, and nothing polls while the page is hidden
++const busy = {};
++const poll = (key, fn) => () => { if (busy[key] || document.hidden) return; busy[key] = true; Promise.resolve(fn()).catch(() => {}).then(() => { busy[key] = false; }); };
+ const SON = () => window.sonarApi;
+ let st = null, tab = 'holes', soundOn = true, actx = null, lastFish = {}, radio = null;
+ try { soundOn = localStorage.getItem('alertSound') !== 'false'; } catch (e) { /* private mode */ }
+@@ -3881,7 +4078,7 @@ document.addEventListener('pointerdown', () => { if (soundOn) { audio(); setTime
+ const fmtUp = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; };
+ const nodeName = n => n.name || ('Hole ' + n.id);
+ function loadStatus() {
+-  api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') renderNetwork(); }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
++  return api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') renderNetwork(); }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+ }
+ function onStatus() {
+   const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
+@@ -3946,7 +4143,7 @@ function renderNodes() {
+ /* ---------- Sonar at a glance: last ~3 min of every hole (summaries every 2 s) ---------- */
+ const glance = { frame: 0, nodes: {} };
+ function loadGlance() {
+-  api('/api/sonar/glance?since=' + glance.frame).then(d => {
++  return api('/api/sonar/glance?since=' + glance.frame).then(d => {
+     if (glance.frame && ((d.frame - glance.frame) & 0xFFFF) > 0x8000) { glance.frame = 0; glance.nodes = {}; return; }   // chalet restarted
+     (d.nodes || []).forEach(x => {
+       const g = glance.nodes[x.node] || (glance.nodes[x.node] = { recs: [] });
+@@ -4008,7 +4205,7 @@ $('ngrid').addEventListener('click', e => {
+ /* ---------- Radio tab ---------- */
+ const TM = { off: 0, rotate: 1, 'SF9/500': 2, 'SF8/500': 3, 'SF7/500': 4 };
+ const f1 = (x, d) => x === undefined || x === null ? '–' : (+x).toFixed(d || 0);
+-function loadRadio() { api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
++function loadRadio() { return api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+ function postRadio(o) { api('/api/radio', o).then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+ function renderRadio() {
+   const d = radio; if (!d) return;
+@@ -4109,11 +4306,12 @@ $('setForm').addEventListener('submit', e => {
+ });
+ /* ---------- Test & simulation ---------- */
+ let sim = null;
+-function loadSim() { api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }
++function loadSim() { return api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }
+ function postSim(o) { api('/api/sim', o).then(d => { sim = d; renderSim(); }).catch(() => {}); }
+ function renderSim() {
+   if (!sim) return;
+   $('fSim').setAttribute('aria-checked', String(!!sim.virtual));
++  if (document.activeElement !== $('simDemo')) { const dv = sim.demo_hubs ? sim.demo_hubs + 'x' + sim.demo_holes : '0'; $('simDemo').value = [...$('simDemo').options].some(o => o.value === dv) ? dv : '0'; }
+   if (document.activeElement !== $('simRate')) $('simRate').value = String([2, 6, 12, 30, 60].reduce((a, b) => Math.abs(b - sim.rate) < Math.abs(a - sim.rate) ? b : a, 6));
+   let h = '<tr><th>Hole</th><th>Fake sonar</th><th>Fake fish</th><th></th></tr>';
+   (sim.holes || []).forEach(x => {
+@@ -4138,6 +4336,7 @@ $('fSim').addEventListener('click', () => postSim({ virtual: !(sim && sim.virtua
+ $('simAllOn').addEventListener('click', () => postSim({ all: true }));
+ $('simAllOff').addEventListener('click', () => postSim({ all: false }));
+ $('simRate').addEventListener('change', e => postSim({ rate: +e.target.value }));
++$('simDemo').addEventListener('change', e => { const v = e.target.value.split('x'); postSim({ demo: +v[0] || 0, demo_holes: +v[1] || 3 }); });
+ function renderAbout() {
+   if (!st) return;
+   const w = st.wifi || {}, l = st.lora || {};
+@@ -4150,10 +4349,11 @@ function renderAbout() {
+ syncSound();
+ showTab(initialTab());
+ loadStatus();
+-setInterval(loadStatus, 2000);
+-setInterval(() => { if (tab === 'radio') loadRadio(); }, 2000);
+-setInterval(() => { if (tab === 'settings') { loadRadio(); loadSim(); } }, 5000);
+-setInterval(() => { if (tab === 'holes') loadGlance(); }, 2000);
++const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance);
++setInterval(pStatus, 2000);
++setInterval(() => { if (tab === 'radio') pRadio(); }, 2000);
++setInterval(() => { if (tab === 'settings') { pRadio(); pSim(); } }, 5000);
++setInterval(() => { if (tab === 'holes') pGlance(); }, 2000);
+ })();
+ </script>
+ </body>
+@@ -4706,6 +4906,9 @@ void loopCardKB() {
+ // =============================================================================================
+ static ScreenModel scr;
+ static uint8_t scrPage = PG_HOME, scrSub = 0;
++bool scrDirty = true;                  // another screen used the display: resend the next frame
++static bool scrMenu = false;           // CardKB menu (list of pages) open
++static uint8_t scrMenuSel = 0;
+ static uint32_t scrLastInput = 0;
+ static MeshPingLite scrPings[118];
+ 
+@@ -4775,6 +4978,7 @@ static void buildScreenModel() {
+       ScrHubLink& o = m.hubs[m.n_hubs++];
+       o.id = hl[k].id; o.lora_rssi = hl[k].rssi; o.eb_hops = hl[k].hops;
+       o.lora_ok = hl[k].lora_age_s >= 0 && hl[k].lora_age_s < 30; o.eb_ok = hl[k].eb_age_s >= 0 && hl[k].eb_age_s < 30;
++      o.demo = hl[k].demo;
+     }
+   } else {
+     MeshHubView v; meshHubView(v);
+@@ -4797,6 +5001,316 @@ static void buildScreenModel() {
+   m.sta = wifiStaConnected;
+   snprintf(m.url, sizeof(m.url), "http://%s", wifiStaConnected ? staIpAddress.c_str() : apIpAddress.c_str());
+   m.radio_test = meshTestMode(); m.radio_test_name = meshTestModeName(m.radio_test);
++  m.kb = cardKbAvailable;
++  snprintf(m.sta_ssid, sizeof(m.sta_ssid), "%s", storedSsid);
++  wifiStateText(m.sta_state, sizeof(m.sta_state));
++  m.menu = scrMenu;
++  if (scrMenu) menuBuild(&m.opt);
++  else if (scrPage == PG_OPTIONS) optBuild(&m.opt);
++}
++
++// =============================================================================================
++// v2 OPTIONS page (CardKB). One list; Wi-Fi and Simulation open their own list. Up/down = move,
++// Enter = change / open, Esc or left = back. A value changes at once and is saved (same settings
++// as the web page and the serial commands). Text entry for the Wi-Fi name / password, yes/no before
++// network reset, reboot and "forget Wi-Fi". Without a CardKB the page only shows the values.
++// docs/SCREENS.md
++// =============================================================================================
++enum OptMenu : uint8_t { OM_MAIN = 0, OM_WIFI, OM_SCAN, OM_SIM };
++enum OptItem : uint8_t {
++  OI_NONE = 0, OI_WIFI, OI_BUZZER, OI_HOLD, OI_LINK, OI_LORACH, OI_SIM, OI_HOTSPOT, OI_RELAY, OI_REED,
++  OI_NETRESET, OI_REBOOT, OI_BUILT,
++  OI_W_STATUS, OI_W_NAME, OI_W_CHOOSE, OI_W_TYPE, OI_W_ADDR, OI_W_RETRY, OI_W_CH, OI_W_AP, OI_W_APPASS, OI_W_FORGET,
++  OI_SC_NET, OI_SC_AGAIN,
++  OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES
++};
++struct OptRow { uint8_t item, idx; };
++static const uint8_t OPT_MAX = 56;
++static OptRow optRows[OPT_MAX];
++static uint8_t optN = 0, optMenu = OM_MAIN, optSel = 0, optMainSel = 0, optWifiSel = 0;
++static uint8_t optMode = SO_LIST, optConfirm = OI_NONE, optTextStep = 0;   // text step: 0 Wi-Fi name, 1 password
++static char optSsid[33] = "", optText[65] = "";
++static const uint8_t SCAN_MAX = 12;
++static int8_t optScanN = -1;                 // -1 not yet, -2 scanning, -3 failed, >= 0 networks found
++static char optScanSsid[SCAN_MAX][33];
++static int8_t optScanRssi[SCAN_MAX];
++static bool optScanLock[SCAN_MAX];
++static const uint16_t HOLD_STEPS[] = {10, 30, 60, 120, 300};
++static const uint8_t RATE_STEPS[] = {2, 6, 12, 30, 60};
++
++static void optRow(ScrOptions* o, uint8_t item, uint8_t idx, const char* label, const char* value, bool sub = false) {
++  if (optN >= OPT_MAX) return;
++  optRows[optN].item = item; optRows[optN].idx = idx;
++  if (o) {
++    ScrRow& r = o->rows[optN];
++    snprintf(r.label, sizeof(r.label), "%s", label); snprintf(r.value, sizeof(r.value), "%s", value); r.sub = sub;
++  }
++  optN++;
++}
++
++static const char* optHint(uint8_t item) {
++  switch (item) {
++    case OI_WIFI: case OI_SIM: case OI_W_CHOOSE: return "OK: open";
++    case OI_W_TYPE: return "OK: type the name";
++    case OI_W_RETRY: return "OK: try now";
++    case OI_SC_NET: return "OK: join";
++    case OI_SC_AGAIN: return "OK: scan again";
++    case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: return "OK: ask to confirm";
++    case OI_S_HOLE: return "OK: next mode";
++    case OI_S_DEMO: return "OK: off/1/2/3/4 hubs";
++    case OI_NONE: case OI_BUILT: case OI_W_STATUS: case OI_W_NAME: case OI_W_ADDR: case OI_W_CH: case OI_W_AP: case OI_W_APPASS:
++      return "Esc: back";
++    default: return "OK: change";
++  }
++}
++
++// Builds the rows of the current list (optRows: what each row does; o: the text, when drawing)
++static void optBuild(ScrOptions* o) {
++  const bool chalet = currentRole == ROLE_GATEWAY_OFFSHORE;
++  char v[24];
++  optN = 0;
++  if (optMenu == OM_MAIN) {
++    if (chalet) {
++      optRow(o, OI_WIFI, 0, "Wi-Fi", wifiStaConnected ? "OK" : (storedSsid[0] ? "not conn." : "not set"), true);
++    } else {
++      if (wifiApActive && hubHotspotUntil) snprintf(v, sizeof(v), "ON %lum", (unsigned long)((hubHotspotUntil - millis()) / 60000UL + 1));
++      else snprintf(v, sizeof(v), "%s", wifiApActive ? "ON" : "OFF");
++      optRow(o, OI_HOTSPOT, 0, "Hotspot", v);
++    }
++    optRow(o, OI_BUZZER, 0, "Buzzer", settings.buzzerEnabled ? "ON" : "OFF");
++    snprintf(v, sizeof(v), "%u s", settings.alertHoldSec); optRow(o, OI_HOLD, 0, "Alert hold", v);
++    if (chalet) {
++      const uint8_t t = settings.transportMode;
++      optRow(o, OI_LINK, 0, "Link", t == 1 ? "LoRa only" : t == 2 ? "ESP-NOW" : "Auto");
++      if (settings.loraChannel == MESH_CH_AUTO) snprintf(v, sizeof(v), "Auto (%u)", meshLoraChannel() + 1);
++      else snprintf(v, sizeof(v), "%u fixed", settings.loraChannel + 1);
++      optRow(o, OI_LORACH, 0, "LoRa channel", v);
++      optRow(o, OI_SIM, 0, "Simulation", simAnyOn() ? "ON" : "off", true);
++    } else {
++      optRow(o, OI_RELAY, 0, "ESP-NOW relay", settings.ebRelay ? "ON" : "OFF");
++      optRow(o, OI_REED, 0, "Reed polarity", settings.reedActiveHigh ? "HIGH" : "LOW");
++    }
++    optRow(o, OI_NETRESET, 0, "Network reset", "");
++    optRow(o, OI_REBOOT, 0, "Reboot", "");
++    // build date of this firmware (__DATE__ "Oct  6 2026", __TIME__ "14:02:33") -> "Oct  6 14:02"
++    snprintf(v, sizeof(v), "%.6s %.5s", __DATE__, __TIME__);
++    optRow(o, OI_BUILT, 0, "Built", v);
++  } else if (optMenu == OM_WIFI) {
++    char st[20]; wifiStateText(st, sizeof(st));
++    optRow(o, OI_W_STATUS, 0, "Status", st);
++    optRow(o, OI_W_NAME, 0, "Network", storedSsid[0] ? storedSsid : "-");
++    optRow(o, OI_W_CHOOSE, 0, "Choose network", "", true);
++    optRow(o, OI_W_TYPE, 0, "Type name", "", true);
++    optRow(o, OI_W_ADDR, 0, "Address", wifiStaConnected ? staIpAddress.c_str() : "-");
++    if (storedSsid[0] && !wifiStaConnected) optRow(o, OI_W_RETRY, 0, "Retry now", "");
++    uint8_t primary = 0; wifi_second_chan_t sec; esp_wifi_get_channel(&primary, &sec);
++    if (primary == ESPNOW_CHANNEL) snprintf(v, sizeof(v), "%u OK", primary);
++    else snprintf(v, sizeof(v), "%u (hubs %u)", primary, ESPNOW_CHANNEL);
++    optRow(o, OI_W_CH, 0, "Channel", v);
++    char ap[32]; apName(ap, sizeof(ap));
++    optRow(o, OI_W_AP, 0, "AP", ap);
++    optRow(o, OI_W_APPASS, 0, "AP pass", WIFI_PASSWORD);
++    if (storedSsid[0]) optRow(o, OI_W_FORGET, 0, "Forget network", "");
++  } else if (optMenu == OM_SCAN) {
++    if (optScanN == -2) optRow(o, OI_NONE, 0, "Scanning...", "");
++    else if (optScanN == -3) optRow(o, OI_NONE, 0, "Scan failed", "");
++    else if (optScanN == 0) optRow(o, OI_NONE, 0, "Nothing found", "");
++    for (int8_t k = 0; k < optScanN; k++) {
++      snprintf(v, sizeof(v), "%d%s", optScanRssi[k], optScanLock[k] ? "" : " open");
++      optRow(o, OI_SC_NET, (uint8_t)k, optScanSsid[k], v);
++    }
++    if (optScanN != -2) optRow(o, OI_SC_AGAIN, 0, "Scan again", "");
++  } else if (optMenu == OM_SIM) {
++    if (meshDemoHubs()) snprintf(v, sizeof(v), "%u hubs", meshDemoHubs()); else snprintf(v, sizeof(v), "off");
++    optRow(o, OI_S_DEMO, 0, "Demo network", v);
++    if (meshDemoHubs()) { snprintf(v, sizeof(v), "%u", meshDemoHoles()); optRow(o, OI_S_DEMOHOLES, 0, "Holes per hub", v); }
++    optRow(o, OI_S_ALL, 0, "All holes", simAnyOn() ? "ON" : "OFF");
++    optRow(o, OI_S_VIRTUAL, 0, "Test holes", settings.sonarSim ? "ON" : "OFF");
++    snprintf(v, sizeof(v), "%u /h", simRate); optRow(o, OI_S_RATE, 0, "Fake fish rate", v);
++    static const char* const SIMTXT[] = {"off", "sonar", "fish", "both"};
++    for (int i = 0; i < network.node_count && optN < OPT_MAX; i++) {
++      const NodeState& n = network.nodes[i];
++      if (n.node_id == 0 || n.node_id == NODE_ID || !n.initialized) continue;
++      const uint8_t dv = meshDemoSim(n.node_id);   // demo hole: what it runs (no confirmation needed)
++      const uint8_t req = (dv != 0xFF ? dv : simRequested(n.node_id)) & 3;
++      const bool on = HAS_FLAG(n.flags, FLAG_SIM);
++      snprintf(v, sizeof(v), "%s%s", SIMTXT[req], dv == 0xFF && (req != 0) != on ? "~" : "");   // ~ = the hole has not confirmed yet
++      char nm[20]; if (n.name[0]) snprintf(nm, sizeof(nm), "%s", n.name); else snprintf(nm, sizeof(nm), "Hole %u", n.node_id);
++      optRow(o, OI_S_HOLE, (uint8_t)i, nm, v);
++    }
++  }
++  if (optSel >= optN) optSel = optN ? optN - 1 : 0;
++  if (!o) return;
++  o->mode = optMode; o->n = optN; o->sel = optSel;
++  static const char* const TITLES[] = {"Settings", "Wi-Fi", "Choose Wi-Fi", "Simulation"};
++  snprintf(o->title, sizeof(o->title), "%s", TITLES[optMenu & 3]);
++  snprintf(o->hint, sizeof(o->hint), "%s", !cardKbAvailable ? "CardKB or web page" : optN ? optHint(optRows[optSel].item) : "Esc: back");
++  o->line[0] = 0; o->text[0] = 0;
++  if (optMode == SO_TEXT) {
++    snprintf(o->title, sizeof(o->title), "%s", optTextStep == 0 ? "Wi-Fi name" : "Wi-Fi password");
++    if (optTextStep == 0) snprintf(o->line, sizeof(o->line), "Type the network name");
++    else snprintf(o->line, sizeof(o->line), "for %s", optSsid);
++    snprintf(o->text, sizeof(o->text), "%s", optText);
++    snprintf(o->hint, sizeof(o->hint), "%s", optTextStep == 0 ? "Enter: next (password)" : "Enter: connect");
++  } else if (optMode == SO_CONFIRM) {
++    if (optConfirm == OI_NETRESET) { snprintf(o->title, sizeof(o->title), "Reset network?"); snprintf(o->line, sizeof(o->line), "Link + channel to Auto"); }
++    else if (optConfirm == OI_REBOOT) { snprintf(o->title, sizeof(o->title), "Reboot?"); snprintf(o->line, sizeof(o->line), "Back in about 10 s"); }
++    else { snprintf(o->title, sizeof(o->title), "Forget Wi-Fi?"); snprintf(o->line, sizeof(o->line), "%s", storedSsid); }
++  }
++}
++
++static void optStartScan() {
++  optScanN = -2; wifiScanBusy = true;
++  if (WiFi.getMode() == WIFI_MODE_AP) WiFi.mode(WIFI_AP_STA);
++  if (WiFi.scanNetworks(true, false) == WIFI_SCAN_FAILED) { optScanN = -3; wifiScanBusy = false; }
++}
++
++// polls the Wi-Fi scan started from Options > Wi-Fi > Choose network (async: the loop keeps running)
++void loopOptions() {
++  if (!wifiScanBusy) return;
++  const int16_t r = WiFi.scanComplete();
++  if (r == WIFI_SCAN_RUNNING) return;
++  wifiScanBusy = false;
++  if (r < 0) { optScanN = -3; return; }
++  optScanN = 0;
++  const size_t own = strlen(NETWORK_NAME);
++  for (int16_t i = 0; i < r; i++) {
++    const String ss = WiFi.SSID(i);
++    if (!ss.length() || (strncmp(ss.c_str(), NETWORK_NAME, own) == 0 && ss[own] == '-')) continue;   // hidden, or our own hotspots
++    const int8_t rs = (int8_t)WiFi.RSSI(i);
++    int k = -1;
++    for (int j = 0; j < optScanN; j++) if (strcmp(optScanSsid[j], ss.c_str()) == 0) k = j;
++    if (k >= 0) { if (rs > optScanRssi[k]) optScanRssi[k] = rs; continue; }   // same name, several access points
++    if (optScanN < (int8_t)SCAN_MAX) k = optScanN++;
++    else {
++      int w = 0; for (int j = 1; j < (int)SCAN_MAX; j++) if (optScanRssi[j] < optScanRssi[w]) w = j;
++      if (rs <= optScanRssi[w]) continue;
++      k = w;
++    }
++    snprintf(optScanSsid[k], sizeof(optScanSsid[k]), "%s", ss.c_str());
++    optScanRssi[k] = rs; optScanLock[k] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
++  }
++  WiFi.scanDelete();
++  for (int a = 1; a < optScanN; a++)   // strongest first
++    for (int b = a; b > 0 && optScanRssi[b] > optScanRssi[b - 1]; b--) {
++      char t[33]; memcpy(t, optScanSsid[b], 33); memcpy(optScanSsid[b], optScanSsid[b - 1], 33); memcpy(optScanSsid[b - 1], t, 33);
++      const int8_t tr = optScanRssi[b]; optScanRssi[b] = optScanRssi[b - 1]; optScanRssi[b - 1] = tr;
++      const bool tl = optScanLock[b]; optScanLock[b] = optScanLock[b - 1]; optScanLock[b - 1] = tl;
++    }
++}
++
++static void optOpen(uint8_t menu) {
++  if (optMenu == OM_MAIN) optMainSel = optSel;
++  if (optMenu == OM_WIFI) optWifiSel = optSel;
++  optMenu = menu; optSel = 0; optMode = SO_LIST;
++}
++
++static void optBack() {
++  if (optMenu == OM_SCAN) { optMenu = OM_WIFI; optSel = optWifiSel; }
++  else { optMenu = OM_MAIN; optSel = optMainSel; }
++}
++
++static void optAfterJoin() {
++  optMode = SO_LIST; optMenu = OM_WIFI; optSel = 0;   // on "Status": connecting... -> connected / not found / bad password?
++  memset(optText, 0, sizeof(optText));
++}
++
++static void optTextEnter() {
++  if (optTextStep == 0) {
++    if (!optText[0]) return;
++    snprintf(optSsid, sizeof(optSsid), "%s", optText);
++    optTextStep = 1;
++    snprintf(optText, sizeof(optText), "%s", strcmp(optSsid, storedSsid) == 0 ? storedPassword : "");
++  } else {
++    wifiJoin(optSsid, optText);
++    optAfterJoin();
++  }
++}
++
++static void optDo(uint8_t item) {
++  switch (item) {
++    case OI_NETRESET: resetNetworkSettings(); break;
++    case OI_REBOOT: display.clearBuffer(); display.setFont(u8g2_font_6x10_tr); display.drawStr(30, 36, "Rebooting..."); display.sendBuffer(); delay(500); ESP.restart(); break;
++    case OI_W_FORGET: wifiForget(); break;
++    default: break;
++  }
++}
++
++static void optActivate(const OptRow& row) {
++  switch (row.item) {
++    case OI_WIFI: optOpen(OM_WIFI); break;
++    case OI_SIM: optOpen(OM_SIM); break;
++    case OI_BUZZER: settings.buzzerEnabled = !settings.buzzerEnabled; saveSettings(); break;
++    case OI_HOLD: {
++      uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] <= settings.alertHoldSec) k++;
++      settings.alertHoldSec = HOLD_STEPS[k % 5]; saveSettings(); break;
++    }
++    case OI_LINK: {
++      const uint8_t t = (uint8_t)((settings.transportMode + 1) % 3);
++      settings.transportMode = t; saveSettings(); meshSetTransport(t); break;
++    }
++    case OI_LORACH: {
++      const uint8_t c = settings.loraChannel;
++      const uint8_t nx = c == MESH_CH_AUTO ? 0 : (c >= 7 ? MESH_CH_AUTO : (uint8_t)(c + 1));
++      settings.loraChannel = nx; saveSettings(); meshSetLoraChannel(nx); break;
++    }
++    case OI_HOTSPOT: if (wifiApActive) hubHotspotOff(); else hubHotspotOn(); break;
++    case OI_RELAY: settings.ebRelay = !settings.ebRelay; saveSettings(); meshSetEbRelay(settings.ebRelay); break;
++    case OI_REED: settings.reedActiveHigh = !settings.reedActiveHigh; saveSettings(); break;
++    case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: optConfirm = row.item; optMode = SO_CONFIRM; break;
++    case OI_W_CHOOSE: optOpen(OM_SCAN); optStartScan(); break;
++    case OI_W_TYPE: optTextStep = 0; snprintf(optText, sizeof(optText), "%s", storedSsid); optMode = SO_TEXT; break;
++    case OI_W_RETRY: wifiRetryNow(); break;
++    case OI_SC_AGAIN: optSel = 0; optStartScan(); break;
++    case OI_SC_NET:
++      snprintf(optSsid, sizeof(optSsid), "%s", optScanSsid[row.idx]);
++      if (!optScanLock[row.idx]) { wifiJoin(optSsid, ""); optAfterJoin(); }
++      else { optTextStep = 1; snprintf(optText, sizeof(optText), "%s", strcmp(optSsid, storedSsid) == 0 ? storedPassword : ""); optMode = SO_TEXT; }
++      break;
++    case OI_S_ALL: simAll(!simAnyOn()); break;
++    case OI_S_DEMO: demoSet((uint8_t)((meshDemoHubs() + 1) % 5), meshDemoHoles()); break;   // off -> 1 -> 2 -> 3 -> 4 -> off
++    case OI_S_DEMOHOLES: demoSet(meshDemoHubs(), (uint8_t)(meshDemoHoles() % 4 + 1)); break;
++    case OI_S_VIRTUAL: settings.sonarSim = !settings.sonarSim; meshSetSonarSim(settings.sonarSim); saveSettings(); break;
++    case OI_S_RATE: {
++      uint8_t k = 0; while (k < 5 && RATE_STEPS[k] <= simRate) k++;
++      simRate = RATE_STEPS[k % 5]; break;
++    }
++    case OI_S_HOLE: {
++      if (row.idx >= network.node_count) break;
++      const uint8_t node = network.nodes[row.idx].node_id;
++      const uint8_t dv = meshDemoSim(node);
++      const uint8_t nx = (uint8_t)(((dv != 0xFF ? dv : simRequested(node)) + 1) & 3);   // off -> sonar -> fish -> both -> off
++      simRequest(node, (nx & MESH_SIM_SONAR) != 0, (nx & MESH_SIM_HALL) != 0);
++      break;
++    }
++    default: break;
++  }
++}
++
++// CardKB key on the Options page. true = used here; false = the normal page keys (left/right/Esc on the main list)
++static bool optKey(uint8_t k) {
++  if (optMode == SO_TEXT) {
++    const size_t n = strlen(optText);
++    if (k == KEY_ESC) optMode = SO_LIST;
++    else if (k == KEY_ENTER) optTextEnter();
++    else if (k == KEY_BACKSP || k == 0x7F) { if (n) optText[n - 1] = 0; }
++    else if (k >= 32 && k < 127 && n < (optTextStep == 0 ? 32u : 63u)) { optText[n] = (char)k; optText[n + 1] = 0; }
++    return true;   // arrows are ignored while typing
++  }
++  if (optMode == SO_CONFIRM) {
++    if (k == KEY_ENTER) optDo(optConfirm);
++    optMode = SO_LIST; optConfirm = OI_NONE;
++    return true;
++  }
++  optBuild(nullptr);
++  switch (k) {
++    case KEY_UP: if (optSel > 0) optSel--; return true;
++    case KEY_DOWN: if (optSel + 1 < optN) optSel++; return true;
++    case KEY_ENTER: if (optN) optActivate(optRows[optSel]); return true;
++    case KEY_ESC: case KEY_LEFT: if (optMenu != OM_MAIN) { optBack(); return true; } return false;
++    case KEY_RIGHT: return optMenu != OM_MAIN;   // inside Wi-Fi / Simulation: stay
++    default: return false;
++  }
+ }
+ 
+ static bool scrPageAvailable(uint8_t p) {
+@@ -4815,37 +5329,112 @@ static void scrStep(int dir) {
+   scrLastInput = millis();
+ }
+ 
++// ---- CardKB menu: Esc opens the list of pages, up/down + Enter opens one, Esc in a page comes back here ----
++static const uint8_t MENU_ORDER[] = {PG_HOME, PG_HOLES, PG_SONAR, PG_FOCUS, PG_NETWORK, PG_CONNECT, PG_TEST, PG_OPTIONS};
++static uint8_t menuPages[PG_COUNT], menuN = 0;
++
++static void menuBuild(ScrOptions* o) {
++  static const char* const NAMES[PG_COUNT] = {"Home", "Sonar", "Focus", "Holes", "Network", "Test / simulation", "Connect phone", "Settings"};
++  menuN = 0;
++  for (uint8_t k = 0; k < sizeof(MENU_ORDER); k++) {
++    const uint8_t p = MENU_ORDER[k];
++    if (!scrPageAvailable(p)) continue;
++    if (o) {
++      ScrRow& r = o->rows[menuN];
++      snprintf(r.label, sizeof(r.label), "%s", NAMES[p]); r.value[0] = 0; r.sub = false;
++      if (p == PG_HOLES) snprintf(r.value, sizeof(r.value), "%u", scr.n_holes);
++      else if (p == PG_NETWORK) snprintf(r.value, sizeof(r.value), "ch%u", scr.lora_ch);
++      else if (p == PG_CONNECT && scr.chalet) snprintf(r.value, sizeof(r.value), "%s", scr.sta ? "Wi-Fi OK" : "hotspot");
++      else if (p == PG_TEST && simAnyOn()) snprintf(r.value, sizeof(r.value), "SIM ON");
++    }
++    menuPages[menuN++] = p;
++  }
++  if (scrMenuSel >= menuN) scrMenuSel = menuN ? menuN - 1 : 0;
++  if (!o) return;
++  o->mode = SO_LIST; o->n = menuN; o->sel = scrMenuSel;
++  snprintf(o->title, sizeof(o->title), "Menu");
++  snprintf(o->hint, sizeof(o->hint), "OK: open   Esc: home");
++}
++
++static void menuOpen() {
++  menuBuild(nullptr);
++  scrMenuSel = 0;
++  for (uint8_t i = 0; i < menuN; i++) if (menuPages[i] == scrPage) scrMenuSel = i;
++  scrMenu = true;
++  scrLastInput = millis();
++}
++
++// key while the menu is open
++static void menuKey(uint8_t k) {
++  menuBuild(nullptr);
++  switch (k) {
++    case KEY_UP: if (scrMenuSel > 0) scrMenuSel--; break;
++    case KEY_DOWN: if (scrMenuSel + 1 < menuN) scrMenuSel++; break;
++    case KEY_ENTER: case KEY_RIGHT:
++      if (!menuN) break;
++      scrPage = menuPages[scrMenuSel]; scrSub = 0; scrMenu = false;
++      if (scrPage == PG_OPTIONS) { optMenu = OM_MAIN; optSel = 0; optMode = SO_LIST; }
++      break;
++    case KEY_ESC: case KEY_LEFT: scrMenu = false; scrPage = PG_HOME; scrSub = 0; break;
++    default: break;
++  }
++}
++
++// FOCUS: the next / previous hole that has a sonar
++static void focusStep(int dir) {
++  if (currentRole != ROLE_GATEWAY_OFFSHORE) return;
++  int ids[48], n = 0, cur = -1;
++  for (uint8_t i = 0; i < scr.n_holes; i++) {
++    if (!scr.holes[i].son.valid) continue;
++    if (scr.holes[i].id == scr.focus_node) cur = n;
++    ids[n++] = scr.holes[i].id;
++  }
++  if (!n) return;
++  const int pick = cur < 0 ? 0 : (cur + n + dir) % n;
++  meshSetFocusNode((uint8_t)ids[pick]);
++}
++
++// CardKB up/down: move inside the page
++static void scrScroll(int dir) {
++  scrLastInput = millis();
++  switch (scrPage) {
++    case PG_HOLES: { const uint8_t n = screenHolesPages(scr); scrSub = (uint8_t)((scrSub + n + dir) % n); break; }
++    case PG_SONAR: { const uint8_t n = screenSonarPages(scr); scrSub = (uint8_t)((scrSub + n + dir) % n); break; }
++    case PG_FOCUS: focusStep(dir); break;
++    default: break;
++  }
++}
++
+ // double press / Enter: the action written at the bottom of the page
+-static void scrAction() {
++static void scrAction(bool kb) {
+   scrLastInput = millis();
+   switch (scrPage) {
+-    case PG_HOME: if (alertsSilenced) { silenceAlerts(); showOverlayMessage("Unsilenced", 800); } break;
++    case PG_HOME: if (alertsSilenced) { silenceAlerts(); showOverlayMessage("Unsilenced", 800); } else if (kb) menuOpen(); break;
+     case PG_HOLES: scrSub = (uint8_t)((scrSub + 1) % screenHolesPages(scr)); break;
+     case PG_SONAR: scrSub = (uint8_t)((scrSub + 1) % screenSonarPages(scr)); break;
+-    case PG_FOCUS: {
+-      if (currentRole != ROLE_GATEWAY_OFFSHORE) break;
+-      int cur = -1, first = -1, next = -1;
+-      for (uint8_t i = 0; i < scr.n_holes; i++) {
+-        if (!scr.holes[i].son.valid) continue;
+-        if (first < 0) first = scr.holes[i].id;
+-        if (cur >= 0 && next < 0) next = scr.holes[i].id;
+-        if (scr.holes[i].id == scr.focus_node) cur = i;
+-      }
+-      const int pick = next >= 0 ? next : first;
+-      if (pick > 0) meshSetFocusNode((uint8_t)pick);
+-      break;
+-    }
++    case PG_FOCUS: focusStep(+1); break;
+     case PG_TEST: if (currentRole == ROLE_GATEWAY_OFFSHORE) { const bool on = !simAnyOn(); simAll(on); showOverlayMessage(on ? "Simulation ON" : "Simulation OFF", 1000); } break;
++    case PG_CONNECT: if (kb && currentRole == ROLE_GATEWAY_OFFSHORE) { scrPage = PG_OPTIONS; optMenu = OM_MAIN; optOpen(OM_WIFI); } break;
+     default: break;
+   }
+ }
+ 
+ static void scrDraw() {
+-  if (scrPage != PG_HOME && millis() - scrLastInput > 60000UL) { scrPage = PG_HOME; scrSub = 0; }
++  const uint32_t idle = scrPage == PG_OPTIONS ? 180000UL : 60000UL;   // typing a password takes time
++  if ((scrPage != PG_HOME || scrMenu) && millis() - scrLastInput > idle) { scrPage = PG_HOME; scrSub = 0; optMode = SO_LIST; scrMenu = false; }
+   buildScreenModel();
+   if (!scrPageAvailable(scrPage)) scrPage = PG_HOME;
+   if (scrPage == PG_NETWORK && scr.radio_test) { drawRadioTest(); return; }   // radio test: detailed per-hub stats
+   screenDraw(display.getU8g2(), scr, scrPage, scrSub, ((millis() / 500) % 2) == 0);
++  // v2: send only when the picture changed (or every 2 s, or after another screen used the display)
++  uint32_t h = 2166136261u;
++  const uint8_t* b = display.getBufferPtr();
++  for (int i = 0; i < 1024; i++) { h ^= b[i]; h *= 16777619u; }
++  static uint32_t lastSent = 0, lastHash = 0;
++  if (h != lastHash || scrDirty || millis() - lastSent > 2000UL) {
++    display.sendBuffer();
++    lastHash = h; lastSent = millis(); scrDirty = false;
++  }
+ }
+ 
+ // =============================================================================================
+@@ -4911,6 +5500,7 @@ void resetNetworkSettings() {
+ 
+ // Hold bar: 0..10 s, marks at 3 s and 10 s, label of what releasing now does.
+ static void drawHoldBar(uint32_t held) {
++  scrDirty = true;
+   display.clearBuffer();
+   display.setFont(u8g2_font_6x10_tr);
+   const bool hub = currentRole != ROLE_GATEWAY_OFFSHORE;
+@@ -5018,17 +5608,29 @@ void loopButton() {
+ }
+ 
+ void handleKeyPress(char key) {
+-  // v2: the CardKB is a set of extra keys for the new screens (no typing menus any more)
++  // v2 CardKB: Esc = menu (list of pages: up/down, Enter = open, Esc = home); in a page up/down = inside
++  // the page, Enter = OK (the action in the footer), left/right = previous/next page, s = silence.
++  // On Settings the keys go to the list / text entry first (Esc there = up one level, then the menu).
+   const bool wasAsleep = displaySleeping;
+   registerActivity();
+   if (wasAsleep) return;   // the first key only wakes the screen
+-  DEBUG_PRINTF("Key: 0x%02X\n", (uint8_t)key);
+-  switch ((uint8_t)key) {
+-    case KEY_RIGHT: case KEY_DOWN: case KEY_TAB: case ' ': case 'n': case 'N': scrStep(+1); break;
+-    case KEY_LEFT: case KEY_UP: case 'p': case 'P': scrStep(-1); break;
+-    case KEY_ENTER: scrAction(); break;
++  const uint8_t k = (uint8_t)key;
++  DEBUG_PRINTF("Key: 0x%02X\n", k);
++  scrLastInput = millis();
++  if (activeAlerts && !alertsSilenced) {   // FISH ON screen: any key silences (like the button)
++    silenceAlerts(); showOverlayMessage("Silenced", 800);
++    return;
++  }
++  if (scrMenu) { menuKey(k); return; }
++  if (scrPage == PG_OPTIONS && optKey(k)) return;
++  switch (k) {
++    case KEY_RIGHT: case KEY_TAB: case ' ': case 'n': case 'N': scrStep(+1); break;
++    case KEY_LEFT: case 'p': case 'P': scrStep(-1); break;
++    case KEY_DOWN: scrScroll(+1); break;
++    case KEY_UP: scrScroll(-1); break;
++    case KEY_ENTER: scrAction(true); break;
+     case 's': case 'S': silenceAlerts(); showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 800); break;
+-    case KEY_ESC: scrPage = PG_HOME; scrSub = 0; break;
++    case KEY_ESC: menuOpen(); break;   // back to the menu, pick another page
+     default: break;
+   }
+ }
+@@ -5714,6 +6316,7 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
+   if (isNew) {
+     String saved = loadNodeName(u.node);
+     if (saved.length() > 0) { strncpy(n->name, saved.c_str(), sizeof(n->name) - 1); n->name[sizeof(n->name) - 1] = '\0'; }
++    else if (meshDemoNode(u.node)) meshDemoName(u.node, n->name, sizeof(n->name));
+   }
+   const bool wasFish = HAS_FLAG(n->flags, FLAG_FISH_ON);
+   const bool fish = (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING);
+@@ -5866,6 +6469,7 @@ void meshLoop() {
+ 
+ // OLED screen shown instead of the live status while the radio test mode is on.
+ void drawRadioTest() {
++  scrDirty = true;
+   display.clearBuffer();
+   display.setFont(u8g2_font_5x7_tr);
+   char line[32];
+@@ -6132,6 +6736,8 @@ static String simJson() {
+   s = "{\"virtual\":"; s += settings.sonarSim ? "true" : "false";
+   s += ",\"rate\":"; s += simRate;
+   s += ",\"all\":"; s += chSimAllSet ? String(chSimAllValue) : String(-1);
++  s += ",\"demo_hubs\":"; s += meshDemoHubs();
++  s += ",\"demo_holes\":"; s += meshDemoHoles();
+   s += ",\"holes\":[";
+   bool first = true;
+   for (int i = 0; i < network.node_count; i++) {
+@@ -6141,7 +6747,8 @@ static String simJson() {
+     first = false;
+     s += "{\"id\":"; s += n.node_id;
+     s += ",\"name\":\""; for (const char* c = n.name; *c; c++) if (*c != '"' && *c != '\\') s += *c; s += "\"";
+-    s += ",\"req\":"; s += simRequested(n.node_id);
++    const uint8_t dv = meshDemoSim(n.node_id);   // demo hole: what it runs (256 = explicitly off, for the page)
++    s += ",\"req\":"; s += dv != 0xFF ? String(dv ? dv : 256) : String(simRequested(n.node_id));
+     s += ",\"on\":"; s += HAS_FLAG(n.flags, FLAG_SIM) ? "true" : "false";
+     s += ",\"virtual\":"; s += n.node_id >= 128 ? "true" : "false";
+     s += "}";
+@@ -6159,6 +6766,7 @@ void handleWebApiSimPost() {
+   if (doc.containsKey("rate")) { const int r = doc["rate"].as<int>(); if (r >= 1 && r <= 63) simRate = (uint8_t)r; }
+   if (doc.containsKey("virtual")) { settings.sonarSim = doc["virtual"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
+   if (doc.containsKey("all")) simAll(doc["all"].as<bool>());
++  if (doc.containsKey("demo")) demoSet((uint8_t)(doc["demo"] | 0), (uint8_t)(doc["demo_holes"] | 3));
+   if (doc.containsKey("hole")) {
+     const int h = doc["hole"].as<int>();
+     if (h > 0 && h <= 255) simRequest((uint8_t)h, doc["sonar"] | false, doc["hall"] | false);
+diff --git a/src/lora_node/mesh_radio.cpp b/src/lora_node/mesh_radio.cpp
+index ee58594..6eb0ded 100644
+--- a/src/lora_node/mesh_radio.cpp
++++ b/src/lora_node/mesh_radio.cpp
+@@ -18,6 +18,7 @@
+ #include <chalet_role.h>
+ #include <sonar_link.h>
+ #include <eb_link.h>
++#include <sonar_sim.h>
+ 
+ using namespace icemesh;
+ using namespace icemesh::tdma;
+@@ -124,7 +125,7 @@ static volatile uint32_t g_eb_hub_last_ms = 0;  // chalet: last hub packet over
+ struct DevCmdEvt { uint8_t cmd, target, value; };
+ static DevCmdEvt g_devq[4];
+ static volatile uint8_t g_devq_n = 0;   // under lock
+-struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; };
++struct HubPath { uint8_t id, flags, hops; uint32_t lora_ms, eb_ms; bool demo; };
+ static HubPath g_paths[12];                     // chalet, under lock: how each hub was last heard
+ // Setup phase (chalet): no automatic channel move until a hub has been in the network for 5 min, or
+ // 10 min after boot (a channel so busy that no hub can join). Hubs: TransportPolicy::armed().
+@@ -1453,7 +1454,7 @@ uint8_t meshHubLinks(MeshHubLink* out, uint8_t max) {
+     const HubPath& p = g_paths[i];
+     if (p.id == 0) continue;
+     MeshHubLink& o = out[n++];
+-    o.id = p.id; o.hops = p.hops;
++    o.id = p.id; o.hops = p.hops; o.demo = p.demo;
+     o.lora_age_s = p.lora_ms ? static_cast<int32_t>((now - p.lora_ms) / 1000) : -1;
+     o.eb_age_s = p.eb_ms ? static_cast<int32_t>((now - p.eb_ms) / 1000) : -1;
+     const HubInfo* h = g_ch->planner.find(p.id);
+@@ -1461,3 +1462,214 @@ uint8_t meshHubLinks(MeshHubLink* out, uint8_t max) {
+   }
+   return n;
+ }
++
++// =============================================================================================
++// v2 DEMO NETWORK (chalet only, no other hardware) - docs/SONAR_SIM.md "Demo network"
++// Up to 4 fake hubs with 1-4 holes each run inside the chalet. Each one is a real HubRole: its line
++// table, sonar outbox and hub packet are the ones a real hub uses; the packet goes into the chalet
++// through the backbone entry (onEbHubPacket) and the chalet's backbone beacon is fed back to it (acks,
++// focus, CMD_SET_SIM). Fake sonar: a light BASE summary every 2 s per hole, and the full fake fish
++// finder (SonarSource, ~15 KB, one only) for the FOCUS hole. Fake Hall trips per hole when asked.
++// IDs (keep them free in a real network): hubs 121-124, their own hole = hub ID, other holes =
++// meshSonarVirtualId(hub, 0..2) (200-226). Not saved: off after every reboot.
++// Threads: the demo state is used from loop() only; the lock is taken only around the chalet objects
++// (g_ch, g_paths), never around the fake sonar work, so the radio task keeps its timing.
++// =============================================================================================
++static const uint8_t DEMO_HUB0 = 121, DEMO_MAX_HUBS = 4, DEMO_MAX_HOLES = 4;
++struct DemoHole {
++  uint8_t id, sim, batt, nf, act_bits;
++  bool tripped;
++  uint32_t until_ms, next_ms;
++  uint16_t bottom_cm, bait_cm, ping;
++  uint16_t fd[3]; uint8_t fl[3];   // fake fish: depth, level (0 = none)
++};
++struct DemoHub { HubRole<8>* role; DemoHole holes[DEMO_MAX_HOLES]; };
++static DemoHub g_demo[DEMO_MAX_HUBS];
++static uint8_t g_demo_hubs = 0, g_demo_holes = 3;
++static sonar::SonarSource* g_demo_src = nullptr;   // full fake sonar of the FOCUS hole
++static uint8_t g_demo_src_node = 0;
++static uint32_t g_demo_rng = 0x1234567u;
++
++static uint32_t demoRand() { g_demo_rng ^= g_demo_rng << 13; g_demo_rng ^= g_demo_rng >> 17; g_demo_rng ^= g_demo_rng << 5; return g_demo_rng; }
++
++static uint8_t demoHoleId(uint8_t hub, uint8_t k) { return k == 0 ? hub : meshSonarVirtualId(hub, static_cast<uint8_t>(k - 1)); }
++
++bool meshDemoNode(uint8_t id) {
++  for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)
++    for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++) if (demoHoleId(static_cast<uint8_t>(DEMO_HUB0 + h), k) == id) return true;
++  return false;
++}
++
++static DemoHole* demoHole(uint8_t id) {
++  for (uint8_t h = 0; h < g_demo_hubs; h++)
++    for (uint8_t k = 0; k < g_demo_holes; k++) if (g_demo[h].holes[k].id == id) return &g_demo[h].holes[k];
++  return nullptr;
++}
++
++uint8_t meshDemoHubs() { return g_demo_hubs; }
++uint8_t meshDemoHoles() { return g_demo_holes; }
++
++uint8_t meshDemoSim(uint8_t id) {
++  const DemoHole* d = demoHole(id);
++  return d ? d->sim : 0xFF;
++}
++
++void meshDemoName(uint8_t id, char* out, size_t n) {   // "Demo A1": pocket letter, hole number
++  for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)
++    for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++)
++      if (demoHoleId(static_cast<uint8_t>(DEMO_HUB0 + h), k) == id) { snprintf(out, n, "Demo %c%u", 'A' + h, k + 1); return; }
++  if (n) out[0] = 0;
++}
++
++static void demoApplySim(uint8_t target, uint8_t value) {
++  for (uint8_t h = 0; h < g_demo_hubs; h++)
++    for (uint8_t k = 0; k < g_demo_holes; k++) {
++      DemoHole& d = g_demo[h].holes[k];
++      if (target != 255 && target != d.id) continue;
++      d.sim = value; d.tripped = false; d.next_ms = 0;
++    }
++}
++
++void meshDemoSetSim(uint8_t id, uint8_t value) { demoApplySim(id, value); }
++
++void meshDemoSet(uint8_t hubs, uint8_t holes) {
++  if (!g_chalet || g_ch == nullptr) return;
++  if (hubs > DEMO_MAX_HUBS) hubs = DEMO_MAX_HUBS;
++  if (holes < 1) holes = 1;
++  if (holes > DEMO_MAX_HOLES) holes = DEMO_MAX_HOLES;
++  if (hubs == g_demo_hubs && holes == g_demo_holes) return;
++  {
++    Lock l;   // forget what is not in the new layout (holes and hubs), so the pages do not keep offline ghosts
++    for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++)
++      for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++)
++        if (h >= hubs || k >= holes) g_ch->nodes.forget(demoHoleId(static_cast<uint8_t>(DEMO_HUB0 + h), k));
++    for (uint8_t i = 0; i < 12; i++) if (g_paths[i].demo && g_paths[i].id >= DEMO_HUB0 + hubs) memset(&g_paths[i], 0, sizeof(g_paths[i]));
++  }
++  g_demo_rng ^= millis();
++  for (uint8_t h = 0; h < DEMO_MAX_HUBS; h++) {
++    DemoHub& d = g_demo[h];
++    const uint8_t hub_id = static_cast<uint8_t>(DEMO_HUB0 + h);
++    if (h < hubs && d.role == nullptr) {
++      d.role = new HubRole<8>();
++      d.role->network_id = g_net; d.role->self = hub_id;
++    }
++    if (h < hubs) {
++      d.role->table = LineTable<8>();   // fresh table for the new layout
++      for (uint8_t k = 0; k < DEMO_MAX_HOLES; k++) {
++        DemoHole& o = d.holes[k];
++        const bool keep = o.id == demoHoleId(hub_id, k) && k < g_demo_holes && h < g_demo_hubs;
++        if (!keep) {
++          memset(&o, 0, sizeof(o));
++          o.id = demoHoleId(hub_id, k);
++          o.sim = MESH_SIM_SONAR;                                       // fake sonar on, fake trips off
++          o.batt = static_cast<uint8_t>(55 + demoRand() % 45);
++          o.bottom_cm = static_cast<uint16_t>(350 + demoRand() % 650);  // 3.5-10 m
++          o.bait_cm = static_cast<uint16_t>(o.bottom_cm - 40 - demoRand() % 80);
++        }
++      }
++    }
++  }
++  g_demo_hubs = hubs; g_demo_holes = holes;
++  if (hubs == 0 && g_demo_src != nullptr) { delete g_demo_src; g_demo_src = nullptr; g_demo_src_node = 0; }
++}
++
++// light fake sonar: bottom, bait and 0-3 fish wandering, as one BASE block (what a non-focus hole sends)
++static void demoSummary(DemoHole& d, HubRole<8>& role) {
++  for (uint8_t i = 0; i < 3; i++) {
++    if (d.fl[i] == 0) {
++      if (demoRand() % 100 < 12) {   // a fish comes in
++        d.fd[i] = static_cast<uint16_t>(100 + demoRand() % (d.bottom_cm > 160 ? d.bottom_cm - 120 : 40));
++        d.fl[i] = static_cast<uint8_t>(1 + demoRand() % 3);
++      }
++    } else {
++      const int step = static_cast<int>(demoRand() % 31) - 15;
++      int nd = static_cast<int>(d.fd[i]) + step;
++      if (nd < 60) nd = 60;
++      if (nd > d.bottom_cm - 15) nd = d.bottom_cm - 15;
++      d.fd[i] = static_cast<uint16_t>(nd);
++      if (demoRand() % 100 < 10) d.fl[i] = 0;   // it leaves
++    }
++  }
++  sonar::Summary s;
++  memset(&s, 0, sizeof(s));
++  d.ping = static_cast<uint16_t>(d.ping + 8);
++  s.node = d.id; s.ping = d.ping; s.hard = sonar::BH_MEDIUM;
++  s.bottom_cm = static_cast<uint16_t>(d.bottom_cm + demoRand() % 5 - 2);
++  s.list[s.n_list].track = 0; s.list[s.n_list].depth_cm = d.bait_cm; s.list[s.n_list].level = 2; s.n_list++;
++  uint8_t fish = 0;
++  for (uint8_t i = 0; i < 3; i++) {
++    if (d.fl[i] == 0 || s.n_list >= sonar::MAX_TARGETS) continue;
++    s.list[s.n_list].track = 1; s.list[s.n_list].depth_cm = d.fd[i]; s.list[s.n_list].level = d.fl[i]; s.n_list++;
++    fish++;
++  }
++  s.n_targets = fish;
++  d.act_bits = static_cast<uint8_t>((d.act_bits << 1) | (fish ? 1 : 0));
++  uint8_t a = 0; for (uint8_t b = d.act_bits; b; b >>= 1) a = static_cast<uint8_t>(a + (b & 1));
++  s.activity = static_cast<uint8_t>(a * 2 > 15 ? 15 : a * 2);
++  sonar::summaryNearest(s);
++  uint8_t blk[sonar::MAX_BLOCK];
++  const size_t len = sonar::encodeSummary(s, blk, sizeof(blk));
++  if (len > 0) role.sonar.push(blk, static_cast<uint8_t>(len), role.frameNow());
++}
++
++static bool demoTripped(DemoHole& d, uint32_t now) {
++  if (!(d.sim & MESH_SIM_HALL)) { d.tripped = false; return false; }
++  const uint32_t mean = 3600000UL / ((d.sim >> 2) ? (d.sim >> 2) : 6);
++  if (d.tripped && static_cast<int32_t>(now - d.until_ms) >= 0) { d.tripped = false; d.next_ms = 0; }
++  if (!d.tripped) {
++    if (d.next_ms == 0) { d.next_ms = now + mean / 2 + demoRand() % (mean + 1); if (d.next_ms == 0) d.next_ms = 1; }
++    if (static_cast<int32_t>(now - d.next_ms) >= 0) { d.tripped = true; d.until_ms = now + 20000UL + demoRand() % 70001UL; }
++  }
++  return d.tripped;
++}
++
++// chalet loop(): 4 times a second at most. Packets every 500 ms, BASE every 2 s, focus pings 4/s.
++void meshDemoTick() {
++  if (g_demo_hubs == 0 || g_ch == nullptr) return;
++  static uint32_t last_ms = 0, last_pkt = 0, last_base = 0;
++  static uint8_t eb[MAX_PACKET], pl[MAX_PACKET];
++  const uint32_t now = millis();
++  if (now - last_ms < 250) return;
++  last_ms = now;
++  // 1. the chalet beacon, as the hubs get it on the backbone: acks, focus, commands
++  size_t bl; uint8_t focus;
++  { Lock l; bl = g_ch->buildEbBeacon(eb, sizeof(eb)); focus = g_ch->focus_node; }
++  for (uint8_t h = 0; h < g_demo_hubs; h++) {
++    HubRole<8>& r = *g_demo[h].role;
++    uint8_t cmd = CMD_NONE;
++    if (bl > 0 && r.onEbBeacon(eb, bl, cmd) && cmd == CMD_SET_SIM) demoApplySim(r.last_cmd_target, r.last_cmd_value);
++  }
++  // 2. focus hole: the full fake fish finder (4 pings/s)
++  DemoHole* fd = demoHole(focus);
++  if (fd != nullptr && (fd->sim & MESH_SIM_SONAR)) {
++    if (g_demo_src == nullptr) g_demo_src = new sonar::SonarSource();
++    if (g_demo_src_node != focus) { g_demo_src->begin(focus, 7919UL * focus + 17UL, static_cast<uint16_t>(demoRand())); g_demo_src_node = focus; }
++    sonar::Block out[2];
++    const uint8_t n = g_demo_src->tick(true, out, 2);
++    for (uint8_t h = 0; h < g_demo_hubs; h++)
++      for (uint8_t k = 0; k < g_demo_holes; k++)
++        if (g_demo[h].holes[k].id == focus)
++          for (uint8_t i = 0; i < n; i++) g_demo[h].role->sonar.push(out[i].data, out[i].len, g_demo[h].role->frameNow());
++  }
++  const bool base = now - last_base >= 2000;
++  if (base) last_base = now;
++  if (now - last_pkt < 500) return;
++  last_pkt = now;
++  // 3. each hub: line states, BASE sonar, packet -> chalet
++  for (uint8_t h = 0; h < g_demo_hubs; h++) {
++    DemoHub& d = g_demo[h];
++    HubRole<8>& r = *d.role;
++    for (uint8_t k = 0; k < g_demo_holes; k++) {
++      DemoHole& o = d.holes[k];
++      const uint8_t st = demoTripped(o, now) ? MESH_LS_TRIPPED : MESH_LS_IDLE;
++      r.table.observe(o.id, st, 0, MESH_LF_SIM, o.batt, now);
++      if (base && (o.sim & MESH_SIM_SONAR) && o.id != focus) demoSummary(o, r);
++    }
++    const size_t n = r.buildHubFree(pl, sizeof(pl), 0, 3900, static_cast<uint16_t>(now / 60000UL), r.frameNow());
++    if (n == 0) continue;
++    Lock l;
++    ChaletRxResult res;
++    if (g_ch->onEbHubPacket(pl, n, 0, res)) chaletHandle(res, true, 0);
++    for (uint8_t i = 0; i < 12; i++) if (g_paths[i].id == r.self) g_paths[i].demo = true;
++  }
++}
+diff --git a/src/lora_node/mesh_radio.h b/src/lora_node/mesh_radio.h
+index 363ec2b..9ea31b7 100644
+--- a/src/lora_node/mesh_radio.h
++++ b/src/lora_node/mesh_radio.h
+@@ -120,7 +120,17 @@ String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glan
+ // ---- raw views for the OLED screens (chalet) ----
+ struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; };   // t: depth | level << 11 | bait << 13
+ struct MeshPingLite { uint16_t bottom_cm; uint8_t n; uint16_t d[5]; uint8_t lv[5]; uint8_t bait_mask; };
+-struct MeshHubLink { uint8_t id; int8_t rssi; int32_t lora_age_s, eb_age_s; uint8_t hops; };
++struct MeshHubLink { uint8_t id; int8_t rssi; int32_t lora_age_s, eb_age_s; uint8_t hops; bool demo; };
+ bool meshSonarSummary(uint8_t node, MeshSonarLite& out);
+ uint8_t meshFocusPings(uint8_t node, MeshPingLite* out, uint8_t max);   // newest `max` pings, oldest first
+ uint8_t meshHubLinks(MeshHubLink* out, uint8_t max);
++
++// ---- v2 demo network (chalet only, no other hardware; docs/SONAR_SIM.md) ----
++void meshDemoSet(uint8_t hubs, uint8_t holes_per_hub);   // 0 hubs = off; 1-4 hubs, 1-4 holes each
++uint8_t meshDemoHubs();
++uint8_t meshDemoHoles();
++bool meshDemoNode(uint8_t id);                            // a demo hole ID (fixed IDs, on or off)
++uint8_t meshDemoSim(uint8_t id);                          // its simulation value (0xFF = not running)
++void meshDemoSetSim(uint8_t id, uint8_t value);           // 255 = every demo hole (applied at once)
++void meshDemoName(uint8_t id, char* out, size_t n);       // "Demo A1"
++void meshDemoTick();                                      // chalet loop()
+diff --git a/src/lora_node/screens.cpp b/src/lora_node/screens.cpp
+index 4f6a0a0..8121a3d 100644
+--- a/src/lora_node/screens.cpp
++++ b/src/lora_node/screens.cpp
+@@ -110,9 +110,13 @@ void footer(u8g2_t* u, const ScreenModel& m, uint8_t page) {
+   u8g2_SetFont(u, F_SMALL);
+   char line[40];
+   const char* act = screenPageAction(m, page);
+-  if (act[0]) snprintf(line, sizeof(line), "%s", act);
++  const bool scroll = m.kb && ((page == PG_HOLES && screenHolesPages(m) > 1) || (page == PG_SONAR && screenSonarPages(m) > 1));
++  if (scroll) snprintf(line, sizeof(line), "^v: more holes");
++  else if (act[0]) snprintf(line, sizeof(line), "%s %s", m.kb ? "OK:" : "2x:", act);
+   else if (m.silenced) { char t[12]; mmss(t, sizeof(t), m.silence_s); snprintf(line, sizeof(line), "SILENCED %s", t); }
+-  else if (m.chalet) snprintf(line, sizeof(line), "%s", m.sta ? m.url : m.ssid);
++  else if (m.kb && page != PG_HOME) snprintf(line, sizeof(line), "Esc: menu");
++  else if (m.chalet && m.sta) { const char* ip = strncmp(m.url, "http://", 7) == 0 ? m.url + 7 : m.url; snprintf(line, sizeof(line), "%s", ip); }
++  else if (m.chalet) snprintf(line, sizeof(line), "%s", (m.sta_ssid[0] && (m.uptime_s / 3) % 2) ? "No cabin Wi-Fi" : m.ssid);   // alternates every 3 s
+   else if (m.hotspot) snprintf(line, sizeof(line), "Hotspot on %lu min", (unsigned long)m.hotspot_min);
+   else snprintf(line, sizeof(line), "Hold 3s: hotspot");
+   fit(u, line, 128 - PG_COUNT * 5 - 2);
+@@ -155,7 +159,7 @@ void homeChalet(u8g2_t* u, const ScreenModel& m, bool blink) {
+     if (!two) {
+       // link of that pocket, at the right
+       const char* lk = "";
+-      for (uint8_t k = 0; k < m.n_hubs; k++) if (m.hubs[k].id == pk[p]) lk = m.hubs[k].lora_ok ? "" : (m.hubs[k].eb_ok ? "ESP-NOW" : "LOST");
++      for (uint8_t k = 0; k < m.n_hubs; k++) if (m.hubs[k].id == pk[p]) lk = m.hubs[k].demo ? "DEMO" : m.hubs[k].lora_ok ? "" : (m.hubs[k].eb_ok ? "ESP-NOW" : "LOST");
+       if (lk[0]) snprintf(s, sizeof(s), "%s", lk);
+       else if (off) snprintf(s, sizeof(s), "%d off", off);
+       else snprintf(s, sizeof(s), "OK");
+@@ -266,7 +270,7 @@ void focusPage(u8g2_t* u, const ScreenModel& m) {
+   if (!fh || m.n_cols == 0) {
+     header(u, "Focus", nullptr);
+     u8g2_SetFont(u, F_MED); center(u, 34, fh ? "Waiting for data" : "No focus hole");
+-    u8g2_SetFont(u, F_SMALL); center(u, 50, "Double press: choose");
++    u8g2_SetFont(u, F_SMALL); center(u, 50, m.kb ? "Up/down: choose hole" : "Double press: choose");
+     return;
+   }
+   char nm[20]; holeName(*fh, nm, sizeof(nm));
+@@ -330,7 +334,8 @@ void networkPage(u8g2_t* u, const ScreenModel& m) {
+     int x = 0, y = 41;
+     for (uint8_t k = 0; k < m.n_hubs; k++) {
+       const ScrHubLink& h = m.hubs[k];
+-      if (h.lora_ok) snprintf(s, sizeof(s), "H%u %d", h.id, h.lora_rssi);
++      if (h.demo) snprintf(s, sizeof(s), "H%u SIM", h.id);
++      else if (h.lora_ok) snprintf(s, sizeof(s), "H%u %d", h.id, h.lora_rssi);
+       else if (h.eb_ok) snprintf(s, sizeof(s), "H%u E%u", h.id, h.eb_hops);
+       else snprintf(s, sizeof(s), "H%u --", h.id);
+       u8g2_DrawStr(u, x, y, s);
+@@ -350,7 +355,7 @@ void networkPage(u8g2_t* u, const ScreenModel& m) {
+ void connectPage(u8g2_t* u, const ScreenModel& m) {
+   header(u, "Connect phone", nullptr);
+   u8g2_SetFont(u, F_MED);
+-  char s[48];
++  char s[64];
+   if (!m.chalet && !m.hotspot) {
+     u8g2_DrawStr(u, 0, 28, "Hotspot is off.");
+     u8g2_DrawStr(u, 0, 42, "Hold button 3 s");
+@@ -363,13 +368,73 @@ void connectPage(u8g2_t* u, const ScreenModel& m) {
+     u8g2_SetFont(u, F_SMALL);
+     snprintf(s, sizeof(s), "or Wi-Fi %s", m.ssid); fit(u, s, 128); u8g2_DrawStr(u, 0, 50, s);
+   } else {
+-    snprintf(s, sizeof(s), "%s", m.ssid); fit(u, s, 128); u8g2_DrawStr(u, 0, 26, s);
+-    snprintf(s, sizeof(s), "pass %s", m.pass); u8g2_DrawStr(u, 0, 38, s);
+-    snprintf(s, sizeof(s), "%s", m.url); fit(u, s, 128); u8g2_DrawStr(u, 0, 50, s);
++    snprintf(s, sizeof(s), "%s", m.ssid); fit(u, s, 128); u8g2_DrawStr(u, 0, 25, s);
++    snprintf(s, sizeof(s), "pass %s", m.pass); u8g2_DrawStr(u, 0, 36, s);
++    snprintf(s, sizeof(s), "%s", m.url); fit(u, s, 128); u8g2_DrawStr(u, 0, 47, s);
++  }
++  // why there is no cabin address (chalet), or how to change the Wi-Fi
++  u8g2_SetFont(u, F_SMALL);
++  if (m.chalet && !m.sta) {
++    if (m.sta_ssid[0]) snprintf(s, sizeof(s), "%s: %s", m.sta_ssid, m.sta_state);
++    else snprintf(s, sizeof(s), "No cabin Wi-Fi set");
++    fit(u, s, 128); u8g2_DrawStr(u, 0, 57, s);
++  } else if (m.chalet && m.kb) {
++    u8g2_DrawStr(u, 0, 63, "OK: Wi-Fi options");
+   }
+   pageDots(u, PG_CONNECT);
+ }
+ 
++// ---- options: list / text entry / yes-no (content decided by the firmware) ----
++void optionsPage(u8g2_t* u, const ScreenModel& m, bool blink, uint8_t dots_page) {
++  const ScrOptions& o = m.opt;
++  char s[72];
++  if (o.mode == SO_TEXT) {
++    header(u, o.title, nullptr);
++    u8g2_SetFont(u, F_SMALL);
++    snprintf(s, sizeof(s), "%s", o.line); fit(u, s, 128); u8g2_DrawStr(u, 0, 23, s);
++    u8g2_DrawFrame(u, 0, 26, 128, 15);
++    u8g2_SetFont(u, F_MED);
++    // the end of the text that fits, cursor at the end
++    const char* t = o.text;
++    while (*t && u8g2_GetStrWidth(u, t) > 116) t++;
++    u8g2_DrawStr(u, 3, 37, t);
++    if (blink) u8g2_DrawHLine(u, 3 + u8g2_GetStrWidth(u, t) + 1, 38, 5);
++    u8g2_SetFont(u, F_SMALL);
++    snprintf(s, sizeof(s), "%s", o.hint); fit(u, s, 128); u8g2_DrawStr(u, 0, 52, s);
++    u8g2_DrawStr(u, 0, 62, "Esc: back   Del: erase");
++    return;
++  }
++  if (o.mode == SO_CONFIRM) {
++    header(u, o.title, nullptr);
++    u8g2_SetFont(u, F_MED);
++    snprintf(s, sizeof(s), "%s", o.line); fit(u, s, 128); center(u, 34, s);
++    u8g2_SetFont(u, F_SMALL);
++    center(u, 54, "OK = yes     Esc = no");
++    return;
++  }
++  char r[12]; snprintf(r, sizeof(r), "%u/%u", o.n ? o.sel + 1 : 0, o.n);
++  header(u, o.title, r);
++  const int VIS = 4, y0 = 14, rh = 10;   // 4 rows 14..54, footer below
++  int top = o.sel >= VIS ? o.sel - VIS + 1 : 0;
++  for (int k = 0; k < VIS && top + k < o.n; k++) {
++    const ScrRow& row = o.rows[top + k];
++    const int y = y0 + k * rh;
++    const bool sel = top + k == o.sel;
++    if (sel) { u8g2_DrawBox(u, 0, y, 128, rh); u8g2_SetDrawColor(u, 0); }
++    u8g2_SetFont(u, F_MED);
++    char v[24]; snprintf(v, sizeof(v), "%s%s", row.value, row.sub ? " >" : "");
++    const int vw = u8g2_GetStrWidth(u, v);
++    snprintf(s, sizeof(s), "%s", row.label); fit(u, s, 128 - vw - 6);
++    u8g2_DrawStr(u, 2, y + 8, s);
++    u8g2_DrawStr(u, 126 - vw, y + 8, v);
++    u8g2_SetDrawColor(u, 1);
++  }
++  u8g2_SetFont(u, F_SMALL);
++  snprintf(s, sizeof(s), "%s", o.hint); fit(u, s, dots_page < PG_COUNT ? 128 - PG_COUNT * 5 - 2 : 128);
++  u8g2_DrawStr(u, 0, 63, s);
++  if (dots_page < PG_COUNT) pageDots(u, dots_page);
++}
++
+ // rows used by the chalet home (pockets, two columns above 4)
+ uint8_t homeRows(const ScreenModel& m) {
+   if (!m.chalet) return 0;
+@@ -391,13 +456,13 @@ uint8_t screenSonarPages(const ScreenModel& m) {
+ }
+ const char* screenPageAction(const ScreenModel& m, uint8_t page) {
+   switch (page) {
+-    case PG_HOLES: return screenHolesPages(m) > 1 ? "2x: next 4 holes" : "";
++    case PG_HOLES: return screenHolesPages(m) > 1 ? "next 4 holes" : "";
+     case PG_SONAR: return "";   // no footer room; paging by double press when > 9 holes
+-    case PG_FOCUS: return m.chalet ? "2x: next hole" : "";
++    case PG_FOCUS: return m.chalet ? "next hole" : "";
+     case PG_TEST: {
+       if (!m.chalet) return "";
+       bool any = false; for (uint8_t i = 0; i < m.n_holes; i++) any |= m.holes[i].sim != 0;
+-      return any ? "2x: sim all OFF" : "2x: sim all ON";
++      return any ? "sim all OFF" : "sim all ON";
+     }
+     default: return "";
+   }
+@@ -409,7 +474,8 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
+   u8g2_SetFontMode(u, 1);
+   bool fish = false;
+   for (uint8_t i = 0; i < m.n_holes; i++) fish |= m.holes[i].state == SH_FISH;
+-  if (fish && !m.silenced) { drawAlert(u, m, blink); u8g2_SendBuffer(u); return; }
++  if (fish && !m.silenced) { drawAlert(u, m, blink); return; }
++  if (m.menu) { optionsPage(u, m, blink, 255); return; }   // CardKB menu (list of pages)
+   switch (page) {
+     case PG_HOLES: holesPage(u, m, sub, blink); footer(u, m, page); break;
+     case PG_SONAR: sonarPage(u, m, sub, blink); break;
+@@ -417,10 +483,10 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
+     case PG_NETWORK: networkPage(u, m); break;
+     case PG_TEST: testPage(u, m); footer(u, m, page); break;
+     case PG_CONNECT: connectPage(u, m); break;
++    case PG_OPTIONS: optionsPage(u, m, blink, PG_OPTIONS); break;
+     default:
+       if (m.chalet) homeChalet(u, m, blink); else homeHub(u, m, blink);
+       if (homeRows(m) <= 4) footer(u, m, PG_HOME); else pageDots(u, PG_HOME);   // 5 pocket rows: no room for the footer
+       break;
+   }
+-  u8g2_SendBuffer(u);
+ }
+diff --git a/src/lora_node/screens.h b/src/lora_node/screens.h
+index d38ce10..205967d 100644
+--- a/src/lora_node/screens.h
++++ b/src/lora_node/screens.h
+@@ -1,6 +1,7 @@
+ // v2 OLED screens (128x64, Heltec V3) — chalet and hubs. Pure drawing from a ScreenModel, with the U8g2
+ // C API, so the exact same code renders on the PC (tools/screens_mock.cpp → PNG mockups) and on the board.
+ // Design: docs/SCREENS.md. One button: short press = next page (silence during an alert).
++// CardKB: Esc = menu (list of pages, up/down + Enter), up/down = inside the page, Enter = OK, left/right = page.
+ #pragma once
+ #include <stdint.h>
+ #ifdef ARDUINO
+@@ -10,7 +11,7 @@
+ #endif
+ 
+ enum ScrHoleState : uint8_t { SH_OK = 0, SH_FISH = 1, SH_OFFLINE = 2, SH_FAULT = 3, SH_LOWBAT = 4 };
+-enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, PG_TEST, PG_CONNECT, PG_COUNT };
++enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, PG_TEST, PG_CONNECT, PG_OPTIONS, PG_COUNT };
+ 
+ // Sonar at a glance (from the BASE block of every hole): bottom + every target, not just the nearest
+ struct ScrTarget { uint16_t depth_cm; uint8_t level; bool bait; };   // level 1-3
+@@ -29,7 +30,20 @@ struct ScrHole {
+   uint8_t sim;               // simulation on this hole: bit0 sonar, bit1 Hall sensor (trips)
+ };
+ 
+-struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; };
++struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; bool demo; };   // demo = fake hub inside the chalet
++
++// Options page: the list (and its text entry / yes-no) is decided by the firmware, drawn here.
++struct ScrRow { char label[20]; char value[18]; bool sub; };   // sub = opens a list (">")
++enum ScrOptMode : uint8_t { SO_LIST = 0, SO_TEXT, SO_CONFIRM };
++struct ScrOptions {
++  uint8_t mode;              // ScrOptMode
++  char title[22];
++  uint8_t n, sel; ScrRow rows[56];
++  char hint[30];             // bottom line
++  // SO_TEXT: e.g. title "Wi-Fi password", line "for BELL494", text being typed
++  // SO_CONFIRM: title = question, line = detail
++  char line[34]; char text[66];
++};
+ 
+ struct ScreenModel {
+   bool chalet;               // false = hub
+@@ -48,6 +62,8 @@ struct ScreenModel {
+   bool hotspot; uint32_t hotspot_min;
+   // connect
+   char ssid[28]; char pass[20]; char url[32]; bool sta;   // sta = on the cabin Wi-Fi
++  char sta_ssid[33]; char sta_state[20];                  // cabin Wi-Fi name ("" = none set), "not found", ...
++  bool kb;                   // CardKB present: footers say "OK:" (Enter) instead of "2x:" (double press)
+   uint32_t uptime_s;
+   bool feet;                 // depth units
+   // FOCUS
+@@ -55,12 +71,14 @@ struct ScreenModel {
+   // test
+   uint8_t radio_test;        // 0 off, else a test mode
+   const char* radio_test_name;
++  ScrOptions opt;            // PG_OPTIONS (Settings) or the menu
++  bool menu;                 // CardKB menu open: opt holds the list of pages
+ };
+ 
+-// Draws one frame. `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).
++// Draws one frame into the buffer (the caller sends it: the firmware skips unchanged frames). `page` is ignored while a hole has FISH and alerts are not silenced (alert screen).
+ // `blink` toggles every 500 ms. `sub` = sub-page (holes list paging).
+ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool blink);
+ uint8_t screenHolesPages(const ScreenModel& m);
+ uint8_t screenSonarPages(const ScreenModel& m);
+-// what a double press does on this page ("" = nothing): shown in the footer
++// what OK (Enter / double press) does on this page ("" = nothing): shown in the footer
+ const char* screenPageAction(const ScreenModel& m, uint8_t page);
+diff --git a/test/test_demo_net/test_main.cpp b/test/test_demo_net/test_main.cpp
+new file mode 100644
+index 0000000..ca81c40
+--- /dev/null
++++ b/test/test_demo_net/test_main.cpp
+@@ -0,0 +1,105 @@
++// Demo network (chalet only, docs/SONAR_SIM.md): fake hubs run as real HubRole objects inside the
++// chalet; their packets enter through onEbHubPacket and the chalet's backbone beacon is fed back.
++// This checks the chain the firmware glue (mesh_radio.cpp meshDemo*) relies on: holes appear with
++// their pocket and the SIM flag, acks clear, BASE summaries reach the sonar store, CMD_SET_SIM reaches
++// the fake hubs, ChaletNodes::forget removes holes, demo IDs do not collide.
++#include <unity.h>
++#include <hub_role.h>
++#include <chalet_role.h>
++#include <sonar_link.h>
++#include <cstdio>
++
++using namespace icemesh;
++using namespace icemesh::tdma;
++
++void setUp(void) {}
++void tearDown(void) {}
++
++static const uint8_t HUB0 = 121;   // same rule as mesh_radio.cpp
++static uint8_t vid(uint8_t hub, uint8_t k) { return static_cast<uint8_t>(128 + (hub & 0x0F) * 8 + (k & 7)); }
++static uint8_t holeId(uint8_t hub, uint8_t k) { return k == 0 ? hub : vid(hub, static_cast<uint8_t>(k - 1)); }
++
++static void pushBase(HubRole<8>& r, uint8_t node, uint16_t bottom, uint16_t bait, uint16_t fish) {
++  sonar::Summary s; memset(&s, 0, sizeof(s));
++  s.node = node; s.ping = 8; s.bottom_cm = bottom; s.hard = sonar::BH_MEDIUM;
++  s.list[0].track = 0; s.list[0].depth_cm = bait; s.list[0].level = 2;
++  s.list[1].track = 1; s.list[1].depth_cm = fish; s.list[1].level = 3;
++  s.n_list = 2; s.n_targets = 1; s.activity = 4;
++  sonar::summaryNearest(s);
++  uint8_t blk[sonar::MAX_BLOCK];
++  const size_t n = sonar::encodeSummary(s, blk, sizeof blk);
++  TEST_ASSERT_TRUE(n > 0);
++  TEST_ASSERT_TRUE(r.sonar.push(blk, static_cast<uint8_t>(n), r.frameNow()));
++}
++
++static void test_ids_distinct(void) {
++  uint8_t seen[256]; memset(seen, 0, sizeof seen);
++  for (uint8_t h = 0; h < 4; h++)
++    for (uint8_t k = 0; k < 4; k++) {
++      const uint8_t id = holeId(static_cast<uint8_t>(HUB0 + h), k);
++      TEST_ASSERT_TRUE(id != 0 && id != 255);
++      TEST_ASSERT_EQUAL(0, seen[id]);
++      seen[id] = 1;
++    }
++}
++
++static void test_demo_chain(void) {
++  ChaletRole<10, 48> ch; ch.planner.cfg.network_id = 0x42; ch.planner.cfg.self_id = 100;
++  sonar::SonarStore<16, 128> store; ch.sonar_sink = &store;
++  HubRole<8> hub[3];
++  for (uint8_t h = 0; h < 3; h++) { hub[h].network_id = 0x42; hub[h].self = static_cast<uint8_t>(HUB0 + h); }
++  uint8_t b[MAX_PACKET], pl[MAX_PACKET];
++  int changes = 0;
++  for (uint16_t f = 1; f <= 6; f++) {
++    ch.startFrame(f, b, sizeof b);
++    const size_t bl = ch.buildEbBeacon(b, sizeof b);
++    for (uint8_t h = 0; h < 3; h++) {
++      uint8_t cmd = CMD_NONE;
++      TEST_ASSERT_TRUE(hub[h].onEbBeacon(b, bl, cmd));
++      for (uint8_t k = 0; k < 3; k++) {
++        const uint8_t id = holeId(hub[h].self, k);
++        hub[h].table.observe(id, LS_IDLE, 0, LF_SIM, 80, f * 1000u);
++        if (f == 2) pushBase(hub[h], id, static_cast<uint16_t>(500 + 10 * k), 420, 300);
++      }
++      const size_t n = hub[h].buildHubFree(pl, sizeof pl, 0, 3900, 1, hub[h].frameNow());
++      TEST_ASSERT_TRUE(n > HDR_LEN);
++      ChaletRxResult r;
++      TEST_ASSERT_TRUE(ch.onEbHubPacket(pl, n, 0, r));
++      changes += r.n_changes;
++    }
++  }
++  TEST_ASSERT_EQUAL(9, changes);                                  // 9 holes, each appears once
++  for (uint8_t h = 0; h < 3; h++) {
++    TEST_ASSERT_FALSE(hub[h].table.anyPending());                 // acks came back through the backbone beacon
++    for (uint8_t k = 0; k < 3; k++) {
++      const uint8_t id = holeId(hub[h].self, k);
++      const NodeView* v = ch.nodes.find(id);
++      TEST_ASSERT_NOT_NULL(v);
++      TEST_ASSERT_EQUAL(hub[h].self, v->owner);                   // grouped by pocket on the pages
++      TEST_ASSERT_TRUE((v->flags & LF_SIM) != 0);                  // marked SIM everywhere
++      const sonar::NodeSonar* ns = store.find(id);
++      TEST_ASSERT_NOT_NULL(ns);
++      TEST_ASSERT_TRUE(ns->has_sum);
++      TEST_ASSERT_EQUAL(500 + 10 * k, ns->sum.bottom_cm);
++      TEST_ASSERT_EQUAL(2, ns->sum.n_list);
++    }
++  }
++  // the chalet's simulation command reaches the fake hubs like real ones
++  ch.cmd = CMD_SET_SIM; ch.cmd_seq = 7; ch.cmd_target = holeId(HUB0 + 1, 2); ch.cmd_value = simValue(true, true, 6);
++  ch.startFrame(7, b, sizeof b);
++  uint8_t cmd = CMD_NONE;
++  TEST_ASSERT_TRUE(hub[1].onEbBeacon(b, ch.buildEbBeacon(b, sizeof b), cmd));
++  TEST_ASSERT_EQUAL(CMD_SET_SIM, cmd);
++  TEST_ASSERT_EQUAL(holeId(HUB0 + 1, 2), hub[1].last_cmd_target);
++  // demo off: holes are dropped from the chalet table
++  for (uint8_t h = 0; h < 3; h++) for (uint8_t k = 0; k < 3; k++) TEST_ASSERT_TRUE(ch.nodes.forget(holeId(hub[h].self, k)));
++  TEST_ASSERT_NULL(ch.nodes.find(HUB0));
++  TEST_ASSERT_FALSE(ch.nodes.forget(HUB0));
++}
++
++int main(void) {
++  UNITY_BEGIN();
++  RUN_TEST(test_ids_distinct);
++  RUN_TEST(test_demo_chain);
++  return UNITY_END();
++}
+diff --git a/tools/screens_mock.cpp b/tools/screens_mock.cpp
+index 8b8d651..1c5402c 100644
+--- a/tools/screens_mock.cpp
++++ b/tools/screens_mock.cpp
+@@ -22,6 +22,7 @@ static ScreenModel base(bool chalet) {
+   m.chalet = chalet; m.self_id = chalet ? 100 : 2; m.lora_ch = 1; m.lora_mhz_x10 = 9150; m.ch_auto = true; m.busy_pct = 4;
+   snprintf(m.ssid, sizeof(m.ssid), chalet ? "IceFish-Remote" : "IceFish-Hub2"); snprintf(m.pass, sizeof(m.pass), "fishon123");
+   snprintf(m.url, sizeof(m.url), "http://192.168.4.1"); m.uptime_s = 7380; m.master_heard = true; m.beacon_rssi = -94;
++  m.kb = true;
+   return m;
+ }
+ static void pockets3(ScreenModel& m) {
+@@ -58,6 +59,15 @@ static void addSonar(ScreenModel& m, uint8_t focus, int pings) {
+   m.focus_node = focus;
+ }
+ 
++
++// Options page: the rows are decided by the firmware (main.cpp optBuild); these mirror what it fills in
++static void orow(ScreenModel& m, const char* l, const char* v, bool sub = false) {
++  ScrRow& r = m.opt.rows[m.opt.n++]; snprintf(r.label, sizeof(r.label), "%s", l); snprintf(r.value, sizeof(r.value), "%s", v); r.sub = sub;
++}
++static void olist(ScreenModel& m, const char* title, uint8_t sel, const char* hint) {
++  m.opt.mode = SO_LIST; snprintf(m.opt.title, sizeof(m.opt.title), "%s", title); m.opt.sel = sel; snprintf(m.opt.hint, sizeof(m.opt.hint), "%s", hint);
++}
++
+ static void dump(u8g2_t* u, const std::string& path) {
+   uint8_t* b = u8g2_GetBufferPtr(u);
+   FILE* f = fopen(path.c_str(), "w");
+@@ -95,6 +105,43 @@ int main(int argc, char** argv) {
+   m = base(false); pockets3(m); m.master_heard = false; m.setup_s = 300; shot("hub_waiting", m, PG_HOME, 0, true);
+   m = base(false); pockets3(m); m.hotspot = true; m.hotspot_min = 28; shot("hub_connect", m, PG_CONNECT, 0, true);
+   m = base(false); pockets3(m); m.master_heard = false; m.on_backup = true; shot("hub_backup", m, PG_NETWORK, 0, true);
++  // ---- bench: chalet alone, no hub yet, cabin Wi-Fi not joined ----
++  m = base(true); m.setup_s = 290; snprintf(m.sta_ssid, sizeof(m.sta_ssid), "BELL494"); snprintf(m.sta_state, sizeof(m.sta_state), "not found");
++  shot("bench_home_a", m, PG_HOME, 0, true);
++  m.uptime_s = 7383; shot("bench_home_b", m, PG_HOME, 0, true);
++  shot("bench_connect", m, PG_CONNECT, 0, true);
++  m = base(true); m.sta = true; snprintf(m.url, sizeof(m.url), "http://192.168.2.37"); snprintf(m.sta_ssid, sizeof(m.sta_ssid), "BELL494");
++  pockets3(m); shot("home_on_cabin_wifi", m, PG_HOME, 0, true);
++  // ---- options (CardKB) ----
++  m = base(true); olist(m, "Settings", 0, "OK: open");
++  orow(m, "Wi-Fi", "not conn.", true); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "Link", "Auto");
++  orow(m, "LoRa channel", "Auto (1)"); orow(m, "Simulation", "off", true); orow(m, "Network reset", ""); orow(m, "Reboot", ""); orow(m, "Built", "Oct  6 15:40");
++  shot("options_main", m, PG_OPTIONS, 0, true);
++  m.opt.sel = 4; snprintf(m.opt.hint, sizeof(m.opt.hint), "OK: change"); shot("options_main_scrolled", m, PG_OPTIONS, 0, true);
++  m = base(true); pockets3(m); m.menu = true; olist(m, "Menu", 0, "OK: open   Esc: home");
++  orow(m, "Home", ""); orow(m, "Holes", "9"); orow(m, "Sonar", ""); orow(m, "Focus", ""); orow(m, "Network", "ch1");
++  orow(m, "Connect phone", "hotspot"); orow(m, "Test / simulation", ""); orow(m, "Settings", "");
++  shot("menu", m, PG_HOME, 0, true);
++  m.opt.sel = 7; shot("menu_settings", m, PG_HOME, 0, true);
++  m = base(true); olist(m, "Wi-Fi", 0, "Esc: back");
++  orow(m, "Status", "not found"); orow(m, "Network", "BELL494"); orow(m, "Choose network", "", true); orow(m, "Type name", "", true);
++  orow(m, "Address", "-"); orow(m, "Retry now", ""); orow(m, "Channel", "1 OK"); orow(m, "AP", "IceFish-Remote"); orow(m, "AP pass", "fishon123"); orow(m, "Forget network", "");
++  shot("options_wifi", m, PG_OPTIONS, 0, true);
++  m = base(true); olist(m, "Choose Wi-Fi", 0, "OK: join");
++  orow(m, "BELL494", "-58"); orow(m, "BELL494-5G?", "-61"); orow(m, "Voisin_2G", "-80"); orow(m, "Chalet guest", "-85 open"); orow(m, "Scan again", "");
++  shot("options_scan", m, PG_OPTIONS, 0, true);
++  m = base(true); m.opt.mode = SO_TEXT; snprintf(m.opt.title, sizeof(m.opt.title), "Wi-Fi password"); snprintf(m.opt.line, sizeof(m.opt.line), "for BELL494");
++  snprintf(m.opt.text, sizeof(m.opt.text), "mot2passe-du-chalet"); snprintf(m.opt.hint, sizeof(m.opt.hint), "Enter: connect");
++  shot("options_password", m, PG_OPTIONS, 0, true);
++  m = base(true); m.opt.mode = SO_CONFIRM; snprintf(m.opt.title, sizeof(m.opt.title), "Reboot?"); snprintf(m.opt.line, sizeof(m.opt.line), "Back in about 10 s");
++  shot("options_confirm", m, PG_OPTIONS, 0, true);
++  m = base(true); olist(m, "Simulation", 3, "OK: next mode");
++  orow(m, "All holes", "OFF"); orow(m, "Test holes", "OFF"); orow(m, "Fake fish rate", "6 /h"); orow(m, "Pointe", "both");
++  orow(m, "Baie", "sonar~"); orow(m, "Roche", "off"); orow(m, "Drop-off", "off");
++  shot("options_sim", m, PG_OPTIONS, 0, true);
++  m = base(false); olist(m, "Settings", 0, "OK: change");
++  orow(m, "Hotspot", "OFF"); orow(m, "Buzzer", "ON"); orow(m, "Alert hold", "30 s"); orow(m, "ESP-NOW relay", "ON"); orow(m, "Reed polarity", "HIGH");
++  shot("hub_options", m, PG_OPTIONS, 0, true);
+   printf("%d screens\n", k);
+   return 0;
+ }
