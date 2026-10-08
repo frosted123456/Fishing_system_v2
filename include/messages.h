@@ -9,6 +9,7 @@
 #define MESSAGES_H
 
 #include <Arduino.h>
+#include <alarm_latch.h>   // v2 (D41/D47) FISH ON alarm latch rules (lib/IceMesh, host-tested)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE ROLES
@@ -29,7 +30,8 @@ enum NodeRole : uint8_t {
 #define FLAG_FISH_ON        (1 << 0)
 #define FLAG_LOW_BATTERY    (1 << 1)
 #define FLAG_FIRST_BOOT     (1 << 2)
-#define FLAG_CONFIG_MODE    (1 << 3)
+#define FLAG_SIM            (1 << 3)   // v2: this node runs a simulation (fake sonar / fake trips); was FLAG_CONFIG_MODE, never used
+#define FLAG_CONFIG_MODE    FLAG_SIM   // legacy name
 #define FLAG_LORA_OK        (1 << 4)
 #define FLAG_ESPNOW_OK      (1 << 5)
 #define FLAG_SENSOR_ERROR   (1 << 6)
@@ -63,6 +65,11 @@ enum MessageType : uint8_t {
   MSG_LORA_DISCOVERY  = 0x42,
   MSG_CONFIG_UPDATE   = 0x50,   // Remote config update (supports hops)
   MSG_CONFIG_ACK      = 0x51,   // Config update acknowledgment (supports hops)
+  MSG_SONAR           = 0x60,   // v2: node -> hub, [net][node][type] + one sonar block (sonar_codec.h)
+  MSG_SONAR_CTRL      = 0x61,   // v2: hub -> nodes, SonarCtrlMessage (sim switch + FOCUS node)
+  MSG_DEV_CMD         = 0x62,   // v2: hub -> one node, DevCmdMessage (backbone relay on/off)
+  MSG_EB_BEACON       = 0x70,   // v2: ESP-NOW backbone, chalet beacon (lib/IceMesh/src/eb_link.h)
+  MSG_EB_HUB          = 0x71,   // v2: ESP-NOW backbone, hub packet (eb_link.h)
   MSG_PING            = 0x80,
   MSG_PONG            = 0x81,
   MSG_RESET_CMD       = 0x90,   // Reset all nodes command
@@ -213,6 +220,31 @@ typedef struct __attribute__((packed)) {
   uint8_t  checksum;        // XOR checksum
 } ConfigAckMessage;
 
+// v2 sonar control - hub broadcast every second while the sonar test mode is on (or the knobs just
+// changed), and right after any message from a node (the node listens briefly after it transmits).
+#define SONAR_CTRL_PARAMS 24   // >= icemesh::sonar::P_COUNT (lib/IceMesh/src/sonar_params.h)
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  sender_id;
+  uint8_t  msg_type;        // MSG_SONAR_CTRL
+  uint8_t  focus_node;      // 0 = none
+  uint8_t  sim_on;          // 1 = sonar nodes generate fake data
+  uint8_t  n_params;        // v2 (D42): sonar knobs that follow (0 = none)
+  uint8_t  params[SONAR_CTRL_PARAMS];
+} SonarCtrlMessage;
+
+// v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
+// (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
+enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3 };   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  sender_id;
+  uint8_t  msg_type;        // MSG_DEV_CMD
+  uint8_t  target;          // node ID
+  uint8_t  cmd;             // DEVCMD_*
+  uint8_t  value;           // relay: 1 on, 0 off; sim: see DEVCMD_SIM
+} DevCmdMessage;
+
 // Reset command message (8 bytes) - broadcast to all nodes
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
@@ -226,7 +258,7 @@ typedef struct __attribute__((packed)) {
 // NODE STATE TRACKING (for deduplication and state management)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define MAX_NODES 16
+#define MAX_NODES 48       // v2: 10 hubs x (hub hole + 3 tip-ups) + spares (was 16)
 #define ALERT_MIN_HOLD_MS 1000    // 1 second debounce - prevents false clears from reed bounce
 
 // Per-node tracking for sequence and state
@@ -250,6 +282,7 @@ typedef struct {
   char     name[16];
   uint8_t  grid_row;
   uint8_t  grid_col;
+  icemesh::AlarmLatch alarm;  // v2 (D41/D47): the FISH ON alarm shown / sounded for this hole (alarm_latch.h)
 } NodeState;
 
 // Network state

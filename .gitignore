@@ -1,0 +1,29 @@
+# build outputs
+build/
+.pio/
+*.bin
+*.elf
+*.map
+test/bin/
+# editors / OS
+.vscode/
+.DS_Store
+Thumbs.db
+.preview/
+__pycache__/
+# credentials (see src/lora_node/secrets.example.h)
+src/lora_node/secrets.h
+# review scratch copies and duplicate downloads
+.review/
+*-1.png
+# kept on the PC only, not on GitHub (Frank, 2026-10-07): docs, tests, reference, dev tools
+docs/
+test/
+reference/
+*.md
+tools/sim/
+tools/screens_mock.cpp
+tools/screens_sheet.py
+tools/sonar_replay.cpp
+tools/sonar_trace.cpp
+tools/proto_reference.js
