@@ -101,8 +101,7 @@ bool begin() {
   g_ok = readReg(0x1D) == 0xB9;
   writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
   writeReg(0x14, 0x00);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2)
-  writeReg(0x16, 0x46);   // VDRV 11 V, regulator on (bit 5 = 0), bit 6 DIS_VDRV_REG_LSTN: the chip stops charging
-                          // VDRV while it listens (its own quiet receive, datasheet 7.3.1); the ping re-arms it
+  writeReg(0x16, 0x0F);   // VDRV 20 V, regulator always on, not Hi-Z: the Open Echo init (vmode 0); ping() sets the knob
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0
   // input: mcpwm_gpio_init makes the pin input-only, so it runs FIRST, the RMT then takes the pin as
@@ -162,14 +161,18 @@ static void burst(uint32_t hz, uint8_t cycles) {
 }
 
 // one capture at one frequency -> dB per bin (power average into `acc`)
+static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (Open Echo), 1 = quiet listen (datasheet)
+
 static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], PingInfo& info) {
   const size_t want = MAX_SAMPLES;
   if (SONAR_PIN_BOOST >= 0) digitalWrite(SONAR_PIN_BOOST, LOW);   // item 2: quiet receive (VDRV holds the burst)
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
-  writeReg(0x1B, 0x02);                                           // VDRV_TRIGGER: charge VDRV for this burst (DIS_VDRV_REG_LSTN mode)
-  for (int w = 0; w < 20 && !(lastStatus() & 0x20); w++) { delayMicroseconds(200); readReg(0x1C); }   // VDRV_READY, 4 ms max
-  writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER (VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
+  if (g_vmode == 1) {   // DIS_VDRV_REG_LSTN mode: the regulator is off, charge VDRV for this burst first
+    writeReg(0x1B, 0x02);                                         // VDRV_TRIGGER
+    for (int w = 0; w < 20 && !(lastStatus() & 0x20); w++) { delayMicroseconds(200); readReg(0x1C); }   // VDRV_READY, 4 ms max
+  }
+  writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER, as Open Echo (vmode 1: VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
   burst(hz, cycles);
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
@@ -226,7 +229,11 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   const uint8_t avg = focus ? 1 : p[P_AVG];
-  writeReg(0x16, (uint8_t)(0x50 | ((p[P_VDRV] - 5) & 0x0F)));   // VDRV = knob volts, 20 mA charge (bit 4), stop charging while listening (bit 6)
+  // VDRV_CTRL (0x16): bits 3:0 = VDRV - 5 V. vmode 0 = regulator always on, default charge current: exactly what the
+  // Open Echo firmware writes (0x0F at 20 V) and what has fish on screen. vmode 1 = bit 6 DIS_VDRV_REG_LSTN (no
+  // charging while listening) + bit 4 20 mA charge, re-armed by VDRV_TRIGGER in capture(): datasheet 7.3.1, unproven.
+  g_vmode = p[P_VMODE];
+  writeReg(0x16, (uint8_t)((g_vmode == 1 ? 0x50 : 0x00) | ((p[P_VDRV] - 5) & 0x0F)));
   // DEV_CTRL_2 (0x13): bits 1:0 LNA_GAIN codes are NOT in order (0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V,
   // datasheet): knob 0..3 = 10, 12.5, 15, 20 V/V. Bit 2 VOUT_SCALE_SEL = 0 (3.3 V map), both log-amp stages on.
   static const uint8_t LNA_CODE[4] = {1, 3, 0, 2};

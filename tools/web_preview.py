@@ -43,7 +43,7 @@ KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contras
          ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 2, "per ping"),
          ("freq", "Frequency mode", 0, 2, 0, "0 3/ping 1 rot 2 200k"), ("sound", "Sound speed", 0, 255, 53, "+1350 m/s"),
          ("bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"), ("thresh", "Edge threshold", 0, 15, 7, "reg 0x17"),
-         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 11, "V (MT3608 - 1)")]
+         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 >= V+0.3)"), ("vmode", "VDRV mode", 0, 1, 0, "0 on (proven) 1 quiet")]
 state["knobs"] = {k[0]: k[4] for k in KNOBS}
 def knobs_json():
     v = state["knobs"]

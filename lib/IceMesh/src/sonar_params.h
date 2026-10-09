@@ -35,6 +35,8 @@ enum ParamId : uint8_t {
   P_BOTTOM_MIN,      // D43: bottom search starts here (x0.1 m; prototype 0.6 m). Bucket test: 1-2
   P_VDRV,            // D45: transducer drive VDRV in volts (reg 0x16 = V - 5, 5-20 V); must stay below the
                      //      MT3608 output (VPWR > VDRV + 0.3 V). Full bridge: 2 x VDRV peak-to-peak
+  P_VMODE,           // D53: VDRV regulator mode. 0 = always on (Open Echo firmware, proven in water), 1 = off while
+                     //      listening + re-charge before each burst (datasheet 7.3.1, quieter receive, unproven)
   P_COUNT
 };
 
@@ -63,7 +65,8 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
     {"thresh", "Edge threshold", 0, 15, 7, "reg 0x17"},
     {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
-    {"vdrv", "Drive voltage", 5, 20, 11, "V (MT3608 - 1)"},
+    {"vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 >= V+0.3)"},
+    {"vmode", "VDRV mode", 0, 1, 0, "0 on (proven) 1 quiet"},
   };
   return T[id < P_COUNT ? id : 0];
 }

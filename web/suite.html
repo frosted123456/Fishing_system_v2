@@ -825,7 +825,8 @@ const KHELP = {
   bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
   thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
   bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; bucket: just past the ringing.'],
-  vdrv: ['Drive voltage', 'Transducer drive, volts. Must stay 1 V below the MT3608 setting.'],
+  vdrv: ['Drive voltage', 'Transducer drive, volts (max 20). Must stay 1 V below the MT3608 setting (21 V for 20).'],
+  vmode: ['Drive regulator', '0 = always on, as the Open Echo firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
 };
 const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
 function renderKnobs() {

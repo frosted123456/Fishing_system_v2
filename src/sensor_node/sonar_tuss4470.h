@@ -43,8 +43,9 @@
 #define SONAR_ADC_HZ          150000   // I2S-ADC sample rate: ~5 samples per 2.5 cm bin at 1403 m/s
 #define SONAR_CHARGE_MS       1        // settle before each burst; the real VDRV refill is the VDRV_READY wait in capture()
 // Drive voltage: knob "vdrv" (volts). VDRV_CTRL (reg 0x16) bits 3:0 = VDRV - 5 V, 5-20 V (datasheet), charged
-// from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet), so knob = MT3608 setting - 1 V. Default 11 V for the
-// 12.0 V setting. MT3608 at 21 V -> vdrv 20 = 40 V p-p across the transducer (full bridge, 2 x VDRV).
+// from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet). Default 20 V (chip max, the Open Echo tests ran
+// 15-20 V) = MT3608 at 21 V, 40 V p-p across the transducer (full bridge, 2 x VDRV). MT3608 still at 12 V:
+// KNOB vdrv 11. Knob "vmode": 0 = regulator always on (Open Echo, proven), 1 = off while listening (datasheet).
 #define SONAR_WAKE_MS         10       // sleep -> SPI ready (datasheet power-up time 10 ms; sleep exit likely faster)
 // Log-amp output: 29.7 mV/dB typical with VOUT_SCALE_SEL = 0 (3.3 V map, datasheet; 25-33 mV/dB over parts),
 // ADC 12-bit over ~3.3 V -> 0.0271 dB per count (est.: the real ADC full scale and the part's slope differ;
