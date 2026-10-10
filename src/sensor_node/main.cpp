@@ -199,6 +199,16 @@ uint8_t alertRetryCount = 0;
 
 // ESP-NOW send status
 volatile bool sendInProgress = false;
+// D54: radio-quiet sonar capture. Every ESP-NOW frame handed to the radio is counted here and in the send
+// callback; before a ping the capture waits until the radio has nothing in flight (TX bursts show up in the
+// I2S-ADC samples). RX cannot be gated; only TX is.
+volatile uint32_t g_txQueued = 0, g_txDone = 0; volatile unsigned long g_txDoneMs = 0;
+static uint32_t g_rfWaitN = 0, g_rfWaitUsMax = 0, g_rfBusyAtPing = 0;
+static inline esp_err_t nowSend(const uint8_t* mac, const uint8_t* data, size_t len) {
+  const esp_err_t r = esp_now_send(mac, data, len);
+  if (r == ESP_OK) g_txQueued++;
+  return r;
+}
 volatile bool sendSuccess = false;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -672,7 +682,7 @@ bool espNowSendReliable(const uint8_t* data, size_t len, int maxRetries) {
       sendInProgress = true;
       sendSuccess = false;
 
-      esp_err_t result = esp_now_send(gatewayMac, data, len);
+      esp_err_t result = nowSend(gatewayMac, data, len);
 
       if (result == ESP_OK) {
         // C4 FIX: Wait for send callback with reduced timeout (50ms max)
@@ -711,7 +721,7 @@ bool espNowSendReliable(const uint8_t* data, size_t len, int maxRetries) {
       sendInProgress = true;
       sendSuccess = false;
 
-      esp_err_t result = esp_now_send(ESPNOW_BROADCAST, data, len);
+      esp_err_t result = nowSend(ESPNOW_BROADCAST, data, len);
 
       if (result == ESP_OK) {
         // C4 FIX: Wait for callback with reduced timeout (50ms max)
@@ -904,6 +914,7 @@ void sendAlert() {
 void onEspNowSent(const uint8_t* mac, esp_now_send_status_t status) {
   sendSuccess = (status == ESP_NOW_SEND_SUCCESS);
   sendInProgress = false;
+  g_txDone++; g_txDoneMs = millis();
 
   #if DEBUG_ESPNOW
   DEBUG_PRINTF("ESP-NOW TX: %s\n", sendSuccess ? "OK" : "FAIL");
@@ -1332,7 +1343,7 @@ void ebRelayLoop() {
     size_t n;
     if (!icemesh::eb::decode(f.data, f.len, NETWORK_ID, h, pl, n)) continue;
     if (dedup.seen(h.origin, h.type, h.seq)) continue;
-    if (icemesh::eb::prepareRelay(f.data, f.len, NODE_ID) && esp_now_send(ESPNOW_BROADCAST, f.data, f.len) == ESP_OK) ebRelayed++;
+    if (icemesh::eb::prepareRelay(f.data, f.len, NODE_ID) && nowSend(ESPNOW_BROADCAST, f.data, f.len) == ESP_OK) ebRelayed++;
   }
   if (ebRelayOn && millis() - lastReport >= 60000UL) {
     lastReport = millis();
@@ -1370,6 +1381,26 @@ void sonarRecord(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::
 // one readable line per ping for the bucket test: is the hardware right, where is the bottom
 static bool sonarStatAsk = false;
 static int16_t sonarKnobAskId = -1; static uint8_t sonarKnobAskVal = 0;   // serial KNOB, applied in sonarLoop
+// D54: wait (max 40 ms) until every queued ESP-NOW frame has been transmitted, plus a 2 ms guard after the last
+// TX callback, so no transmit burst lands inside the capture window. Counted for the bench line / STAT.
+static void radioQuietForPing() {
+  const uint32_t t0 = micros();
+  bool waited = false;
+  while (true) {
+    const bool inflight = (g_txQueued != g_txDone) || sendInProgress;
+    const bool guard = (millis() - g_txDoneMs) < 2UL;
+    if (!inflight && !guard) break;
+    if (micros() - t0 > 40000UL) { g_rfBusyAtPing++; break; }   // radio stuck: ping anyway, count it
+    waited = true;
+    yield();
+  }
+  if (waited) {
+    g_rfWaitN++;
+    const uint32_t us = micros() - t0;
+    if (us > g_rfWaitUsMax) g_rfWaitUsMax = us;
+  }
+}
+
 static void sonarBenchLine(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   char edge[16];
   if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
@@ -1379,6 +1410,7 @@ static void sonarBenchLine(const tuss::PingInfo& pi, const icemesh::sonar::Sonar
                 o.ring_alarm ? "(RING ALARM)" : "");
   static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
   for (uint8_t k = 0; k < o.n; k++) Serial.printf(" %.2fm:%s", (double)o.t[k].depth, L[o.t[k].label & 3]);
+  Serial.printf(" | rf: waited %lu pings (max %lu us), busy at ping %lu", (unsigned long)g_rfWaitN, (unsigned long)g_rfWaitUsMax, (unsigned long)g_rfBusyAtPing);
   Serial.println();
 }
 
@@ -1511,6 +1543,7 @@ void sonarLoop() {
       if (++tick_n >= tpp) {
         tick_n = 0;
         tuss::PingInfo pi;
+        radioQuietForPing();
         if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
           n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 2);
           sonarRecord(codes, pi);
@@ -1536,7 +1569,7 @@ void sonarLoop() {
       frame[0] = NETWORK_ID; frame[1] = NODE_ID; frame[2] = MSG_SONAR;
       memcpy(frame + 3, out[i].data, out[i].len);
       // best effort, no retry: a lost block only leaves a gap on the waterfall
-      esp_now_send(gatewayMacKnown ? gatewayMac : ESPNOW_BROADCAST, frame, 3 + out[i].len);
+      nowSend(gatewayMacKnown ? gatewayMac : ESPNOW_BROADCAST, frame, 3 + out[i].len);
     }
   }
 }
