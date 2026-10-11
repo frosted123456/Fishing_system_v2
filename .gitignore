@@ -29,3 +29,4 @@ tools/sonar_trace.cpp
 tools/proto_reference.js
 # 3D model (STEP, build123d): kept on the PC, not on GitHub
 Model/
+hardware/
