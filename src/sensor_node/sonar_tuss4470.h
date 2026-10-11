@@ -32,12 +32,18 @@
 #define SONAR_PIN_CS    5
 #define SONAR_PIN_IO1   26
 #define SONAR_PIN_IO2   25      // burst (RMT out)
-#define SONAR_PIN_O4    -1      // comparator OUT_4 (MCPWM capture): not in the 12-core mast cable (one echo
-                                // wire = VOUT). The spare core + a free GPIO here enables edge timing
 #define SONAR_PIN_VOUT  36      // ADC1_CH0 (VP)
-#define SONAR_PIN_BOOST -1      // converter enable: not in Frank's design (MT3608 always on). A GPIO here
-                                // = converter off while listening (roadmap item 2), if ever added
 #endif
+#ifndef SONAR_PIN_O4
+#define SONAR_PIN_O4    -1      // comparator OUT_4 (MCPWM capture): not in the 12-core mast cable (one echo
+                                // wire = VOUT). Pod board v0.3: GPIO32 (build flag)
+#endif
+#ifndef SONAR_PIN_BOOST
+#define SONAR_PIN_BOOST -1      // MT3608 EN. Shield + modules: none (always on). Pod board v0.3: GPIO33 (build
+                                // flag): HIGH while the sonar runs, LOW in sleep() -> no boost quiescent in sleep.
+                                // Never toggled during a ping (VPWR feeds the TUSS4470 regulator, D53 vmode 0)
+#endif
+#define SONAR_BOOST_SETTLE_MS 20   // MT3608 soft start + C8/C9 charge to 24 V (est., measure on the bench)
 
 // ---- acquisition constants (est.) ----
 #define SONAR_ADC_HZ          150000   // I2S-ADC sample rate: ~5 samples per 2.5 cm bin at 1403 m/s

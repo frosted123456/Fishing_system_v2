@@ -53,6 +53,11 @@ static void spiUp() {
 }
 // out of sleep mode; first releases the NCS hold that sleep() set, or no frame could reach the chip
 static void wake() {
+  if (SONAR_PIN_BOOST >= 0) {   // pod board v0.3: boost back on, let VPWR reach 24 V before the first burst
+    gpio_hold_dis((gpio_num_t)SONAR_PIN_BOOST);
+    pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH);
+    delay(SONAR_BOOST_SETTLE_MS);
+  }
   gpio_hold_dis((gpio_num_t)SONAR_PIN_CS);
   digitalWrite(SONAR_PIN_CS, HIGH);
   writeReg(0x1B, 0x00);
@@ -148,6 +153,10 @@ void sleep() {
   // (A 10 k pull-up on NCS at the shield does the same in hardware.)
   digitalWrite(SONAR_PIN_CS, HIGH);
   gpio_hold_en((gpio_num_t)SONAR_PIN_CS);
+  if (SONAR_PIN_BOOST >= 0) {   // pod board v0.3: boost off through deep sleep (EN held low)
+    pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, LOW);
+    gpio_hold_en((gpio_num_t)SONAR_PIN_BOOST);
+  }
   gpio_deep_sleep_hold_en();
 }
 
@@ -165,7 +174,6 @@ static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (Open 
 
 static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], PingInfo& info) {
   const size_t want = MAX_SAMPLES;
-  if (SONAR_PIN_BOOST >= 0) digitalWrite(SONAR_PIN_BOOST, LOW);   // item 2: quiet receive (VDRV holds the burst)
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
   if (g_vmode == 1) {   // DIS_VDRV_REG_LSTN mode: the regulator is off, charge VDRV for this burst first
@@ -189,7 +197,6 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   info.adc_hz = (tB > tA && got > gotA) ? (uint32_t)((uint64_t)(got - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
   i2s_adc_disable(I2S_NUM_0);
   writeReg(0x1B, 0x00);
-  if (SONAR_PIN_BOOST >= 0) digitalWrite(SONAR_PIN_BOOST, HIGH);  // recharge until the next ping
   const size_t n = got / 2;
   if (n < 200) return false;
   // I2S-ADC quirk on the classic ESP32: samples come in swapped pairs; 12 data bits, channel in the top 4
