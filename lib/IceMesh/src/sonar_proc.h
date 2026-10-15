@@ -91,8 +91,10 @@ class SonarProc {
         for (int i = 0; i < N; i++) {
           // reference = what was there in BOTH previous pings (max over +-W bins, then the smaller of the 2 pings):
           // a real echo is in both, an earlier interference spike only in one
+          // (+-W for the last ping, +-2W for the one before: a fish moving a gate per ping is still inside both)
           uint8_t m1 = 0, m2 = 0;
-          for (int j = std::max(0, i - W); j <= std::min(N - 1, i + W); j++) { m1 = std::max(m1, h1_[j]); m2 = std::max(m2, h2_[j]); }
+          for (int j = std::max(0, i - W); j <= std::min(N - 1, i + W); j++) m1 = std::max(m1, h1_[j]);
+          for (int j = std::max(0, i - 2 * W); j <= std::min(N - 1, i + 2 * W); j++) m2 = std::max(m2, h2_[j]);
           const uint8_t ref = std::min(m1, m2);
           if (raw[i] > ref && raw[i] - ref > X) {
             d[i] = static_cast<float>(codeToDb(std::min(h1_[i], h2_[i])));
@@ -179,8 +181,9 @@ class SonarProc {
       const sreal dl = den < R(0) ? clampr(R(0.5) * (A - Cc) / den, R(-0.5), R(0.5)) : R(0);
       if (prm[P_ECHOLEN]) {   // D57 single-echo test (Echoview single-beam SED): echo length 6 dB below the peak
         const sreal top = static_cast<sreal>(d[i]) - R(6);
-        int l6 = i; while (l6 > 0 && static_cast<sreal>(d[l6 - 1]) > top) l6--;
-        int r6 = i; while (r6 < N - 1 && static_cast<sreal>(d[r6 + 1]) > top) r6++;
+        // scan kept inside the search window: the ring-down (left) and the bottom echo (right) are not this echo
+        int l6 = i; while (l6 > i0 && static_cast<sreal>(d[l6 - 1]) > top) l6--;
+        int r6 = i; while (r6 + 1 < i1 && static_cast<sreal>(d[r6 + 1]) > top) r6++;
         const sreal len = static_cast<sreal>(r6 - l6 + 1) * BIN_M();
         if (len > (pulse_m + BIN_M()) * R(prm[P_ECHOLEN] / 10.0)) { long_echoes++; continue; }
       }

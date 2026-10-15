@@ -161,6 +161,9 @@ static inline void hallArmWake() {}
 #endif
 RTC_DATA_ATTR bool sonarSimOn = false;              // v2 sonar test mode (survives a reboot loop guard)
 volatile bool sonarCtrlSeen = false;
+volatile bool sonarCtrlEver = false;               // any sonar control message since boot
+static bool g_sonarHwTried = false, g_sonarHwOk = false;
+static bool sonarHwBegin();                        // tuss::begin() once; true = TUSS4470 answers
 volatile bool sonarCtrlSim = false;
 volatile uint8_t sonarCtrlFocus = 0;
 // v2 (D42): sonar knobs from the hub's sonar control (the chalet's set), applied by sonarLoop and saved
@@ -246,6 +249,11 @@ void setup() {
   #if DEBUG_SERIAL
   Serial.begin(DEBUG_BAUD);
   delay(100);
+  #endif
+  #if DEBUG_SERIAL || SONAR_REAL
+  Serial.setTimeout(20);      // readStringUntil() must not stall the loop for the default 1 s
+  #endif
+  #if DEBUG_SERIAL
   Serial.println();
   Serial.println(F("════════════════════════════════════════"));
   Serial.println(F("   ICE FISHING MONITOR - SENSOR NODE"));
@@ -406,11 +414,16 @@ void setup() {
   // v2: the hub answers our TX with its sonar control and pending commands (backbone relay).
   // Sonar test mode or relay on: stay awake, loop() keeps reed, heartbeat and alerts working.
   if (SONAR_SIM_ALLOWED && (SONAR_SIM_FORCE || SONAR_BENCH)) sonarSimOn = true;
-  else sonarListenCtrl(SONAR_CTRL_WAIT_MS);
+  else {
+    sonarListenCtrl(SONAR_CTRL_WAIT_MS);
+    // D43/D58: a node with a working TUSS4470 runs its real sonar whenever its hub talks to it (the simulation bit
+    // only decides fake vs real data). Before this check the real build went back to sleep here every time.
+    if (SONAR_REAL && sonarCtrlEver && !sonarSimOn && sonarHwBegin()) sonarSimOn = true;
+  }
   ebRelayApplyCmd();
   simApplyCmd();
   if (SONAR_SIM_ALLOWED && sonarSimOn && SLEEP_ENABLED) {
-    DEBUG_PRINTLN(F("Sonar test mode ON - staying awake (fake sonar)"));
+    DEBUG_PRINTLN(F("Sonar ON - staying awake"));
     return;
   }
   if (ebRelayOn && SLEEP_ENABLED) {
@@ -704,6 +717,7 @@ bool espNowSendReliable(const uint8_t* data, size_t len, int maxRetries) {
           delay(20 + random(20));  // Brief delay before retry
         }
       } else {
+        sendInProgress = false;   // no callback will come for a refused send
         DEBUG_PRINTF("ESP-NOW: Send error %d (attempt %d)\n", result, retry + 1);
         delay(20 + random(20));
       }
@@ -741,7 +755,7 @@ bool espNowSendReliable(const uint8_t* data, size_t len, int maxRetries) {
           success = true;
           DEBUG_PRINTF("ESP-NOW: Broadcast sent (attempt %d)\n", retry + 1);
         }
-      }
+      } else sendInProgress = false;   // refused send: no callback will come
 
       if (retry < 1) delay(15 + random(15));  // Brief delay between broadcasts
     }
@@ -1012,7 +1026,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     if (c->n_params > 0 && c->n_params <= SONAR_CTRL_PARAMS) {
       memcpy(sonarKnobsBuf, c->params, c->n_params); sonarKnobsN = c->n_params; sonarKnobsNew = true;
     }
-    sonarCtrlSeen = true;
+    sonarCtrlSeen = true; sonarCtrlEver = true;
     return;
   }
 
@@ -1253,6 +1267,14 @@ uint32_t estimateActualSleepDuration(esp_sleep_wakeup_cause_t wakeReason) {
 // v2 SONAR TEST MODE
 // ═══════════════════════════════════════════════════════════════════════════
 
+static bool sonarHwBegin() {
+  if (!SONAR_REAL) return false;
+  if (!g_sonarHwTried) {
+    g_sonarHwTried = true; g_sonarHwOk = tuss::begin();
+    DEBUG_PRINTF("Sonar TUSS4470: %s\n", g_sonarHwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
+  }
+  return g_sonarHwOk;
+}
 void sonarListenCtrl(uint32_t wait_ms) {
   const unsigned long t0 = millis();
   while (!sonarCtrlSeen && millis() - t0 < wait_ms) delay(5);
@@ -1280,7 +1302,7 @@ void simApplyCmd() {
   if (v == simBits) return;
   simBits = v; simTripEnd = 0; simNextTrip = 0;
   if (v) SET_FLAG(currentFlags, FLAG_SIM); else CLEAR_FLAG(currentFlags, FLAG_SIM);
-  if (!(v & 0x01)) sonarSimOn = false;
+  if (!(v & 0x01) && !SONAR_BENCH && !SONAR_SIM_FORCE && !g_sonarHwOk) sonarSimOn = false;   // a real sonar keeps running
   Preferences p;
   p.begin("node", false);
   p.putUChar("sim", v);
@@ -1548,7 +1570,7 @@ String sonarCommand(const String& in, bool fromWeb) {
     String a = rest; a.toLowerCase(); const int sp = a.indexOf(' ');
     bool found = false;
     for (uint8_t k = 0; sp > 0 && k < icemesh::sonar::P_COUNT; k++)
-      if (a.substring(0, sp) == icemesh::sonar::paramInfo(k).key) { sonarKnobAskId = k; sonarKnobAskVal = (uint8_t)a.substring(sp + 1).toInt(); found = true; }
+      if (a.substring(0, sp) == icemesh::sonar::paramInfo(k).key) { sonarKnobAskId = k; const long v = a.substring(sp + 1).toInt(); sonarKnobAskVal = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); found = true; }
     if (found) r = "Knob " + a.substring(0, sp) + " -> " + a.substring(sp + 1) + " (applied before the next ping)";
     else {
       r = "KNOB <name> <value>, names:";
@@ -1567,9 +1589,10 @@ String sonarCommand(const String& in, bool fromWeb) {
   } else if (w == "CAL") {
     uint16_t pts[17]; tuss::getCalibration(pts);
     if (rest.length()) {
-      int k = 0; char* c = const_cast<char*>(rest.c_str()); char* e;
-      while (k < 17) { const long v = strtol(c, &e, 10); if (e == c) break; pts[k++] = (uint16_t)v; c = e; }
-      if (k == 17) tuss::setCalibration(pts); else r = "CAL needs 17 numbers (raw 0, 256 ... 4096 -> corrected)\n";
+      uint16_t np[17]; int k = 0; bool okv = true; char* c = const_cast<char*>(rest.c_str()); char* e;
+      while (k < 17) { const long v = strtol(c, &e, 10); if (e == c) break; if (v < 0 || v > 4095) okv = false; np[k++] = (uint16_t)v; c = e; }
+      if (k == 17 && okv) { tuss::setCalibration(np); memcpy(pts, np, sizeof(pts)); }
+      else r = "CAL needs 17 numbers 0..4095 (raw 0, 256 ... 4096 -> corrected); stored curve unchanged\n";
     }
     r += "ADC calibration:"; for (int k = 0; k < 17; k++) { r += " "; r += String(pts[k]); }
   } else if (l.length()) {
@@ -1613,11 +1636,7 @@ void sonarLoop() {
   }
   // v2 (D43) real sonar: started once; a node with a working TUSS4470 runs its sonar whenever its hub
   // talks to it (sonar control seen), fake data only when the chalet asks for a sonar simulation
-  static bool hwTried = false, hwOk = false;
-  if (SONAR_REAL && !hwTried) {
-    hwTried = true; hwOk = tuss::begin();
-    DEBUG_PRINTF("Sonar TUSS4470: %s\n", hwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
-  }
+  const bool hwOk = sonarHwBegin();
   static uint8_t bait5 = 0;
   static bool baitLoaded = false;
   if (!baitLoaded) { baitLoaded = true; Preferences p; p.begin("node", true); bait5 = p.getUChar("bait", 0); p.end(); }
@@ -1695,6 +1714,7 @@ void sonarLoop() {
         tick_n = 0;
         tuss::PingInfo pi;
         radioQuietForPing();
+        while (bench::active() && millis() - bench::lastServedMs() < 15) yield();   // let the page's reply leave the radio first
         if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
           n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 2);
           static uint32_t recCount = 0; static unsigned long lastRaw = 0;

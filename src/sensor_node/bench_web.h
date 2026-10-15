@@ -21,6 +21,7 @@ void push(const char* line);                   // one recording line (no newline
 void setStatus(const char* bench_line, const uint8_t* codes, uint16_t nbins, float bin_m, bool recording,
                uint32_t rec_lines, uint16_t rec_every, uint16_t raw_every_s);
 uint32_t lastSeq();
+unsigned long lastServedMs();                  // millis() of the last HTTP reply (radio-quiet guard)
 
 }  // namespace bench
 #else   // not a bench build: no access point, no web server linked in
@@ -32,5 +33,6 @@ inline bool active() { return false; }
 inline void push(const char*) {}
 inline void setStatus(const char*, const uint8_t*, uint16_t, float, bool, uint32_t, uint16_t, uint16_t) {}
 inline uint32_t lastSeq() { return 0; }
+inline unsigned long lastServedMs() { return 0; }
 }  // namespace bench
 #endif

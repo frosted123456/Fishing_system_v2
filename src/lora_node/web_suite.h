@@ -478,7 +478,7 @@ const opts = { overlays: true, bgsep: true, cone: true, dz: true };
 let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting (Settings tab); 14° per the transducer listing
 const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
 // D57 bottom dead zone: a fish closer to the bottom than this is inside the bottom echo and cannot be seen.
-// Beam edge (the bottom at the cone edge comes back as early as the fish in the centre) + half the ping length.
+// A fish at the beam edge returns as late as the bottom under the hole (slant range) + half the ping length (Ona & Mitson).
 const dzK = { cycles: 16, sound: 53 };   // knob values, updated when the hole knobs load
 const deadZone = b => b * (1 - Math.cos(beamDeg * Math.PI / 360)) + dzK.cycles / 200000 * (1350 + dzK.sound) / 2;
 let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
@@ -794,8 +794,8 @@ tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">
 function syncControls() {
   tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
   document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
-  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttrib)rawliteral"
-R"rawliteral(ute('aria-pressed', String(playing));
+  $('play').textContent = playing ? 'Pause' : 'Play'; $('play)rawliteral"
+R"rawliteral(').setAttribute('aria-pressed', String(playing));
 }
 tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
@@ -843,7 +843,7 @@ const KHELP = {
   jitter: ['Ping timing jitter', 'Random wait (0 to this many ms) before each ping so neighbouring tip-ups never ping in step. Needed for the interference filter. 0 = off.'],
   spike: ['Interference filter', 'Removes a blip that appears on one ping only, at a depth where the two pings before were this much quieter (another tip-up\'s ping). Lower = removes more, may thin a fast fish. 0 = off.'],
   echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
-  vmode: ['Drive regulator', '0 = always on, as the shield's reference firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
+  vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
 };
 const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
 function renderKnobs() {
@@ -866,6 +866,7 @@ $('kPreset').addEventListener('click', e => { const b = e.target.closest('[data-
 $('kDefaults').addEventListener('click', () => { if (confirm('Sonar processing back to defaults on every hole?')) postKnobs({ defaults: true }); });
 $('kResend').addEventListener('click', () => postKnobs({ resend: true }));
 document.querySelector('details.knobs').addEventListener('toggle', e => { if (e.target.open) loadKnobs(); });
+loadKnobs();   // once at start too: the bottom blind band uses the cycles / sound knobs
 
 // playback: 4 pings/s; the radio delivers about one block per second, so catch up when the queue grows
 const visible = () => window.suiteTab === 'sonar';

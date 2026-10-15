@@ -54,6 +54,7 @@ class SonarSource {
     if (tpp > 1) scene.advance(static_cast<sreal>(tpp - 1) * sp::DT());
     scene.ping(codes);
     proc.dt = static_cast<sreal>(tpp) * sp::DT();
+    setPulse(focus);
     const uint8_t fm = proc.prm[P_FREQ_MODE];
     if (fm == 1) { proc.stepRotating(codes[rot_f_], rot_f_, out_); rot_f_ = static_cast<uint8_t>((rot_f_ + 1) % sp::NFREQ); }
     else if (fm == 2) { memcpy(codes[0], codes[1], BINS); proc.step(codes, 1, out_); }   // 200 kHz only
@@ -61,16 +62,18 @@ class SonarSource {
     return afterPing(focus, out, max_out);
   }
 
+  // D57: ping length in range for the echo-length test (same knobs as the driver)
+  void setPulse(bool focus) {
+    const sreal cyc = R(focus ? proc.prm[P_CYCLES_FOCUS] : proc.prm[P_PULSE_CYCLES]);
+    proc.pulse_m = cyc / R(200000) * (R(1350) + R(proc.prm[P_SOUND])) / R(2);
+  }
   // Real sonar (driver): one processed ping from captured codes (nfreq 3 = one burst per frequency,
   // 1 = single frequency; rotate = this ping's frequency index when rotating). Same output as tick().
   uint8_t process(const uint8_t codes[sp::NFREQ][BINS], uint8_t nfreq, int8_t rotate_f, sreal dt_s, bool focus,
                   Block* out, uint8_t max_out) {
     since_base_ = static_cast<uint16_t>(since_base_ + static_cast<uint16_t>(dt_s / sp::DT() + R(0.5)));
     proc.dt = dt_s;
-    {   // D57: ping length in range for the echo-length test (same knobs as the driver)
-      const sreal cyc = R(focus ? proc.prm[P_CYCLES_FOCUS] : proc.prm[P_PULSE_CYCLES]);
-      proc.pulse_m = cyc / R(200000) * (R(1350) + R(proc.prm[P_SOUND])) / R(2);
-    }
+    setPulse(focus);
     if (rotate_f >= 0) proc.stepRotating(codes[0], static_cast<uint8_t>(rotate_f), out_);
     else proc.step(codes, nfreq, out_);
     return afterPing(focus, out, max_out);

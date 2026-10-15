@@ -22,7 +22,8 @@ static SPIClass vspi(VSPI);
 static bool g_ok = false;
 static uint16_t g_cal[17];
 static const rmt_channel_t RMT_CH = RMT_CHANNEL_0;
-static const size_t MAX_SAMPLES = 2900;           // 12.2 m round trip at 1403 m/s = 17.4 ms = 2720 samples at 156.25 kHz
+static const size_t MAX_SAMPLES = 3300;           // 488 bins x 5.57 samples = 2717 after time zero, + up to 3 ms (468) of
+                                                  // pre-burst samples before the leakage (time-zero search window)
 static uint16_t g_raw[MAX_SAMPLES];
 static size_t g_raw_n = 0;          // D56: samples in g_raw from the last capture (RAW line)
 // D58: ADC timing. The classic ESP32 clocks its DMA ADC from the 160 MHz PLL through the I2S dividers: the rate
@@ -33,6 +34,9 @@ static size_t g_raw_n = 0;          // D56: samples in g_raw from the last captu
 // comes up short, the next ones keep the limit (the restart loss is then a known 0.8 %, not a stall).
 static uint32_t g_clock_hz = 0, g_meas_hz = 0;
 static bool g_nolimit = false;      // clear the conversion limit at each capture
+static uint8_t g_short_n = 0;       // consecutive captures short of the clock rate while in nolimit mode
+static uint16_t g_limited_n = 0;    // captures run in limited mode since the last fallback (retry nolimit after 64)
+static void clearConvLimit() { delayMicroseconds(60); SYSCON.saradc_ctrl2.meas_num_limit = 0; }   // as esp-idf 23dc9a9
 static uint32_t readClockHz() {     // f = 160 MHz / (div_num + div_b / div_a) / rx_bck_div_num / 2
   const uint32_t n = I2S0.clkm_conf.clkm_div_num, b = I2S0.clkm_conf.clkm_div_b, a = I2S0.clkm_conf.clkm_div_a;
   const uint32_t bck = I2S0.sample_rate_conf.rx_bck_div_num;
@@ -150,7 +154,7 @@ bool begin() {
   ic.sample_rate = SONAR_ADC_HZ; ic.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
   ic.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT; ic.communication_format = I2S_COMM_FORMAT_STAND_I2S;
   ic.dma_buf_count = 8; ic.dma_buf_len = 512; ic.use_apll = false;
-  i2s_driver_install(I2S_NUM_0, &ic, 0, nullptr);
+  if (i2s_driver_install(I2S_NUM_0, &ic, 0, nullptr) != ESP_OK) { g_ok = false; return false; }
   const adc1_channel_t ch = (adc1_channel_t)digitalPinToAnalogChannel(SONAR_PIN_VOUT);
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ch, ADC_ATTEN_DB_12);   // = old DB_11: ~0-3.1 V input range (log-amp VOUT must stay below)
@@ -160,6 +164,7 @@ bool begin() {
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
   g_clock_hz = readClockHz();
+  clearConvLimit();   // measure the mode the captures run in
   {
     uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw); size_t rd = 0; uint32_t tA = 0, tB = 0; uint32_t full = 0;
     const uint32_t t_end = millis() + 200;
@@ -210,31 +215,37 @@ static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (refer
 
 static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], PingInfo& info) {
   const size_t want = MAX_SAMPLES;
+  if (g_vmode == 1) {   // DIS_VDRV_REG_LSTN mode: the regulator is off, charge VDRV for this burst first (up to
+    writeReg(0x1B, 0x02);                                         // 4 ms: before the ADC starts, so the burst stays within
+    for (int w = 0; w < 20 && !(lastStatus() & 0x20); w++) { delayMicroseconds(200); readReg(0x1C); }   // the time-zero window)
+  }
+  g_edge_seen = false;
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
   info.nolimit = g_nolimit ? 1 : 0;
-  if (g_nolimit) { delayMicroseconds(60); SYSCON.saradc_ctrl2.meas_num_limit = 0; }   // D58, as esp-idf 23dc9a9
-  if (g_vmode == 1) {   // DIS_VDRV_REG_LSTN mode: the regulator is off, charge VDRV for this burst first
-    writeReg(0x1B, 0x02);                                         // VDRV_TRIGGER
-    for (int w = 0; w < 20 && !(lastStatus() & 0x20); w++) { delayMicroseconds(200); readReg(0x1C); }   // VDRV_READY, 4 ms max
-  }
+  if (g_nolimit) clearConvLimit();                                // D58: continuous sampling
   writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER, as the reference firmware (vmode 1: VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
   burst(hz, cycles);
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
-  // rate check (D58): time between the end of the first FULL DMA buffer and the end of the last full one, for the
-  // samples in between. The first read's start latency and the last, partial read are left out (the old version
-  // counted the partial read and came out ~10 % low).
-  uint32_t tA = 0, tB = 0; size_t gotA = 0, gotB = 0; bool timeout = false;
+  // rate check (D58): time from the end of the first full DMA buffer to the end of the last read, for the samples in
+  // between (the first read's start latency is left out; the old version timed only up to a partial read and came
+  // out ~10 % low). Task wake-up jitter is some tens of us on ~18 ms: the 0.5 % tolerance is well under the 0.78 %
+  // loss of the limited mode, and one short capture is not enough to give nolimit up (3 in a row are; a stall is).
+  uint32_t tA = 0, tB = 0; size_t gotA = 0; bool timeout = false;
   while (got < want * 2) {
     const size_t chunk = (want * 2 - got) < 1024 ? (want * 2 - got) : 1024;   // one DMA buffer (512 x 16 bit) per read
     if (i2s_read(I2S_NUM_0, dst + got, chunk, &rd, pdMS_TO_TICKS(40)) != ESP_OK || rd == 0) { timeout = true; break; }
     got += rd;
-    if (rd == 1024) { if (!tA) { tA = micros(); gotA = got; } else { tB = micros(); gotB = got; } }
+    if (!tA) { if (rd == 1024) { tA = micros(); gotA = got; } } else tB = micros();
   }
-  info.adc_hz = (tB > tA && gotB > gotA) ? (uint32_t)((uint64_t)(gotB - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
-  info.clk_ok = (g_clock_hz && info.adc_hz && (uint32_t)labs((long)info.adc_hz - (long)g_clock_hz) * 1000 <= g_clock_hz * 3) ? 1 : 0;
-  if (g_nolimit && (timeout || !info.clk_ok)) g_nolimit = false;   // a stalled or short capture: back to the limited mode
+  info.adc_hz = (tB > tA && got > gotA) ? (uint32_t)((uint64_t)(got - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
+  info.clk_ok = (g_clock_hz && info.adc_hz && (uint32_t)labs((long)info.adc_hz - (long)g_clock_hz) * 1000 <= g_clock_hz * 5) ? 1 : 0;
+  if (g_nolimit) {
+    if (timeout) { g_nolimit = false; g_short_n = 0; g_limited_n = 0; }
+    else if (!info.clk_ok) { if (++g_short_n >= 3) { g_nolimit = false; g_short_n = 0; g_limited_n = 0; } }
+    else g_short_n = 0;
+  } else if (++g_limited_n >= 64) { g_nolimit = true; g_limited_n = 0; }   // try the continuous mode again now and then
   i2s_adc_disable(I2S_NUM_0);
   writeReg(0x1B, 0x00);
   const size_t n = got / 2;
@@ -248,12 +259,15 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   info.raw_max = mx;
   // time zero: first sample above 80 % of the largest value of the first 3 ms (transmit leakage on VOUT),
   // if that leakage stands clearly (> ~27 dB) above the level a few ms later; else a fixed bench value
-  const uint32_t rate = g_clock_hz ? g_clock_hz : SONAR_ADC_HZ;   // D58: the register rate sets the depth scale
+  // D58: the register rate sets the depth scale; in limited mode the stream is short of 2 samples per 256
+  const uint32_t rate = (g_clock_hz ? g_clock_hz : SONAR_ADC_HZ) * (info.nolimit ? 256UL : 254UL) / 256UL;
   const size_t lim = n < rate * 3 / 1000 ? n : rate * 3 / 1000;
   uint16_t m0 = 0; for (size_t i = 0; i < lim; i++) if (g_raw[i] > m0) m0 = g_raw[i];
-  uint32_t later = 0; size_t nl = 0;
-  for (size_t i = lim; i < n && nl < 300; i++, nl++) later += g_raw[i];
-  const uint16_t ref = nl ? (uint16_t)(later / nl) : 0;
+  // reference = the quietest 100-sample window after the search window (not the first one: on a 2-3 m lake the
+  // bottom echo sits right there and would hide the leakage)
+  uint32_t best = 0xFFFFFFFFUL;
+  for (size_t i = lim; i + 100 <= n; i += 100) { uint32_t w = 0; for (size_t k = i; k < i + 100; k++) w += g_raw[k]; if (w < best) best = w; }
+  const uint16_t ref = best != 0xFFFFFFFFUL ? (uint16_t)(best / 100) : 0;
   size_t t0 = 0;
   if (m0 > ref + 1000) { while (t0 < lim && g_raw[t0] < (uint16_t)(m0 * 4 / 5)) t0++; info.t0_ok = 1; }
   else { t0 = SONAR_T0_FALLBACK; info.t0_ok = 0; }

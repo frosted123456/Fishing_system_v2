@@ -83,12 +83,16 @@ window.onbeforeunload=()=>lines.length?'Recording not downloaded':undefined;
 knobs();poll();setInterval(poll,1500);setInterval(pull,800);
 </script></body></html>)HTML";
 
-static void handleRoot() { g_srv->send_P(200, "text/html", PAGE); }
-static void handleStatus() { g_srv->sendHeader("Cache-Control", "no-store"); g_srv->send(200, "application/json", g_status); }
+static unsigned long g_served = 0;
+static uint8_t g_node = 0;
+unsigned long lastServedMs() { return g_served; }
+static void handleRoot() { g_srv->send_P(200, "text/html", PAGE); g_served = millis(); }
+static void handleStatus() { g_srv->sendHeader("Cache-Control", "no-store"); g_srv->send(200, "application/json", g_status); g_served = millis(); }
 static void handleCmd() {
   const String c = g_srv->arg("c");
   const String r = g_cmd ? g_cmd(c) : String("no handler");
   g_srv->send(200, "text/plain", r);
+  g_served = millis();
 }
 static void handleLog() {
   const uint32_t since = (uint32_t)strtoul(g_srv->arg("since").c_str(), nullptr, 10);
@@ -108,13 +112,14 @@ static void handleLog() {
     if (sent > 40 * 1024) break;   // the page pulls the rest next time
   }
   g_srv->sendContent("");
+  g_served = millis();
 }
 // knobs JSON is built by the command handler ("KNOBS?") so this file does not depend on the sonar library
 static void handleKnobs() { g_srv->sendHeader("Cache-Control", "no-store"); g_srv->send(200, "application/json", g_cmd ? g_cmd("KNOBS?") : String("[]")); }
 
 bool begin(uint8_t node_id, const char* password, uint8_t channel, CommandFn fn) {
   if (g_on) return true;
-  g_cmd = fn;
+  g_cmd = fn; g_node = node_id;
   WiFi.mode(WIFI_AP_STA);   // STA stays for ESP-NOW (same channel as the AP)
   char ssid[32]; snprintf(ssid, sizeof(ssid), "IceFish-bench-%u", node_id);
   if (!WiFi.softAP(ssid, password, channel, 0, 2)) return false;
@@ -139,14 +144,16 @@ uint32_t lastSeq() { return g_seq; }
 
 void push(const char* line) {
   if (!g_on) return;
-  Line l; l.seq = ++g_seq; l.text = line;
-  if (l.text.length() != strlen(line)) return;   // out of memory: drop the line (the page counts the gap)
-  g_ringBytes += l.text.length();
-  g_ring.push_back(l);
-  while (!g_ring.empty() && (g_ringBytes > RING_BYTES || g_ring.size() > RING_LINES)) {
+  const size_t len = strlen(line);
+  while (!g_ring.empty() && (g_ringBytes + len > RING_BYTES || g_ring.size() + 1 > RING_LINES)) {   // make room first
     g_ringBytes -= g_ring.front().text.length();
     g_ring.pop_front();
   }
+  if (ESP.getMaxAllocHeap() < 2 * len + 256) { ++g_seq; return; }   // heap too fragmented: drop (the page counts the gap)
+  Line l; l.seq = ++g_seq; l.text = line;
+  if (l.text.length() != len) return;             // out of memory: drop the line
+  g_ringBytes += len;
+  g_ring.push_back(l);
 }
 
 void setStatus(const char* bench_line, const uint8_t* codes, uint16_t nbins, float bin_m, bool recording,
@@ -154,7 +161,7 @@ void setStatus(const char* bench_line, const uint8_t* codes, uint16_t nbins, flo
   if (!g_on) return;
   static const char H[] = "0123456789ABCDEF";
   String s; s.reserve(2 * nbins + 600);
-  s = "{\"node\":"; s += String(NODE_ID);
+  s = "{\"node\":"; s += String(g_node);
   s += ",\"seq\":"; s += String(g_seq);
   s += ",\"rec\":"; s += recording ? "true" : "false";
   s += ",\"rec_lines\":"; s += String(rec_lines);
