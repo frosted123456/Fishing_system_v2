@@ -22,6 +22,8 @@ static uint16_t g_cal[17];
 static const rmt_channel_t RMT_CH = RMT_CHANNEL_0;
 static const size_t MAX_SAMPLES = 2800;           // 12.2 m round trip at 1403 m/s = 17.4 ms = 2610 samples at 150 kHz
 static uint16_t g_raw[MAX_SAMPLES];
+static size_t g_raw_n = 0;          // D56: samples in g_raw from the last capture (RAW line)
+static uint32_t g_raw_hz = 0;       // D56: burst frequency of that capture
 static volatile uint32_t g_cap_burst = 0, g_cap_edge = 0;
 static volatile bool g_edge_seen = false;
 static volatile uint32_t g_blind_ticks = 0;
@@ -198,7 +200,9 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   i2s_adc_disable(I2S_NUM_0);
   writeReg(0x1B, 0x00);
   const size_t n = got / 2;
+  g_raw_n = 0;
   if (n < 200) return false;
+  g_raw_n = n; g_raw_hz = hz;
   // I2S-ADC quirk on the classic ESP32: samples come in swapped pairs; 12 data bits, channel in the top 4
   uint16_t mx = 0;
   for (size_t i = 0; i + 1 < n; i += 2) { const uint16_t a = g_raw[i]; g_raw[i] = g_raw[i + 1]; g_raw[i + 1] = a; }
@@ -228,6 +232,8 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   }
   return true;
 }
+
+void lastRaw(const uint16_t*& samples, size_t& n, uint32_t& burst_hz) { samples = g_raw; n = g_raw_n; burst_hz = g_raw_hz; }
 
 bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo& info) {
   if (!g_ok) return false;
@@ -268,6 +274,9 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
     uint8_t good = 0;
     for (uint8_t a = 0; a < avg; a++) {
       delay(SONAR_CHARGE_MS);
+      // D57: random 0..jitter ms before every shot, so 8 tip-ups on one lake never stay in step: another tip-up's
+      // ping then lands at a different depth on each of our pings and the cross-ping spike filter removes it
+      if (p[P_JITTER_MS]) delay(esp_random() % ((uint32_t)p[P_JITTER_MS] + 1));
       if (capture(HZ[fset[f]], cycles, sound, acc, info)) good++;
     }
     if (!good) return false;
@@ -295,6 +304,7 @@ bool ping(const icemesh::sonar::Params&, bool, uint8_t[icemesh::sonar::sp::NFREQ
 uint8_t readReg(uint8_t) { return 0; }
 uint8_t lastStatus() { return 0; }
 void writeReg(uint8_t, uint8_t) {}
+void lastRaw(const uint16_t*& samples, size_t& n, uint32_t& burst_hz) { samples = nullptr; n = 0; burst_hz = 0; }
 void setCalibration(const uint16_t[17]) {}
 void getCalibration(uint16_t pts[17]) { for (int i = 0; i < 17; i++) pts[i] = (uint16_t)(i * 256); }
 }

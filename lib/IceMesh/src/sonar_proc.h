@@ -41,6 +41,8 @@ class SonarProc {
     sreal ring_m, ring_base_m;   // D43: ring-down length (m, from the transducer) and its learned normal value
     bool ring_alarm;         // D43: ring-down much longer than normal for a while (slush / frazil ice on the face?)
     uint8_t hard;
+    uint16_t spikes;         // D57: samples replaced by the cross-ping spike filter in this ping (interference)
+    uint16_t long_echoes;    // D57: peaks dropped by the echo-length test in this ping
     uint8_t n;               // tracks with age >= 3 (prototype output), in tracker order
     TrackOut t[MAX_TRACKS];
   };
@@ -48,6 +50,7 @@ class SonarProc {
   sreal bait_m = R(4.57);   // bait (lure) depth: prototype constant; real system: set per hole, <= 0 = no bait
                             // known (no "Bait" label, no near-bait / cover flags)
   Params prm;               // knobs (sonar_params.h); defaults = prototype
+  sreal pulse_m = R(0.0561); // D57: ping length in range (c * cycles / f / 2), set by the caller per ping
   sreal dt = R(0.25);       // s between processed pings (prototype 4/s); the caller sets it when the rate changes
   enum { RING_LEARN = 40, RING_ALARM_PINGS = 8 };
   static sreal ringAlarmExtra() { return R(0.15); }   // m longer than normal (est., re-check on real ice)
@@ -56,7 +59,7 @@ class SonarProc {
   void reset() {
     have_bottom_ = have_nf_ = have_hi_ = have_ratio_ = have_tail_ = have_static_ = false;
     bottom_ = nf_ = hi_ = ratio_ = tail_ = R(0); bj_ = 0; n_tracks_ = 0; nid_ = 1;
-    ring_n_ = 0; ring_run_ = 0; ring_base_ = R(0); rot_mask_ = 0;
+    ring_n_ = 0; ring_run_ = 0; ring_base_ = R(0); rot_mask_ = 0; hist_n_ = 0;
   }
 
   // codes[f][i]: f = 0..nfreq-1 (3 = 190/200/210 kHz compounding, 1 = single frequency)
@@ -72,6 +75,32 @@ class SonarProc {
       }
     } else {
       for (int i = 0; i < N; i++) { d[i] = S.D[nfreq == 2 ? 1 : 0][i]; lin[i] = static_cast<float>(db2p(d[i])); }
+    }
+
+    // D57 cross-ping spike filter (Ryan et al. 2015 "impulse noise", look-back only, no display delay): another
+    // sonar's ping (with our jitter it lands at a new depth every time) stands far above everything at that depth
+    // +- one gate in the 2 previous pings. Replaced by the smaller of the 2 previous values. A real echo that just
+    // appeared is held back two pings (the tracker confirms over 3 pings anyway).
+    uint16_t spikes = 0;
+    {
+      uint8_t* raw = S.mask;   // scratch: this ping before filtering, as codes (history kept in codes: 2 x 488 B)
+      for (int i = 0; i < N; i++) raw[i] = dbToCode(d[i]);
+      if (prm[P_SPIKE_DB] && hist_n_ >= 2) {
+        const int W = std::max(1, roundi(R(prm[P_GATE_CM] / 100.0) / BIN_M()));
+        const uint8_t X = static_cast<uint8_t>(std::min(255, roundi(R(prm[P_SPIKE_DB]) / Q())));
+        for (int i = 0; i < N; i++) {
+          // reference = what was there in BOTH previous pings (max over +-W bins, then the smaller of the 2 pings):
+          // a real echo is in both, an earlier interference spike only in one
+          uint8_t m1 = 0, m2 = 0;
+          for (int j = std::max(0, i - W); j <= std::min(N - 1, i + W); j++) { m1 = std::max(m1, h1_[j]); m2 = std::max(m2, h2_[j]); }
+          const uint8_t ref = std::min(m1, m2);
+          if (raw[i] > ref && raw[i] - ref > X) {
+            d[i] = static_cast<float>(codeToDb(std::min(h1_[i], h2_[i])));
+            lin[i] = static_cast<float>(db2p(d[i])); spikes++;
+          }
+        }
+      }
+      memcpy(h2_, h1_, BINS); memcpy(h1_, raw, BINS); if (hist_n_ < 2) hist_n_++;
     }
 
     // Bottom: strongest 8-bin energy window, then walk back to the onset
@@ -138,7 +167,7 @@ class SonarProc {
     // Peaks with sub-bin fit
     sm[0] = c[0]; sm[N - 1] = c[N - 1];
     for (int i = 1; i < N - 1; i++) sm[i] = static_cast<float>((static_cast<sreal>(c[i - 1]) + static_cast<sreal>(c[i]) + static_cast<sreal>(c[i + 1])) / R(3));
-    Peak* pk_ = S.peaks; int np = 0;
+    Peak* pk_ = S.peaks; int np = 0; uint16_t long_echoes = 0;
     const int i0 = std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M())), i1 = bI - 5;
     for (int i = i0; i < i1; i++) {
       if (!(sm[i] >= sm[i - 1] && sm[i] > sm[i + 1])) continue;
@@ -148,6 +177,13 @@ class SonarProc {
       if (static_cast<sreal>(sm[i]) - mn < R(prm[P_PROM_DB])) continue;
       const sreal A = sm[i - 1], B = sm[i], Cc = sm[i + 1], den = A - R(2) * B + Cc;
       const sreal dl = den < R(0) ? clampr(R(0.5) * (A - Cc) / den, R(-0.5), R(0.5)) : R(0);
+      if (prm[P_ECHOLEN]) {   // D57 single-echo test (Echoview single-beam SED): echo length 6 dB below the peak
+        const sreal top = static_cast<sreal>(d[i]) - R(6);
+        int l6 = i; while (l6 > 0 && static_cast<sreal>(d[l6 - 1]) > top) l6--;
+        int r6 = i; while (r6 < N - 1 && static_cast<sreal>(d[r6 + 1]) > top) r6++;
+        const sreal len = static_cast<sreal>(r6 - l6 + 1) * BIN_M();
+        if (len > (pulse_m + BIN_M()) * R(prm[P_ECHOLEN] / 10.0)) { long_echoes++; continue; }
+      }
       int l = i; while (l > 0 && static_cast<sreal>(sm[l - 1]) > B - R(3)) l--;
       int r = i; while (r < N - 1 && static_cast<sreal>(sm[r + 1]) > B - R(3)) r++;
       if (np >= MAX_PEAKS) break;
@@ -248,6 +284,7 @@ class SonarProc {
 
     out.bottom = bottom_; out.nf = nf; out.ratio = ratio_; out.has_ratio = have_ratio_; out.tail = tail_; out.hard = hard;
     out.bottom_snr = static_cast<sreal>(d[bp]) - nf;
+    out.spikes = spikes; out.long_echoes = long_echoes;
 
     // D43 ring-down monitor: how far below the transducer the echo stays well above the noise floor.
     // Its normal length is learned on the first pings, then slowly; much longer for a while = alarm
@@ -377,6 +414,11 @@ class SonarProc {
   float static_[BINS], sig_[BINS];
   uint16_t ring_n_; uint8_t ring_run_; sreal ring_base_;
   uint8_t rot_[sp::NFREQ][BINS]; uint8_t rot_mask_;
+  uint8_t h1_[BINS], h2_[BINS]; uint8_t hist_n_;   // D57 spike filter: the 2 previous pings (codes, unfiltered)
+  static uint8_t dbToCode(float db) {
+    const sreal c = (static_cast<sreal>(db) + R(100)) / sp::Q();
+    return static_cast<uint8_t>(c < R(0) ? 0 : (c > R(255) ? 255 : static_cast<int>(c + R(0.5))));
+  }
 };
 
 }  // namespace sonar

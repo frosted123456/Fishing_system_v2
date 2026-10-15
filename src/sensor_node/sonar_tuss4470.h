@@ -17,7 +17,7 @@
 #define SONAR_REAL 0
 #endif
 
-// ---- wiring: PROPOSED GPIO numbers, NOT CONFIRMED ----
+// ---- wiring: winter 2026 build (shield 002 + DevKit V1), header table in the repo README (D55) ----
 // Frank's power/cable design (2026-10-07): 3 x L91 AA -> TPS63020 3.3 V (ESP32, Hall, shield logic) and
 // MT3608 boost 12-15 V straight off the pack -> shield VIN. NO converter enable wire: idle = TUSS4470
 // sleep mode over SPI (reg 0x1B bit 7). Mast cable (shielded 12-core): 3.3 V, GND, Hall out, SCLK, MOSI,
@@ -50,7 +50,7 @@
 #define SONAR_CHARGE_MS       1        // settle before each burst; the real VDRV refill is the VDRV_READY wait in capture()
 // Drive voltage: knob "vdrv" (volts). VDRV_CTRL (reg 0x16) bits 3:0 = VDRV - 5 V, 5-20 V (datasheet), charged
 // from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet). Default 20 V (chip max, the Open Echo tests ran
-// 15-20 V) = MT3608 at 21 V, 40 V p-p across the transducer (full bridge, 2 x VDRV). MT3608 still at 12 V:
+// 15-20 V) = MT3608 at 21.5 V (shield 1N4001 ~0.8 V + 0.3 V headroom, D55), 40 V p-p across the transducer (full bridge, 2 x VDRV). MT3608 still at 12 V:
 // KNOB vdrv 11. Knob "vmode": 0 = regulator always on (Open Echo, proven), 1 = off while listening (datasheet).
 #define SONAR_WAKE_MS         10       // sleep -> SPI ready (datasheet power-up time 10 ms; sleep exit likely faster)
 // Log-amp output: 29.7 mV/dB typical with VOUT_SCALE_SEL = 0 (3.3 V map, datasheet; 25-33 mV/dB over parts),
@@ -90,6 +90,9 @@ bool ok();
 bool ping(const icemesh::sonar::Params& p, bool focus, uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], PingInfo& info);
 uint8_t readReg(uint8_t addr);
 void writeReg(uint8_t addr, uint8_t v);
+// D56: the last capture's samples (last frequency / last average of the last ping), after the I2S pair swap and
+// the CAL curve, 12 bit. For the RAW recording line. n = 0 before the first ping.
+void lastRaw(const uint16_t*& samples, size_t& n, uint32_t& burst_hz);
 // Calibration: 17-point ADC curve (raw 0, 256, ... 4096 -> corrected), kept in NVS "sonarcal".
 void setCalibration(const uint16_t pts[17]);
 void getCalibration(uint16_t pts[17]);

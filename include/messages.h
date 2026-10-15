@@ -222,7 +222,7 @@ typedef struct __attribute__((packed)) {
 
 // v2 sonar control - hub broadcast every second while the sonar test mode is on (or the knobs just
 // changed), and right after any message from a node (the node listens briefly after it transmits).
-#define SONAR_CTRL_PARAMS 24   // >= icemesh::sonar::P_COUNT (lib/IceMesh/src/sonar_params.h)
+#define SONAR_CTRL_PARAMS 32   // >= icemesh::sonar::P_COUNT (26 since D57) (lib/IceMesh/src/sonar_params.h)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;

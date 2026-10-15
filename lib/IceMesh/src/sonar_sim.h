@@ -67,6 +67,10 @@ class SonarSource {
                   Block* out, uint8_t max_out) {
     since_base_ = static_cast<uint16_t>(since_base_ + static_cast<uint16_t>(dt_s / sp::DT() + R(0.5)));
     proc.dt = dt_s;
+    {   // D57: ping length in range for the echo-length test (same knobs as the driver)
+      const sreal cyc = R(focus ? proc.prm[P_CYCLES_FOCUS] : proc.prm[P_PULSE_CYCLES]);
+      proc.pulse_m = cyc / R(200000) * (R(1350) + R(proc.prm[P_SOUND])) / R(2);
+    }
     if (rotate_f >= 0) proc.stepRotating(codes[0], static_cast<uint8_t>(rotate_f), out_);
     else proc.step(codes, nfreq, out_);
     return afterPing(focus, out, max_out);

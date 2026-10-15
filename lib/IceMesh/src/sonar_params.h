@@ -1,7 +1,8 @@
 // Sonar processing knobs (D42): one set for every sonar hole, chosen at the chalet (OLED / web),
 // sent in the beacon (CMD_SONAR_PARAM: target = knob index, value = 0-255), kept by each hub and passed
-// to its tip-ups in the sonar control message. Defaults = the prototype's "Processed" preset, so the
-// processing stays bit-exact with the prototype (test_sonar_proc) until a knob is moved.
+// to its tip-ups in the sonar control message. Defaults = the prototype's "Processed" preset, plus the D57
+// interference knobs (jitter / spike / echolen, ON by default): test_sonar_proc turns those 3 off and stays
+// bit-exact with the prototype.
 // The values are guesses tuned on simulated pings only: re-tune them on the first real recordings.
 #ifndef ICEMESH_SONAR_PARAMS_H
 #define ICEMESH_SONAR_PARAMS_H
@@ -34,9 +35,16 @@ enum ParamId : uint8_t {
   P_THRESH,          // OUT_4 comparator threshold 0-15 (reg 0x17 bits 3:0), edge timing
   P_BOTTOM_MIN,      // D43: bottom search starts here (x0.1 m; prototype 0.6 m). Bucket test: 1-2
   P_VDRV,            // D45: transducer drive VDRV in volts (reg 0x16 = V - 5, 5-20 V); must stay below the
-                     //      MT3608 output (VPWR > VDRV + 0.3 V). Full bridge: 2 x VDRV peak-to-peak
+                     //      MT3608 output (VPWR > VDRV + 0.3 V, + the shield 1N4001: MT3608 >= VDRV + 1.5 V, D55). Full bridge: 2 x VDRV peak-to-peak
   P_VMODE,           // D53: VDRV regulator mode. 0 = always on (Open Echo firmware, proven in water), 1 = off while
                      //      listening + re-charge before each burst (datasheet 7.3.1, quieter receive, unproven)
+  // D57 interference / false-target rejection (8 sonars on one lake: every hole hears the others' pings)
+  P_JITTER_MS,       // random 0..N ms added before every burst: another sonar's ping lands at a different depth each
+                     //      time, so the spike filter can recognise it (0 = off)
+  P_SPIKE_DB,        // cross-ping spike filter: a sample this many dB above everything near it in the 2 previous pings
+                     //      is interference and is replaced (0 = off). Costs a new echo two pings of delay
+  P_ECHOLEN,         // single-echo test: a fish echo at -6 dB is at most this x0.1 times the expected echo length
+                     //      (ping length + 1 bin); longer = weeds / layer / noise, not reported (0 = off)
   P_COUNT
 };
 
@@ -65,8 +73,11 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
     {"thresh", "Edge threshold", 0, 15, 7, "reg 0x17"},
     {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
-    {"vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 >= V+0.3)"},
+    {"vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 >= V+1.5)"},
     {"vmode", "VDRV mode", 0, 1, 0, "0 on (proven) 1 quiet"},
+    {"jitter", "Ping timing jitter", 0, 20, 8, "ms"},
+    {"spike", "Interference filter", 0, 30, 10, "dB (0 off)"},
+    {"echolen", "Max fish echo length", 0, 60, 30, "x0.1 ping (0 off)"},
   };
   return T[id < P_COUNT ? id : 0];
 }

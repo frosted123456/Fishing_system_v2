@@ -474,9 +474,13 @@ const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
 /* ---------- State ---------- */
 let units = 'ft';
 try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
-const opts = { overlays: true, bgsep: true, cone: true };
+const opts = { overlays: true, bgsep: true, cone: true, dz: true };
 let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting (Settings tab); 14° per the transducer listing
 const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
+// D57 bottom dead zone: a fish closer to the bottom than this is inside the bottom echo and cannot be seen.
+// Beam edge (the bottom at the cone edge comes back as early as the fish in the centre) + half the ping length.
+const dzK = { cycles: 16, sound: 53 };   // knob values, updated when the hole knobs load
+const deadZone = b => b * (1 - Math.cos(beamDeg * Math.PI / 360)) + dzK.cycles / 200000 * (1350 + dzK.sound) / 2;
 let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
 let selSlot = null, userPicked = false, playing = true;
 
@@ -659,6 +663,10 @@ function drawOverlay() {
     g.beginPath(); g.moveTo(0, yb); g.lineTo(w, yb); g.stroke(); g.setLineDash([]);
     g.fillStyle = 'rgba(230,240,242,0.6)'; g.fillText('bait line', 26 * dpr, yb - 3 * dpr);
   }
+  if (opts.dz) {   // D57: shade the band just above the bottom where a fish merges with the bottom echo
+    const cw = w / HIST + 0.5; g.fillStyle = 'rgba(230,240,242,0.10)';
+    recs.forEach((r, k) => { if (r.b == null) return; const y0 = yOf(Math.max(0, r.b - deadZone(r.b))), y1 = yOf(r.b); g.fillRect(xOf(k) - cw / 2, y0, cw, y1 - y0); });
+  }
   g.beginPath(); let started = false;
   recs.forEach((r, k) => { if (r.b == null) return; const x = xOf(k), y = yOf(r.b); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true; });
   g.strokeStyle = HARD[recs[recs.length - 1].hard].c; g.lineWidth = 2 * dpr; g.stroke();
@@ -778,14 +786,16 @@ $('tlist').addEventListener('click', pickRow);
 const TOGGLES = [
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
   ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
-  ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.']
+  ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
+  ['dz', 'Bottom blind band', 'Light band just above the bottom line: a fish that close to the bottom returns at the same time as the bottom itself and cannot be told apart (any sonar). Thicker in deep water and with a long ping.']
 ];
 const tUl = $('toggles');
 tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
 function syncControls() {
   tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
   document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
-  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
+  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttrib)rawliteral"
+R"rawliteral(ute('aria-pressed', String(playing));
 }
 tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
@@ -794,8 +804,7 @@ $('play').addEventListener('click', () => { playing = !playing; syncControls(); 
 function fillDepth() {
   const list = units === 'ft' ? [5, 10, 15, 20, 25, 30, 40] : [2, 3, 4, 5, 6, 8, 10, 12];
   $('vDepth').innerHTML = '<option value="auto">Auto</option>' + list.map(v => { const m = units === 'ft' ? v / 3.28084 : v; return `<option value="${m.toFixed(3)}">0-${v} ${units}</option>`; }).join('');
-  const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto)rawliteral"
-R"rawliteral(' && Math.abs(+o.value - +vopt.depth) < 0.01);
+  const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto' && Math.abs(+o.value - +vopt.depth) < 0.01);
   $('vDepth').value = opt ? opt.value : 'auto'; if (!opt) vopt.depth = 'auto';
   $('vGain').value = String(vopt.gain || 0); $('vWeak').value = String(vopt.weak || 0);
 }
@@ -830,7 +839,10 @@ const KHELP = {
   bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
   thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
   bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; bucket: just past the ringing.'],
-  vdrv: ['Drive voltage', 'Transducer drive, volts (max 20). Must stay 1 V below the MT3608 setting (21 V for 20).'],
+  vdrv: ['Drive voltage', 'Transducer drive, volts (max 20). Must stay 1.5 V below the MT3608 setting (21.5 V for 20; the shield diode drops ~0.8 V).'],
+  jitter: ['Ping timing jitter', 'Random wait (0 to this many ms) before each ping so neighbouring tip-ups never ping in step. Needed for the interference filter. 0 = off.'],
+  spike: ['Interference filter', 'Removes a blip that appears on one ping only, at a depth where the two pings before were this much quieter (another tip-up\'s ping). Lower = removes more, may thin a fast fish. 0 = off.'],
+  echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
   vmode: ['Drive regulator', '0 = always on, as the Open Echo firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
 };
 const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
@@ -838,6 +850,7 @@ function renderKnobs() {
   if (!K) return;
   document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
   const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
+  if (kv.cycles) dzK.cycles = kv.cycles; if (kv.sound != null) dzK.sound = kv.sound;
   const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin) || null;
   document.querySelectorAll('#kWater [data-water]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.water === water)));
   $('knobs').hidden = !$('kAdv').checked;
