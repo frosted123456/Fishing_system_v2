@@ -19,18 +19,17 @@
 // LORA SETTINGS - OPTIMIZED FOR SPEED AND RELIABILITY
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define LORA_FREQUENCY      915.0       // MHz (915 North America, 868 Europe)
-#define LORA_BANDWIDTH      125000      // Hz (125kHz standard)
-// Spreading factor: SF9 is 2x faster than SF10, only -2.5dB sensitivity loss
-#define LORA_SPREADING      9           // SF9 for faster updates (SF10 for max range)
-#define LORA_CODING_RATE    5           // 4/5 to 4/8
+// v2 (TDMA mesh): spreading factor and bandwidth are per slot, from lib/IceMesh/src/radio_modes.h:
+// SF9/500 kHz (beacon, echo, join, relay links, default), SF8/500, SF7/500 — all 500 kHz single
+// channel (digital modulation, RSS-247 §5.2), no 125 kHz single-channel operation (that would have to hop).
+// Not legal advice.
+#define LORA_FREQUENCY      915.0       // MHz, channel centre (914.75-915.25 MHz at 500 kHz)
+#define LORA_CODING_RATE    5           // 4/5 (must match radio_modes.h airtime: cr_denom = 5)
 #define LORA_SYNC_WORD      0x34        // Private sync (default 0x12 is public)
 #define LORA_TX_POWER       20          // Higher power (was 17, max 22)
 #define LORA_PREAMBLE       8           // 8 symbols minimum reliable (saves ~40ms)
 
-// Mesh settings
-#define LORA_MAX_HOPS       3           // Maximum relay hops
-#define LORA_TX_INTERVAL_MS 6000        // 6 seconds with faster modulation
+// Mesh settings: superframe 1 s, one relay hop max (see lib/IceMesh/src/tdma_schedule.h)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ESP-NOW SETTINGS
@@ -50,13 +49,17 @@
 //   - Communication with sensor nodes requires matching LR mode
 //
 // ARCHITECTURE:
-//   - GATEWAY_ONSHORE (on ice): Uses LR mode, no web server, ESP-NOW + LoRa
-//   - GATEWAY_OFFSHORE (cabin): Normal WiFi AP for phone access, LoRa only (no ESP-NOW)
+//   - GATEWAY_ONSHORE (on ice): ESP-NOW (normal rate) + LoRa, no hotspot by default (v2)
+//   - GATEWAY_OFFSHORE (cabin): Normal WiFi AP for phone access, LoRa + ESP-NOW backbone (v2)
 //   - User checks fish status from OFFSHORE gateway via phone
 //
-// CRITICAL: Sensor nodes must also have ESPNOW_LONG_RANGE_MODE enabled!
+// CRITICAL: hubs and sensor nodes must use the SAME ESPNOW_LONG_RANGE_MODE value!
 // ═══════════════════════════════════════════════════════════════════════════
-#define ESPNOW_LONG_RANGE_MODE  true    // Enable LR mode for GATEWAY_ONSHORE
+// v2 (D28): ESP-NOW runs at the NORMAL rate (802.11b 1 Mbps) on every device. LR cannot share a board
+// with a phone hotspot (Espressif, esp-idf #4554), and the v1 range problem was the antenna height
+// (≈5 cm over the ice); the 20 cm mast gains far more than LR. Keep LR only for a range comparison:
+// it must then be set to the SAME value on every hub and tip-up (LR-only and normal cannot talk).
+#define ESPNOW_LONG_RANGE_MODE  false   // v2: normal rate (was true in v1)
 
 static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -65,7 +68,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // ═══════════════════════════════════════════════════════════════════════════
 
 #define HEARTBEAT_INTERVAL_SEC  30      // More frequent heartbeats (was 60)
-#define NODE_TIMEOUT_SEC        90      // Faster offline detection (was 120)
+#define NODE_TIMEOUT_SEC        150     // v2: >= 2.5 node heartbeats (sim finding S3: 90 s showed nodes offline after one lost heartbeat)
 #define DEBOUNCE_MS             50
 #define SILENCE_AUTO_CLEAR_MS   (5 * 60 * 1000)  // 5 minutes auto-unsilence
 
@@ -81,8 +84,17 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define WIFI_MODE_SETTING   WIFI_MODE_APSTA  // <<< CHANGE THIS
 
 // If using STA mode, set your network credentials here:
-#define STA_SSID            "YourWiFi"       // <<< Your WiFi/hotspot name
-#define STA_PASSWORD        "YourPassword"   // <<< Your WiFi/hotspot password
+// The cabin Wi-Fi name and password live in secrets.h (NOT in git: copy secrets.example.h to secrets.h
+// and fill it in). Without the file the chalet still works on its own hotspot.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef STA_SSID
+#define STA_SSID            ""              // empty = no cabin network, hotspot only
+#endif
+#ifndef STA_PASSWORD
+#define STA_PASSWORD        ""
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PIN DEFINITIONS - HELTEC LORA32 V3 (ESP32-S3)

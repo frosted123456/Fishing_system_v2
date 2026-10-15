@@ -1,0 +1,7 @@
+{
+  "name": "IceMesh",
+  "version": "0.1.0",
+  "description": "Ice fishing mesh core: v2 header, dedup window, stream filter, priority TX queue, LoRa airtime. Pure C++11, no Arduino dependency.",
+  "frameworks": "*",
+  "platforms": "*"
+}

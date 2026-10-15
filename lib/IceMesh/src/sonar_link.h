@@ -1,0 +1,305 @@
+// Sonar blocks over the mesh.
+//   Hub:    SonarOutbox  - blocks from nodes (ESP-NOW) or virtual nodes wait here; each hub packet takes
+//                          whole blocks (one SEC_SONAR section each) while they fit. No ACK: best effort.
+//   Chalet: SonarStore   - decodes blocks: per-node summary + background profile, and a ring of pings
+//                          (FOCUS stream) that the web page polls with a sequence number.
+#ifndef ICEMESH_SONAR_LINK_H
+#define ICEMESH_SONAR_LINK_H
+#include <stdint.h>
+#include <string.h>
+#include "seq.h"
+#include "tdma_proto.h"
+#include "sonar_codec.h"
+
+namespace icemesh {
+namespace sonar {
+
+class SonarOutbox {
+ public:
+  enum { CAP = 12, MAX_AGE_FRAMES = 4 };   // a block older than ~4 s is stale for the display (est.)
+  // D48: no ACK on sonar blocks, so a DATA or BASE block goes out a second time in the NEXT frame when the
+  // slot has room left after everything new (the chalet drops duplicate pings). Through a relay at 20 %
+  // loss per hop this takes focus pings from ~50 % to ~80 % delivered (test_tdma_sim). BG segments are
+  // not repeated (they cycle every 2 s anyway). 0 = off.
+  uint8_t repeats = 1;
+  uint32_t pushed = 0, sent = 0, dropped = 0, expired = 0, resent = 0;
+
+  SonarOutbox() { clear(); }
+  void clear() { memset(items_, 0, sizeof(items_)); order_ = 0; }
+
+  // Queues one block. BASE replaces the node's older BASE, BG replaces the same node+segment.
+  bool push(const uint8_t* blk, uint8_t len, uint16_t frame) {
+    uint8_t node, type;
+    if (len == 0 || len > MAX_BLOCK || !peekBlock(blk, len, node, type)) { dropped++; return false; }
+    const uint8_t seg = (type == BT_BG && len >= 3) ? static_cast<uint8_t>(blk[2] >> 5) : 0;
+    int slot = -1;
+    for (uint8_t i = 0; i < CAP && slot < 0; i++) {
+      const Item& it = items_[i];
+      if (it.used && it.node == node && it.type == type && type != BT_DATA && (type != BT_BG || it.seg == seg)) slot = i;
+    }
+    for (uint8_t i = 0; i < CAP && slot < 0; i++) if (!items_[i].used) slot = i;
+    if (slot < 0) { slot = victim(); dropped++; }
+    Item& it = items_[slot];
+    it.used = true; it.node = node; it.type = type; it.seg = seg; it.len = len; it.frame = frame; it.order = ++order_; it.sends = 0;
+    memcpy(it.data, blk, len);
+    pushed++;
+    return true;
+  }
+
+  // Adds whole blocks as SEC_SONAR sections: BASE (new), DATA oldest first (a repeat of an older block
+  // BEFORE a newer block: the chalet drops a ping that arrives behind a newer one as late), BG, then
+  // a BASE repeat if room is left.
+  uint16_t fill(tdma::PacketWriter& w, uint16_t frame) {
+    expire(frame);
+    uint16_t added = 0;
+    added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, false, frame));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_DATA, true, frame));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_BG, false, frame));
+    if (repeats) added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, true, frame));
+    return added;
+  }
+
+  uint8_t count() const { uint8_t n = 0; for (uint8_t i = 0; i < CAP; i++) n += items_[i].used ? 1 : 0; return n; }
+
+ private:
+  struct Item { bool used; uint8_t node, type, seg, len; uint16_t frame; uint32_t order; uint8_t sends; uint8_t data[MAX_BLOCK]; };
+
+  // One block type, oldest first. with_repeats: blocks already sent once (in an EARLIER frame) go out
+  // again in their place in the order; without: only unsent blocks. A block is kept for one repeat
+  // (DATA, BASE) when repeats is on, else freed at its first send.
+  uint16_t fillPass(tdma::PacketWriter& w, uint8_t type, bool with_repeats, uint16_t frame) {
+    uint16_t added = 0;
+    for (;;) {
+      int best = -1;
+      for (uint8_t i = 0; i < CAP; i++) {
+        const Item& it = items_[i];
+        if (!it.used || it.type != type || it.len > w.freeForValue()) continue;
+        if (it.sends > 0 && (!with_repeats || it.frame == frame)) continue;
+        if (best < 0 || it.order < items_[best].order) best = i;
+      }
+      if (best < 0) break;
+      Item& it = items_[best];
+      if (!w.add(tdma::SEC_SONAR, it.data, it.len)) break;
+      added = static_cast<uint16_t>(added + it.len + 2);
+      if (it.sends > 0) resent++; else sent++;
+      it.sends++;
+      if (it.sends <= repeats && (type == BT_DATA || type == BT_BASE)) it.frame = frame; else it.used = false;
+    }
+    return added;
+  }
+
+  void expire(uint16_t frame) {
+    for (uint8_t i = 0; i < CAP; i++)
+      if (items_[i].used && seqDiff(frame, items_[i].frame) > static_cast<int16_t>(MAX_AGE_FRAMES)) { items_[i].used = false; expired++; }
+  }
+  // A block already sent once first (its repeat is the least valuable); then the oldest block of the
+  // least useful type: BG, then DATA, then BASE.
+  int victim() const {
+    int best = -1;
+    for (uint8_t i = 0; i < CAP; i++)
+      if (items_[i].used && items_[i].sends > 0 && (best < 0 || items_[i].order < items_[best].order)) best = i;
+    if (best >= 0) return best;
+    static const uint8_t order[3] = {BT_BG, BT_DATA, BT_BASE};
+    for (uint8_t p = 0; p < 3; p++) {
+      for (uint8_t i = 0; i < CAP; i++)
+        if (items_[i].used && items_[i].type == order[p] && (best < 0 || items_[i].order < items_[best].order)) best = i;
+      if (best >= 0) return best;
+    }
+    return 0;
+  }
+
+  Item items_[CAP];
+  uint32_t order_;
+};
+
+// Interface the chalet RX path calls for each SEC_SONAR section.
+class SonarSink {
+ public:
+  virtual ~SonarSink() {}
+  virtual void onSonarBlock(uint8_t hub, const uint8_t* blk, uint8_t len, uint16_t frame) = 0;
+};
+
+struct NodeSonar {
+  bool used;
+  uint8_t node, hub;
+  uint16_t frame;           // last frame anything arrived
+  bool has_sum;
+  Summary sum;              // from BASE, or derived from the latest DATA ping
+  bool has_ping;
+  uint16_t last_ping;
+  uint8_t bg_ver;
+  uint8_t bg_mask;          // segments received for bg_ver
+  uint8_t nf_neg;            // noise floor -dB, from the last DATA block
+  uint16_t act_bits;         // fish present in the last 16 DATA pings (activity when streaming)
+  uint8_t old_run;           // consecutive 'old' pings/summaries: a run means the node restarted
+  uint8_t bg[BINS];
+};
+
+struct StoredPing {
+  uint32_t seq; uint8_t node; Ping p;
+  uint8_t nf_neg, hard;                 // from the DATA block header
+  uint8_t n_info; TrackInfo info[MAX_TARGETS];   // echo character, on the last ping of a block that carried it
+};
+
+// Per-hole history of summaries for the "at a glance" views (web Holes tab, OLED): one record per BASE
+// (every 2 s) and, for the FOCUS hole, one per frame derived from its pings. Packed target: depth 11 b,
+// level 2 b (<< 11), bait 1 b (<< 13).
+struct BaseRec { uint16_t frame; uint16_t bottom_cm; uint8_t n; uint16_t t[MAX_TARGETS]; };
+inline uint16_t packTarget(const Target& t) {
+  return static_cast<uint16_t>((t.depth_cm > DEPTH_MAX ? DEPTH_MAX : t.depth_cm) | ((t.level & 3u) << 11) | (t.track == 0 ? (1u << 13) : 0u));
+}
+
+template <uint8_t MAXN = 16, uint16_t RING = 128, uint8_t HIST = 90>
+class SonarStore : public SonarSink {
+ public:
+  uint32_t blocks_ok = 0, blocks_bad = 0, old_pings = 0;
+
+  SonarStore() { clear(); }
+  void clear() { memset(nodes_, 0, sizeof(nodes_)); head_ = 0; count_ = 0; seq_ = 0; memset(hn_, 0, sizeof(hn_)); memset(hh_, 0, sizeof(hh_)); }
+
+  // Summaries of `node`, oldest first (up to HIST, ~3 min at one per 2 s). Returns the count.
+  uint8_t history(uint8_t node, BaseRec* out, uint8_t max) const {
+    for (uint8_t i = 0; i < MAXN; i++) {
+      if (!nodes_[i].used || nodes_[i].node != node) continue;
+      const uint8_t n = hn_[i] < max ? hn_[i] : max;
+      for (uint8_t k = 0; k < n; k++) out[k] = hist_[i][(hh_[i] + HIST - n + k) % HIST];
+      return n;
+    }
+    return 0;
+  }
+
+  void onSonarBlock(uint8_t hub, const uint8_t* blk, uint8_t len, uint16_t frame) override {
+    uint8_t node, type;
+    if (!peekBlock(blk, len, node, type)) { blocks_bad++; return; }
+    NodeSonar* ns = slot(node, frame);
+    if (ns == nullptr) { blocks_bad++; return; }
+    switch (type) {
+      case BT_BASE: {
+        Summary s;
+        if (!decodeSummary(blk, len, s)) { blocks_bad++; return; }
+        if (ns->has_sum && s.ping == ns->sum.ping) { ns->hub = hub; ns->frame = frame; old_pings++; return; }   // the same BASE again (repeat / relay): heard, not new
+        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && ++ns->old_run < 2) { old_pings++; return; }
+        ns->old_run = 0;
+        ns->sum = s; ns->has_sum = true;
+        record(ns, frame, true);
+        break;
+      }
+      case BT_DATA: {
+        static DataBlock d;   // ~1.2 KB: static, the store is only used under the caller's lock
+        if (!decodeData(blk, len, d)) { blocks_bad++; return; }
+        ns->nf_neg = d.nf_neg;
+        for (uint8_t i = 0; i < d.n; i++) {
+          const Ping& p = d.pings[i];
+          if (ns->has_ping && isOld(p.index, ns->last_ping) && ++ns->old_run < RESTART_RUN) { old_pings++; continue; }   // duplicate (relay) or late
+          ns->old_run = 0;
+          ns->last_ping = p.index; ns->has_ping = true;
+          StoredPing& sp = ring_[head_];
+          sp.seq = ++seq_; sp.node = node; sp.p = p; sp.nf_neg = d.nf_neg; sp.hard = d.hard; sp.n_info = 0;
+          if (i + 1 == d.n && d.n_info > 0) { sp.n_info = d.n_info; memcpy(sp.info, d.info, sizeof(TrackInfo) * d.n_info); }
+          head_ = static_cast<uint16_t>((head_ + 1) % RING);
+          if (count_ < RING) count_++;
+          deriveSummary(*ns, p, d.bg_ver, d.hard);
+        }
+        record(ns, frame, false);
+        break;
+      }
+      case BT_BG: {
+        uint8_t n2, ver, seg;
+        uint8_t tmp[BINS];
+        memcpy(tmp, ns->bg, BINS);
+        if (!decodeBgSegment(blk, len, n2, ver, seg, tmp)) { blocks_bad++; return; }
+        if (ver != ns->bg_ver) { ns->bg_ver = ver; ns->bg_mask = 0; }
+        memcpy(ns->bg + seg * BG_SEG_BINS, tmp + seg * BG_SEG_BINS, BG_SEG_BINS);
+        ns->bg_mask = static_cast<uint8_t>(ns->bg_mask | (1u << seg));
+        break;
+      }
+      default: blocks_bad++; return;
+    }
+    ns->hub = hub; ns->frame = frame;
+    blocks_ok++;
+  }
+
+  const NodeSonar* find(uint8_t node) const {
+    for (uint8_t i = 0; i < MAXN; i++) if (nodes_[i].used && nodes_[i].node == node) return &nodes_[i];
+    return nullptr;
+  }
+  const NodeSonar* at(uint8_t i) const { return (i < MAXN && nodes_[i].used) ? &nodes_[i] : nullptr; }
+  uint8_t capacity() const { return MAXN; }
+  uint32_t lastSeq() const { return seq_; }
+
+  // Pings of `node` with seq > since, oldest first. Returns the count written to out.
+  uint16_t pingsSince(uint8_t node, uint32_t since, const StoredPing** out, uint16_t max) const {
+    uint16_t n = 0;
+    for (uint16_t k = 0; k < count_ && n < max; k++) {
+      const uint16_t i = static_cast<uint16_t>((head_ + RING - count_ + k) % RING);
+      const StoredPing& sp = ring_[i];
+      if (sp.node == node && sp.seq > since) out[n++] = &sp;
+    }
+    return n;
+  }
+
+ private:
+  // Not newer, but not so far back that it must be a node restart (counter back to 0).
+  static bool isOld(uint16_t idx, uint16_t last) {
+    const int16_t d = seqDiff(idx, last);
+    return d <= 0 && d > -static_cast<int16_t>(RESTART_GAP);
+  }
+  enum { RESTART_GAP = 256, RESTART_RUN = 8 };   // a duplicate block is 1-15 pings; 8+ old pings in a row = restart
+
+  void record(NodeSonar* ns, uint16_t frame, bool always) {
+    const uint8_t i = static_cast<uint8_t>(ns - nodes_);
+    if (!always && hn_[i] > 0 && hist_[i][(hh_[i] + HIST - 1) % HIST].frame == frame) return;   // one per frame from DATA
+    BaseRec& r = hist_[i][hh_[i]];
+    r.frame = frame; r.bottom_cm = ns->sum.bottom_cm; r.n = ns->sum.n_list;
+    for (uint8_t k = 0; k < r.n; k++) r.t[k] = packTarget(ns->sum.list[k]);
+    hh_[i] = static_cast<uint8_t>((hh_[i] + 1) % HIST);
+    if (hn_[i] < HIST) hn_[i]++;
+  }
+
+  NodeSonar* slot(uint8_t node, uint16_t frame) {
+    for (uint8_t i = 0; i < MAXN; i++) if (nodes_[i].used && nodes_[i].node == node) return &nodes_[i];
+    int oldest = -1;
+    for (uint8_t i = 0; i < MAXN; i++) {
+      if (!nodes_[i].used) { oldest = i; break; }
+      if (oldest < 0 || seqDiff(nodes_[oldest].frame, nodes_[i].frame) > 0) oldest = i;
+    }
+    if (oldest < 0) return nullptr;
+    NodeSonar& ns = nodes_[oldest];
+    memset(&ns, 0, sizeof(ns));
+    hn_[oldest] = 0; hh_[oldest] = 0;
+    ns.used = true; ns.node = node; ns.frame = frame; ns.bg_ver = 0xFF;
+    return &ns;
+  }
+
+  static void deriveSummary(NodeSonar& ns, const Ping& p, uint8_t bg_ver, uint8_t hard) {
+    Summary& s = ns.sum;
+    bool fish = false;
+    for (uint8_t i = 0; i < p.n_targets; i++) if (p.t[i].track != 0) fish = true;
+    ns.act_bits = static_cast<uint16_t>((ns.act_bits << 1) | (fish ? 1u : 0u));
+    uint8_t act = 0;
+    for (uint16_t b = ns.act_bits; b; b >>= 1) act = static_cast<uint8_t>(act + (b & 1u));
+    const uint8_t st = s.status, bsnr = s.bottom_snr;   // v4 flags come with BASE only: keep the last ones
+    memset(&s, 0, sizeof(s));
+    s.status = st; s.bottom_snr = bsnr;
+    s.node = ns.node; s.ping = p.index; s.bottom_cm = p.bottom_cm; s.bg_ver = bg_ver; s.hard = hard; s.activity = act > 15 ? 15 : act;
+    for (uint8_t i = 0; i < p.n_targets && s.n_list < MAX_TARGETS; i++) {
+      const Target& t = p.t[i];
+      if (t.track != 0) s.n_targets++;
+      Target& o = s.list[s.n_list++];
+      o.depth_cm = t.depth_cm; o.level = t.level ? t.level : 1; o.track = t.track == 0 ? 0 : 1;
+    }
+    summaryNearest(s);
+    ns.has_sum = true;
+  }
+
+  NodeSonar nodes_[MAXN];
+  StoredPing ring_[RING];
+  BaseRec hist_[MAXN][HIST];
+  uint8_t hn_[MAXN], hh_[MAXN];
+  uint16_t head_, count_;
+  uint32_t seq_;
+};
+
+}  // namespace sonar
+}  // namespace icemesh
+#endif
