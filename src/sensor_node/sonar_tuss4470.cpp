@@ -10,6 +10,8 @@
 #include <soc/mcpwm_periph.h>
 #include <soc/io_mux_reg.h>
 #include <driver/gpio.h>
+#include <soc/i2s_struct.h>
+#include <soc/syscon_struct.h>
 #include <math.h>
 
 using namespace icemesh::sonar;
@@ -20,9 +22,24 @@ static SPIClass vspi(VSPI);
 static bool g_ok = false;
 static uint16_t g_cal[17];
 static const rmt_channel_t RMT_CH = RMT_CHANNEL_0;
-static const size_t MAX_SAMPLES = 2800;           // 12.2 m round trip at 1403 m/s = 17.4 ms = 2610 samples at 150 kHz
+static const size_t MAX_SAMPLES = 2900;           // 12.2 m round trip at 1403 m/s = 17.4 ms = 2720 samples at 156.25 kHz
 static uint16_t g_raw[MAX_SAMPLES];
 static size_t g_raw_n = 0;          // D56: samples in g_raw from the last capture (RAW line)
+// D58: ADC timing. The classic ESP32 clocks its DMA ADC from the 160 MHz PLL through the I2S dividers: the rate
+// is crystal-exact, but the DIG ADC controller must start with a "max conversions" limit (255 in this driver)
+// and restarts when it hits it, losing ~2 samples every 256 (esp-idf #10612, PR #1991). Espressif's own fix
+// (commit 23dc9a9) clears that limit 60 us after the start: continuous sampling. We do the same, and check
+// every capture: delivered rate (full DMA buffers against the us timer) vs the register rate. If a capture
+// comes up short, the next ones keep the limit (the restart loss is then a known 0.8 %, not a stall).
+static uint32_t g_clock_hz = 0, g_meas_hz = 0;
+static bool g_nolimit = false;      // clear the conversion limit at each capture
+static uint32_t readClockHz() {     // f = 160 MHz / (div_num + div_b / div_a) / rx_bck_div_num / 2
+  const uint32_t n = I2S0.clkm_conf.clkm_div_num, b = I2S0.clkm_conf.clkm_div_b, a = I2S0.clkm_conf.clkm_div_a;
+  const uint32_t bck = I2S0.sample_rate_conf.rx_bck_div_num;
+  const double div = (double)n + (a ? (double)b / (double)a : 0.0);
+  if (div <= 0 || !bck) return 0;
+  return (uint32_t)(160000000.0 / div / (double)bck / 2.0 + 0.5);
+}
 static uint32_t g_raw_hz = 0;       // D56: burst frequency of that capture
 static volatile uint32_t g_cap_burst = 0, g_cap_edge = 0;
 static volatile bool g_edge_seen = false;
@@ -32,7 +49,7 @@ static uint8_t g_stat = 0;   // status bits of the last SPI reply (high byte bit
 // TOF_CONFIG (reg 0x1B, datasheet): bit 7 SLEEP_MODE_EN, bit 6 STDBY_MODE_EN, bit 1 VDRV_TRIGGER, bit 0 CMD_TRIGGER
 static const uint8_t TOF_SLEEP = 0x80, TOF_TRIGGER = 0x01;
 
-// ---- SPI register access (open_echo protocol: 16-bit frame, odd parity bit, SPI mode 1) ----
+// ---- SPI register access (TUSS4470 SPI protocol: 16-bit frame, odd parity bit, SPI mode 1) ----
 static uint8_t parity16(uint16_t v) { uint8_t ones = 0; for (int i = 0; i < 16; i++) ones += (v >> i) & 1; return (uint8_t)((ones + 1) % 2); }
 static uint16_t xfer(uint8_t b0, uint8_t b1) {
   b0 |= parity16((uint16_t)((b0 << 8) | b1));
@@ -99,7 +116,7 @@ static inline uint16_t cal(uint16_t raw) {   // piecewise linear, 16 segments
 
 bool begin() {
   loadCal();
-  pinMode(SONAR_PIN_IO1, OUTPUT); digitalWrite(SONAR_PIN_IO1, HIGH);   // as open_echo: IO1 high, burst on IO2
+  pinMode(SONAR_PIN_IO1, OUTPUT); digitalWrite(SONAR_PIN_IO1, HIGH);   // as the shield reference firmware: IO1 high, burst on IO2
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
   spiUp();
   wake();                                                              // out of sleep (if a deep sleep left it there)
@@ -108,7 +125,7 @@ bool begin() {
   g_ok = readReg(0x1D) == 0xB9;
   writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
   writeReg(0x14, 0x00);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2)
-  writeReg(0x16, 0x0F);   // VDRV 20 V, regulator always on, not Hi-Z: the Open Echo init (vmode 0); ping() sets the knob
+  writeReg(0x16, 0x0F);   // VDRV 20 V, regulator always on, not Hi-Z: the reference firmware init (vmode 0); ping() sets the knob
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0
   // input: mcpwm_gpio_init makes the pin input-only, so it runs FIRST, the RMT then takes the pin as
@@ -138,10 +155,27 @@ bool begin() {
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ch, ADC_ATTEN_DB_12);   // = old DB_11: ~0-3.1 V input range (log-amp VOUT must stay below)
   i2s_set_adc_mode(ADC_UNIT_1, ch);
+  // D58: the clock registers are written by i2s_adc_enable(); read them back once for the real rate, and
+  // measure the delivered rate over ~200 ms of full DMA buffers (sanity figure on the INFO line)
+  i2s_zero_dma_buffer(I2S_NUM_0);
+  i2s_adc_enable(I2S_NUM_0);
+  g_clock_hz = readClockHz();
+  {
+    uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw); size_t rd = 0; uint32_t tA = 0, tB = 0; uint32_t full = 0;
+    const uint32_t t_end = millis() + 200;
+    while (millis() < t_end) {
+      if (i2s_read(I2S_NUM_0, dst, 1024, &rd, pdMS_TO_TICKS(40)) != ESP_OK || rd != 1024) break;
+      if (!tA) tA = micros(); else { tB = micros(); full++; }
+    }
+    g_meas_hz = (full && tB > tA) ? (uint32_t)((uint64_t)full * 512 * 1000000ULL / (tB - tA)) : 0;
+  }
   i2s_adc_disable(I2S_NUM_0);
+  g_nolimit = true;
 
   return g_ok;
 }
+uint32_t clockHz() { return g_clock_hz; }
+uint32_t measuredHz() { return g_meas_hz; }
 bool ok() { return g_ok; }
 uint8_t lastStatus() { return g_stat; }
 
@@ -172,31 +206,35 @@ static void burst(uint32_t hz, uint8_t cycles) {
 }
 
 // one capture at one frequency -> dB per bin (power average into `acc`)
-static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (Open Echo), 1 = quiet listen (datasheet)
+static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (reference firmware), 1 = quiet listen (datasheet)
 
 static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], PingInfo& info) {
   const size_t want = MAX_SAMPLES;
   i2s_zero_dma_buffer(I2S_NUM_0);
   i2s_adc_enable(I2S_NUM_0);
+  info.nolimit = g_nolimit ? 1 : 0;
+  if (g_nolimit) { delayMicroseconds(60); SYSCON.saradc_ctrl2.meas_num_limit = 0; }   // D58, as esp-idf 23dc9a9
   if (g_vmode == 1) {   // DIS_VDRV_REG_LSTN mode: the regulator is off, charge VDRV for this burst first
     writeReg(0x1B, 0x02);                                         // VDRV_TRIGGER
     for (int w = 0; w < 20 && !(lastStatus() & 0x20); w++) { delayMicroseconds(200); readReg(0x1C); }   // VDRV_READY, 4 ms max
   }
-  writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER, as Open Echo (vmode 1: VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
+  writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER, as the reference firmware (vmode 1: VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
   burst(hz, cycles);
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
-  // rate check: time between the end of the first DMA read and the end of the last one, for the
-  // samples in between (the first read's start latency is left out)
-  uint32_t tA = 0; size_t gotA = 0;
+  // rate check (D58): time between the end of the first FULL DMA buffer and the end of the last full one, for the
+  // samples in between. The first read's start latency and the last, partial read are left out (the old version
+  // counted the partial read and came out ~10 % low).
+  uint32_t tA = 0, tB = 0; size_t gotA = 0, gotB = 0; bool timeout = false;
   while (got < want * 2) {
     const size_t chunk = (want * 2 - got) < 1024 ? (want * 2 - got) : 1024;   // one DMA buffer (512 x 16 bit) per read
-    if (i2s_read(I2S_NUM_0, dst + got, chunk, &rd, pdMS_TO_TICKS(40)) != ESP_OK || rd == 0) break;
+    if (i2s_read(I2S_NUM_0, dst + got, chunk, &rd, pdMS_TO_TICKS(40)) != ESP_OK || rd == 0) { timeout = true; break; }
     got += rd;
-    if (!tA) { tA = micros(); gotA = got; }
+    if (rd == 1024) { if (!tA) { tA = micros(); gotA = got; } else { tB = micros(); gotB = got; } }
   }
-  const uint32_t tB = micros();
-  info.adc_hz = (tB > tA && got > gotA) ? (uint32_t)((uint64_t)(got - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
+  info.adc_hz = (tB > tA && gotB > gotA) ? (uint32_t)((uint64_t)(gotB - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
+  info.clk_ok = (g_clock_hz && info.adc_hz && (uint32_t)labs((long)info.adc_hz - (long)g_clock_hz) * 1000 <= g_clock_hz * 3) ? 1 : 0;
+  if (g_nolimit && (timeout || !info.clk_ok)) g_nolimit = false;   // a stalled or short capture: back to the limited mode
   i2s_adc_disable(I2S_NUM_0);
   writeReg(0x1B, 0x00);
   const size_t n = got / 2;
@@ -210,7 +248,8 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   info.raw_max = mx;
   // time zero: first sample above 80 % of the largest value of the first 3 ms (transmit leakage on VOUT),
   // if that leakage stands clearly (> ~27 dB) above the level a few ms later; else a fixed bench value
-  const size_t lim = n < SONAR_ADC_HZ * 3 / 1000 ? n : SONAR_ADC_HZ * 3 / 1000;
+  const uint32_t rate = g_clock_hz ? g_clock_hz : SONAR_ADC_HZ;   // D58: the register rate sets the depth scale
+  const size_t lim = n < rate * 3 / 1000 ? n : rate * 3 / 1000;
   uint16_t m0 = 0; for (size_t i = 0; i < lim; i++) if (g_raw[i] > m0) m0 = g_raw[i];
   uint32_t later = 0; size_t nl = 0;
   for (size_t i = lim; i < n && nl < 300; i++, nl++) later += g_raw[i];
@@ -220,7 +259,7 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   else { t0 = SONAR_T0_FALLBACK; info.t0_ok = 0; }
   info.t0 = (int16_t)t0;
   // bins: depth d -> round trip 2 d / c -> sample t0 + 2 d / c * rate; mean of the samples of each bin
-  const float spb = 2.0f * 0.025f / sound * SONAR_ADC_HZ;   // samples per bin (~5.3)
+  const float spb = 2.0f * 0.025f / sound * (float)rate;   // samples per bin (~5.6)
   for (int b = 0; b < BINS; b++) {
     const size_t s0 = t0 + (size_t)(b * spb), s1 = t0 + (size_t)((b + 1) * spb);
     uint32_t sum = 0; size_t k = 0;
@@ -243,7 +282,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   const uint8_t avg = focus ? 1 : p[P_AVG];
   // VDRV_CTRL (0x16): bits 3:0 = VDRV - 5 V. vmode 0 = regulator always on, default charge current: exactly what the
-  // Open Echo firmware writes (0x0F at 20 V) and what has fish on screen. vmode 1 = bit 6 DIS_VDRV_REG_LSTN (no
+  // the reference firmware writes (0x0F at 20 V) and what has fish on screen. vmode 1 = bit 6 DIS_VDRV_REG_LSTN (no
   // charging while listening) + bit 4 20 mA charge, re-armed by VDRV_TRIGGER in capture(): datasheet 7.3.1, unproven.
   g_vmode = p[P_VMODE];
   writeReg(0x16, (uint8_t)((g_vmode == 1 ? 0x50 : 0x00) | ((p[P_VDRV] - 5) & 0x0F)));
@@ -298,6 +337,8 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
 #else   // SONAR_REAL == 0: nothing (the fake sonar runs instead)
 namespace tuss {
 bool begin() { return false; }
+uint32_t clockHz() { return 0; }
+uint32_t measuredHz() { return 0; }
 void sleep() {}
 bool ok() { return false; }
 bool ping(const icemesh::sonar::Params&, bool, uint8_t[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], PingInfo&) { return false; }

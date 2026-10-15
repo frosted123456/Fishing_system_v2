@@ -102,7 +102,7 @@ const PURPOSES = {
     { k: 'tipup_wroom', t: 'Tip-up, Hall latch', d: 'The v2 head: US1881 latch on GPIO 27, deep sleep, ESP-NOW to the nearest hub.', idDef: 2, nameDef: 'Hole 2',
       before: ['Hall latch output → GPIO 27, VCC from the pack (≥ 3.5 V), GND', 'Battery divider on GPIO 34 (2:1)', 'A hub (or the chalet in demo) must be running to see it'],
       after: ['Serial: "Hall latch: level x, 0 flips since power-on, trip off" then deep sleep', 'Turn the spool a quarter turn → wakes, ">>> Sending ALERT" → FISH ON on the chalet', 'Still for 30 s → "Flag reset - FISH OFF"'] },
-    { k: 'tipup_wroom', sonar: true, t: 'Tip-up + sonar (TUSS4470 shield)', d: 'Same, with the Open Echo shield and the transducer. Driver not yet proven on hardware.', idDef: 2, nameDef: 'Hole 2',
+    { k: 'tipup_wroom', sonar: true, t: 'Tip-up + sonar (TUSS4470 shield)', d: 'Same, with the TUSS4470 shield and the transducer. Driver not yet proven on hardware.', idDef: 2, nameDef: 'Hole 2',
       before: ['docs/SONAR_DRIVER.md: wiring table (VSPI 18/19/23/5, IO1 26, IO2 25, VOUT 36) and the MT3608 at 12.0 V', 'Shield VCC SELECT jumper on 3.3 V', 'First time: use the bucket-test build below, not this one'],
       after: ['Serial: "Sonar TUSS4470: found" (else wiring / SPI)', 'The sonar runs only while a hub talks to it; the chalet Sonar tab shows the hole', 'Chalet: Set bait on the hole card, then the knobs (Settings → Sonar) as the water tells you'] },
     { k: 'tipup_wroom', sonar: true, bench: true, t: 'Sonar bucket test', d: 'Real sonar from boot, no hub, one readable BENCH line every 2 s. For the first water tests.', idDef: 2, nameDef: 'Hole 2',

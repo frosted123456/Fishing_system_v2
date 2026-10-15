@@ -843,7 +843,7 @@ const KHELP = {
   jitter: ['Ping timing jitter', 'Random wait (0 to this many ms) before each ping so neighbouring tip-ups never ping in step. Needed for the interference filter. 0 = off.'],
   spike: ['Interference filter', 'Removes a blip that appears on one ping only, at a depth where the two pings before were this much quieter (another tip-up\'s ping). Lower = removes more, may thin a fast fish. 0 = off.'],
   echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
-  vmode: ['Drive regulator', '0 = always on, as the Open Echo firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
+  vmode: ['Drive regulator', '0 = always on, as the shield's reference firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
 };
 const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
 function renderKnobs() {

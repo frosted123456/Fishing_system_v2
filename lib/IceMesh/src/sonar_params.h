@@ -36,7 +36,7 @@ enum ParamId : uint8_t {
   P_BOTTOM_MIN,      // D43: bottom search starts here (x0.1 m; prototype 0.6 m). Bucket test: 1-2
   P_VDRV,            // D45: transducer drive VDRV in volts (reg 0x16 = V - 5, 5-20 V); must stay below the
                      //      MT3608 output (VPWR > VDRV + 0.3 V, + the shield 1N4001: MT3608 >= VDRV + 1.5 V, D55). Full bridge: 2 x VDRV peak-to-peak
-  P_VMODE,           // D53: VDRV regulator mode. 0 = always on (Open Echo firmware, proven in water), 1 = off while
+  P_VMODE,           // D53: VDRV regulator mode. 0 = always on (shield reference firmware, proven in water), 1 = off while
                      //      listening + re-charge before each burst (datasheet 7.3.1, quieter receive, unproven)
   // D57 interference / false-target rejection (8 sonars on one lake: every hole hears the others' pings)
   P_JITTER_MS,       // random 0..N ms added before every burst: another sonar's ping lands at a different depth each

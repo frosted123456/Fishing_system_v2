@@ -1391,9 +1391,9 @@ static void recInfo() {
   char name[24]; snprintf(name, sizeof(name), "%s", NODE_NAME);
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[512];
-  int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
+  int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
                    "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d vbat_mv=%u heap=%lu cal=",
-                   millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)SONAR_ADC_HZ, icemesh::sonar::BINS,
+                   millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
                    SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, batteryMv, (unsigned long)ESP.getFreeHeap());
@@ -1421,9 +1421,9 @@ void sonarRecord(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::
 static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   if (!sonarRecAny()) return;
   char buf[640];
-  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu t0_ok=%u fault=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
+  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
                    "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u",
-                   millis(), (unsigned long)pi.adc_hz, pi.t0_ok, pi.fault, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
+                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
                    (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                    o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes);
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
@@ -1472,8 +1472,8 @@ static char sonarBenchBuf[512];
 static void sonarBenchFormat(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   char edge[16];
   if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
-  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(want %lu) t0=%d%s raw_max=%u%s edge=%s ping=%lums%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
-                (unsigned long)pi.adc_hz, (unsigned long)SONAR_ADC_HZ, pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
+  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(clock %lu)%s t0=%d%s raw_max=%u%s edge=%s ping=%lums%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
+                (unsigned long)pi.adc_hz, (unsigned long)tuss::clockHz(), pi.clk_ok ? "" : (pi.nolimit ? "(SHORT)" : "(LIMITED)"), pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
                 edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                 o.ring_alarm ? "(RING ALARM)" : "", o.spikes, o.long_echoes);
   static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};

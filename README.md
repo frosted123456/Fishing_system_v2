@@ -5,6 +5,25 @@ ESP-NOW to a hub on the ice, hubs talk LoRa (TDMA mesh, SF9/500 kHz) to the chal
 everything on its OLED and on a phone web page over its own hotspot. Holes fitted with a sonar (TUSS4470 +
 200 kHz transducer) stream depth, bottom type and fish to the chalet.
 
+## Origin and credits
+
+The sonar side of this project started from **open_echo** by Jan Neumann: the TUSS4470 shield 002 used in the
+winter 2026 tip-ups and the register sequence that is known to work in water come from there. Cited as its README asks:
+
+```bibtex
+@misc{open_echo,
+  author       = {Jan Neumann},
+  title        = {open\_echo},
+  year         = {2026},
+  publisher    = {GitHub},
+  journal      = {GitHub Repository},
+  howpublished = {\url{https://github.com/Neumi/open_echo}},
+  note         = {ORCID: https://orcid.org/0009-0003-9829-8959}
+}
+```
+
+The firmware here (driver, processing, mesh, web page) is our own; it is not a fork of open_echo.
+
 ## Boards
 
 | Board | Role | Firmware |
@@ -13,7 +32,7 @@ everything on its OLED and on a phone web page over its own hotspot. Holes fitte
 | ESP32 WROOM | Tip-up: Hall latch on the spool, optional sonar shield | `src/sensor_node/` |
 | ESP32-C3 Super Mini | Tip-up with a reed switch (older head) | `src/sensor_node/` |
 
-## Winter 2026 sonar tip-up: wiring (ESP32 DevKit V1 30-pin + Open Echo shield 002, hand-wired)
+## Winter 2026 sonar tip-up: wiring (ESP32 DevKit V1 30-pin + TUSS4470 shield 002, hand-wired)
 
 Build env: `sensor_wroom_sonar` (or `sensor_wroom_sonar_bench` for the bucket test). Pins = `src/sensor_node/sonar_tuss4470.h`.
 Bench build on a phone: join the Wi-Fi **IceFish-bench-<node id>**, open **http://192.168.4.1** (live values, A-scan,
@@ -37,12 +56,12 @@ Also on the ESP32: Hall latch -> GPIO27, battery divider (2:1) -> GPIO34, LED GP
 
 Shield set-up:
 - Frequency jumpers: **JP3 + JP4 (200 kHz) only**; JP1/JP2 (40 kHz) and JP5/JP6 (custom) open.
-- Transducer header: cable shield / ground -> **top** pin, signal -> bottom pin (Open Echo README).
+- Transducer header: cable shield / ground -> **top** pin, signal -> bottom pin (shield documentation).
 - Do not feed the MT3608 into the shield VIN pin or the XT30: their indicator LEDs (R4 1 k, R5 2.2 k, 0603) would
   dissipate 0.16-0.36 W at 21 V (rated 0.1 W) and waste 10-20 mA. J4's middle pin bypasses both.
   Optional: remove R3 (power LED, ~4 mA on 3.3 V).
 - MT3608 at **21.5 V** for the default `vdrv` 20: the shield's 1N4001 drops ~0.7-0.9 V and the TUSS4470 needs
-  VPWR > VDRV + 0.3 V. Rule: `vdrv` = MT3608 setting - 1.5 V. Open Echo: keep the MT3608 at or below ~22 V.
+  VPWR > VDRV + 0.3 V. Rule: `vdrv` = MT3608 setting - 1.5 V. Keep the MT3608 at or below ~22 V (shield reference design).
 
 ## Build and flash
 

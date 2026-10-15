@@ -1,4 +1,4 @@
-// TUSS4470 sonar driver for the ESP32 WROOM tip-up (Open Echo shield 002), D43 / roadmap phase 3.
+// TUSS4470 sonar driver for the ESP32 WROOM tip-up (TUSS4470 shield 002), D43 / roadmap phase 3.
 // WRITTEN BLIND: nothing here has run on hardware yet. Verify step by step in the bucket test
 // (docs/SONAR_DRIVER.md). Built only with SONAR_REAL=1 (env sensor_wroom_sonar).
 //
@@ -46,12 +46,14 @@
 #define SONAR_BOOST_SETTLE_MS 20   // MT3608 soft start + C8/C9 charge to 24 V (est., measure on the bench)
 
 // ---- acquisition constants (est.) ----
-#define SONAR_ADC_HZ          150000   // I2S-ADC sample rate: ~5 samples per 2.5 cm bin at 1403 m/s
+#define SONAR_ADC_HZ          156250   // I2S-ADC sample rate request: 160 MHz PLL / 32 exactly (integer divider, no
+                                       // fractional dither), ~5.6 samples per 2.5 cm bin. The depth maths uses the rate
+                                       // read back from the clock registers (clockHz()), not this constant (D58)
 #define SONAR_CHARGE_MS       1        // settle before each burst; the real VDRV refill is the VDRV_READY wait in capture()
 // Drive voltage: knob "vdrv" (volts). VDRV_CTRL (reg 0x16) bits 3:0 = VDRV - 5 V, 5-20 V (datasheet), charged
-// from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet). Default 20 V (chip max, the Open Echo tests ran
+// from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet). Default 20 V (chip max, the reference tests ran
 // 15-20 V) = MT3608 at 21.5 V (shield 1N4001 ~0.8 V + 0.3 V headroom, D55), 40 V p-p across the transducer (full bridge, 2 x VDRV). MT3608 still at 12 V:
-// KNOB vdrv 11. Knob "vmode": 0 = regulator always on (Open Echo, proven), 1 = off while listening (datasheet).
+// KNOB vdrv 11. Knob "vmode": 0 = regulator always on (reference firmware, proven), 1 = off while listening (datasheet).
 #define SONAR_WAKE_MS         10       // sleep -> SPI ready (datasheet power-up time 10 ms; sleep exit likely faster)
 // Log-amp output: 29.7 mV/dB typical with VOUT_SCALE_SEL = 0 (3.3 V map, datasheet; 25-33 mV/dB over parts),
 // ADC 12-bit over ~3.3 V -> 0.0271 dB per count (est.: the real ADC full scale and the part's slope differ;
@@ -76,11 +78,17 @@ struct PingInfo {
   uint32_t us;            // time the ping took
   uint8_t fault;          // DEV_STAT bits after the burst: 0x04 wrong pulse count, 0x02 driver stuck (clock lost)
   uint8_t t0_ok;          // 1 = time zero from the leakage, 0 = SONAR_T0_FALLBACK used (no leakage seen)
-  uint32_t adc_hz;        // MEASURED sample rate of the last capture (samples / capture time). Must read
-                          // ~SONAR_ADC_HZ: the depth scale depends on it (bench line / STAT, first bucket step)
+  uint32_t adc_hz;        // D58: delivered sample rate of the last capture, measured between full DMA buffers
+                          // (~0.1 %). Below clockHz() by more than 0.3 % = the ADC lost samples (conversion-limit
+                          // restarts, see capture()): clk_ok = 0 and the driver keeps the limit on for the next pings
+  uint8_t clk_ok;         // 1 = delivered rate within 0.3 % of the clock rate
+  uint8_t nolimit;        // 1 = this capture ran with the conversion limit cleared (continuous sampling)
 };
 
 bool begin();                                             // false = TUSS4470 not answering (SPI)
+uint32_t clockHz();                                       // D58: ADC sample rate from the I2S clock registers (crystal-
+                                                          // locked, +-20 ppm): the depth scale. 0 before begin()
+uint32_t measuredHz();                                    // D58: sample rate measured over ~200 ms at begin() (sanity)
 uint8_t lastStatus();                                     // SPI status bits of the last frame (datasheet 7.4:
                                                           // bit5 VDRV_READY, 4 PULSE_NUM_FLT, 3 DRV_PULSE_FLT, 2 EE_CRC_FLT, 1:0 state)
 void sleep();                                             // TUSS4470 sleep mode (reg 0x1B bit 7); safe before
