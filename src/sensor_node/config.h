@@ -134,6 +134,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // GPIO1 is ADC1_CH1 and safe to use
 // Set to -1 if no battery voltage divider is connected
 #define VBAT_PIN            1           // Battery voltage ADC (GPIO1/ADC1_CH1, -1 to disable)
+#define BTN_PIN             -1          // no arming button on the C3 head (D61; remote arm/disarm still works)
 
 // Battery voltage divider calibration
 #define VBAT_DIVIDER        2.0
@@ -151,6 +152,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define LED_PIN             33          // Onboard red LED
 #define FLASH_PIN           4           // Flash LED (don't use for battery)
 #define VBAT_PIN            -1          // No ADC available easily
+#define BTN_PIN             -1          // no arming button (D61)
 
 #endif // BOARD_ESP32CAM
 
@@ -163,6 +165,9 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define REED_PIN            27          // Hall latch output (US1881, open drain): RTC GPIO, ext0 wake source
 #define LED_PIN             2           // Onboard LED (most devkits)
 #define VBAT_PIN            34          // Battery voltage ADC
+#ifndef BTN_PIN
+#define BTN_PIN             33          // D61 arming button to GND (internal pull-up): RTC GPIO, ext1 wake source
+#endif                                  //   (pod board: IO9, set with a build flag)
 
 #define VBAT_DIVIDER        2.0
 #define VBAT_REF_MV         3300

@@ -122,11 +122,23 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 // User IO
 #define LED_PIN             35          // Onboard white LED
-#define USER_BUTTON         0           // PRG/BOOT button
+#define USER_BUTTON         0           // PRG/BOOT button (screen, silence, hotspot)
+#ifndef BTN_PIN
+#define BTN_PIN             5           // D61 arming button to GND (internal pull-up), hub / LoRa tip-up hole; -1 = none
+#endif
 
 // External connections
 #define BUZZER_PIN          7           // CLT1036 active buzzer
-#define REED_PIN            4           // Reed switch (if gateway+sensor combo)
+#define REED_PIN            4           // Own hole sensor (hub / LoRa tip-up): reed switch or Hall latch output
+// D64: the own hole can be a spool-shaft Hall latch (US1881 + alternating magnets, like the WROOM head: a trip is
+// TRIGGER_FLIPS flips within HALL_WINDOW_MS, over after HALL_CLEAR_SEC still) or a plain reed (level + the OLED
+// "Reed polarity" setting). Same knobs as src/sensor_node/config.h. Build flag -D HOLE_HALL_LATCH=0 for a reed.
+#ifndef HOLE_HALL_LATCH
+#define HOLE_HALL_LATCH     1
+#endif
+#define TRIGGER_FLIPS       1           // 1 = alert on a quarter turn, 2 = half turn (wind / bait false alerts)
+#define HALL_WINDOW_MS      10000       // flips further apart than this start a new count (matters with 2)
+#define HALL_CLEAR_SEC      30          // trip ends (line state back to normal) after the shaft is still this long
 
 // CardKB I2C Keyboard (M5Stack)
 #define CARDKB_SDA          41
@@ -157,6 +169,21 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define WEB_SERVER_PORT     80
 #define AP_MAX_CONNECTIONS  4
 #define AP_CHANNEL          ESPNOW_CHANNEL
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SONAR (D62): TUSS4470 shield 002 on the module's own hole (hub, LoRa tip-up, relay with a hole; not the chalet)
+// Pins: lib/SonarTuss/src/sonar_tuss4470.h (Heltec V3 block: SCK 47, MOSI 48, MISO 33, CS 34, IO1 38, IO2 39, VOUT 6).
+// ═══════════════════════════════════════════════════════════════════════════
+
+#ifndef SONAR_REAL
+#define SONAR_REAL          0           // 1 = real sonar on the own hole (envs hub_sonar / sensor_lora_sonar), needs HAS_LOCAL_SENSOR
+#endif
+#ifndef SONAR_BENCH
+#define SONAR_BENCH         0           // 1 = bucket test: a BENCH line on Serial every 2 s (env hub_sonar_bench)
+#endif
+#define SONAR_PING_EST_US   160000UL    // est.: one ping = up to 6 captures x ~21 ms + settle + jitter (3 freqs, avg 2); the capture is pushed
+                                        // to the next tick when a LoRa transmit is planned inside this window
+#define SONAR_RF_GUARD_US   2000UL      // quiet time after the last transmit before a capture (as the WROOM, D54)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // DEBUG SETTINGS

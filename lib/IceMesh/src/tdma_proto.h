@@ -41,8 +41,10 @@ enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0
 //   CMD_SET_SIM       target = hole ID (255 = every hole), value = simValue(): test data for that hole
 //   CMD_SONAR_PARAM   target = sonar knob index (sonar_params.h), value = its value; for every sonar hole
 //   CMD_SET_BAIT      target = hole ID, value = bait depth in 5 cm steps (0 = not set)
+//   CMD_SET_ARM       target = hole ID (255 = every hole), value = 1 armed / 0 disarmed (D61; the hole's button can
+//                     change it again: last action wins, the LINE flag LF_DISARMED reports what the hole runs with)
 enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1, CMD_SET_CHANNEL = 2, CMD_SET_RELAY = 3, CMD_SET_SIM = 4,
-                           CMD_SONAR_PARAM = 5, CMD_SET_BAIT = 6 };
+                           CMD_SONAR_PARAM = 5, CMD_SET_BAIT = 6, CMD_SET_ARM = 7 };
 // Simulation of one hole: bit0 fake sonar, bit1 fake Hall-sensor trips, bits 2-7 trips per hour (0 = 6)
 enum : uint8_t { SIM_SONAR = 0x01, SIM_HALL = 0x02 };
 inline uint8_t simValue(bool sonar, bool hall, uint8_t trips_per_hour) {
@@ -50,8 +52,9 @@ inline uint8_t simValue(bool sonar, bool hall, uint8_t trips_per_hour) {
   return static_cast<uint8_t>((sonar ? SIM_SONAR : 0) | (hall ? SIM_HALL : 0) | (r << 2));
 }
 inline uint8_t simTripsPerHour(uint8_t v) { const uint8_t r = static_cast<uint8_t>(v >> 2); return r ? r : 6; }
-// LINE record flags (3 bits): low battery, hole running a simulation (shown as SIM everywhere)
-enum : uint8_t { LF_LOWBAT = 0x01, LF_SIM = 0x02 };
+// LINE record flags (3 bits): low battery, hole running a simulation (shown as SIM everywhere),
+// hole disarmed (D61: its spool movement is ignored, no FISH ON)
+enum : uint8_t { LF_LOWBAT = 0x01, LF_SIM = 0x02, LF_DISARMED = 0x04 };
 
 // Network configuration byte, in every beacon (LoRa and ESP-NOW backbone):
 //   bits 0-1 transport (TR_*), bit 2 ESP-NOW long-range rate, bits 4-7 current LoRa channel index

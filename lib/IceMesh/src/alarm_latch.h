@@ -17,6 +17,8 @@ struct AlarmLatch {
   void ack(bool line_up) { if (line_up) acked = true; else since_ms = 0; }
   // the line went back down: an acknowledged alarm ends here
   void lineReset() { if (acked) { since_ms = 0; acked = false; } }
+  // D64: someone acted at the hole (button clear / disarm): the alarm ends now, whatever the line
+  void clear() { since_ms = 0; acked = false; }
   // hold time (ms, 0 = until silenced): an alarm ends hold_ms after the line reset, by itself
   bool hold(bool line_up, uint32_t now, uint32_t hold_ms) {
     if (!hold_ms || !since_ms || line_up || now - since_ms <= hold_ms) return false;

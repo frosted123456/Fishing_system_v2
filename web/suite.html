@@ -999,7 +999,7 @@ function renderNodes() {
     const off = n.online === false, low = !!n.lowbat, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
     const s = sonar[n.id], g = glance.nodes[n.id], fl = s ? (s.st || 0) : 0, fmt = m => son ? son.fmtD(m) : m.toFixed(2) + ' m';
     const state = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : n.line ? '<span class="badge al">FLAG UP</span>' : low ? '<span class="badge warn">LOW BATT</span>' : '<span class="badge on">OK</span>';
-    const badge = (n.sim ? '<span class="badge sim">SIM</span>' : '') + state;
+    const badge = (n.sim ? '<span class="badge sim">SIM</span>' : '') + (n.disarmed ? '<span class="badge" title="the button on the hole or this page disarmed it: spool movement is ignored">DISARMED</span>' : '') + state;
     const via = n.via_lora ? 'LoRa' : (n.via_espnow ? 'ESP-NOW' : '');
     const seen = n.last_seen_sec == null ? '' : (n.last_seen_sec < 60 ? n.last_seen_sec + ' s ago' : Math.round(n.last_seen_sec / 60) + ' min ago');
     const meta = ['#' + n.id, via, seen].filter(Boolean).join(' · ');
@@ -1014,6 +1014,7 @@ function renderNodes() {
       (chips ? `<div class="flags">${chips}</div>` : '') : '';
     const acts = `<div class="acts">` + ((s || g) ? `<button class="btn small primary" type="button" data-watch="${n.id}">Watch</button>` +
       `<button class="btn small" type="button" data-bait="${n.id}">${n.bait ? 'Bait ' + fmt(n.bait / 100) : 'Set bait'}</button>` : '') +
+      `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="D61: same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>` +
       `<button class="btn small" type="button" data-rename="${n.id}">Rename</button></div>`;
     h += `<div class="node${n.fish && !off ? ' fish' : ''}${off ? ' off' : ''}${low ? ' low' : ''}">` +
       `<div class="hd"><span class="nm">${esc(nodeName(n))}</span><span class="bd">${badge}</span></div>` +
@@ -1195,6 +1196,13 @@ $('ngrid').addEventListener('click', e => {
     const num = parseFloat(String(v).replace(',', '.')); if (!(num >= 0)) { alert('Enter a depth.'); return; }
     const cm = Math.round((ft ? num / 3.28084 : num) * 100);
     api('/api/node/bait', { nodeId: id, cm }).then(() => loadStatus()).catch(() => {});
+    return;
+  }
+  const ab = e.target.closest('[data-arm]');
+  if (ab) {   // v2 (D61): arm / disarm this hole (the hole confirms with its next report)
+    const id = +ab.dataset.arm, armed = ab.dataset.armed !== '1';
+    ab.disabled = true; ab.textContent = armed ? 'Arming…' : 'Disarming…';
+    api('/api/node/arm', { nodeId: id, armed }).then(() => setTimeout(loadStatus, 1500)).catch(() => loadStatus());
     return;
   }
   const r = e.target.closest('[data-rename]'); if (!r) return;

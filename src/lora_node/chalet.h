@@ -52,6 +52,7 @@
 #include "screens.h"
 #include <sonar_sim.h>             // v2: fake sonar for the test mode (virtual sonar nodes on hubs)
 #include <sonar_params.h>          // v2 (D42): sonar processing knobs, one set for every sonar hole
+#include "sonar_tuss4470.h"        // v2 (D62): real sonar on the own hole (lib/SonarTuss; stubs when SONAR_REAL=0)
 static_assert(icemesh::sonar::P_COUNT <= SONAR_CTRL_PARAMS, "sonar knobs do not fit the sonar control message");
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -306,6 +307,7 @@ extern NodeRole currentRole;
 extern NetworkState network;
 extern portMUX_TYPE networkMux;
 extern bool localReedState;
+extern bool localReedMasked;   // D61: own trip cleared by the button, reed ignored until the flag is down
 extern bool localFishOn;
 extern uint16_t localBatteryMv;
 extern uint16_t localSequence;
@@ -348,6 +350,9 @@ void setupWiFiAP();
 void setupWebServer();
 void setupBuzzer();
 void setupLocalSensor();
+void holePrintStatus(Stream& out);   // D64: serial HOLE
+void holeScreenLine(char* out, size_t n);   // D64: hub home footer
+void holeTripClear();                 // D64: serial HOLE CLEAR (= button press while tripped)
 void readBattery();
 
 // Display sleep/wake functions
@@ -434,6 +439,15 @@ extern int16_t holePosDm[256][2];
 void posLoad();
 void posSet(uint8_t hole, int16_t x_dm, int16_t y_dm);   // POS_UNSET, POS_UNSET = remove from the map
 void handleWebApiNodePos();
+// v2 (D61) arming button / armed state of the hub's own hole (main.cpp); the chalet arms / disarms any hole
+void setupArmButton();                       // hub roles: BTN_PIN + LED, saved state (NVS "node" / "armed")
+void loopArmButton();                        // hub roles: short press arm / disarm (tripped: clear), hold 3 s report
+bool localArmed();                           // own hole armed (always true on the chalet)
+void armSetLocal(bool armed, bool remote);   // own hole: apply + save + report (button or chalet command)
+void armApply(uint8_t hole, bool armed);
+void armAllOnNodeHeard(uint8_t node);     // hub: CMD_SET_ARM from the chalet (own hole here, tip-ups via DEVCMD_ARM)
+void armSet(uint8_t hole, bool armed);       // chalet: CMD_SET_ARM in the beacon (hole ID or 255 = all)
+void handleWebApiNodeArm();
 void baitLoad();
 void baitToSource(icemesh::sonar::SonarSource* src, uint8_t id);   // hub: this hole's bait depth into its fake sonar
 void baitSet(uint8_t hole, uint8_t v5);      // chalet: save + send (CMD_SET_BAIT) + demo
@@ -451,6 +465,17 @@ void handleWebApiKnobsPost();
 void handleWebApiSonarPings();
 void handleWebApiSonarBg();
 void sonarHubLoop();
+// v2 (D62) real sonar on the own hole (SONAR_REAL=1): setup after the radio, serial commands (wifi.cpp -> here)
+void setupSonarReal();                        // tuss::begin() once, logs found / not answering
+bool sonarSerialCommand(const String& line);  // STAT / REG / CAL / INFO (same words as the WROOM); true = handled
+// D62: ESP-NOW frames handed to the radio vs sent (send callback), for the radio-quiet sonar capture (as the WROOM, D54)
+extern volatile uint32_t g_nowQueued, g_nowDone;
+extern volatile unsigned long g_nowDoneMs;
+inline esp_err_t nowSend(const uint8_t* mac, const uint8_t* data, size_t len) {
+  const esp_err_t r = esp_now_send(mac, data, len);
+  if (r == ESP_OK) g_nowQueued++;
+  return r;
+}
 uint8_t hubHoleSim(uint8_t node);
 bool hubSimTripped(uint8_t node);
 void hubSimApply(uint8_t target, uint8_t value);

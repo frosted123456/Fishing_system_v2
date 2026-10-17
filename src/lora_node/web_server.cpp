@@ -13,6 +13,7 @@ void setupWebServer() {
   server.on("/api/silence", HTTP_POST, handleWebApiSilence);
   server.on("/api/node/name", HTTP_POST, handleWebApiNodeName);
   server.on("/api/node/bait", HTTP_POST, handleWebApiNodeBait);    // v2 (D43): bait depth per hole
+  server.on("/api/node/arm", HTTP_POST, handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
   server.on("/api/node/pos", HTTP_POST, handleWebApiNodePos);      // v2 (D51): position on the pocket map
   server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
@@ -108,6 +109,7 @@ void handleWebApi() {
     }
     n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
     n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
+    n["disarmed"] = HAS_FLAG(network.nodes[i].flags, FLAG_DISARMED) != 0;   // v2 (D61): spool movement ignored
     n["battery"] = network.nodes[i].battery_mv;
     n["rssi"] = network.nodes[i].rssi;
     // IMPROVEMENT 2: Include via tracking
@@ -145,6 +147,16 @@ void handleWebApiNodeBait() {
   const int id = doc["nodeId"] | 0, cm = doc["cm"] | 0;
   if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id >= 255 || cm < 0 || cm > 1275) { server.send(400, "application/json", "{\"error\":\"bad hole or depth\"}"); return; }
   baitSet((uint8_t)id, (uint8_t)((cm + 2) / 5));
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// v2 (D61) POST {"nodeId":n,"armed":true|false}  (nodeId 255 = every hole). The hole answers with its LINE flag.
+void handleWebApiNodeArm() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id > 255 || !doc.containsKey("armed")) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  armSet((uint8_t)id, doc["armed"].as<bool>());
   server.send(200, "application/json", "{\"ok\":true}");
 }
 

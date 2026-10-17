@@ -91,7 +91,8 @@ static void buildScreenModel() {
     if (h.hub == 0) h.hub = n.node_id;
     snprintf(h.name, sizeof(h.name), "%s", n.name);
     h.state = holeStateOf(n);
-    if (n.node_id == NODE_ID && hubSimTripped(NODE_ID)) h.state = SH_FISH;
+    if (n.node_id == NODE_ID && hubSimTripped(NODE_ID) && localArmed()) h.state = SH_FISH;
+    h.disarmed = HAS_FLAG(n.flags, FLAG_DISARMED) != 0;   // D61
     h.batt = n.battery_mv ? batteryMvToPercent(n.battery_mv) : 255;
     h.since_s = h.state == SH_FISH ? (now - (n.alarm.since_ms ? n.alarm.since_ms : (n.fish_on_time ? n.fish_on_time : now))) / 1000 : 0;
     { const uint8_t dv = meshDemoSim(n.node_id); h.sim = dv != 0xFF ? (dv & 3) : (HAS_FLAG(n.flags, FLAG_SIM) ? 1 : 0); }
@@ -136,6 +137,7 @@ static void buildScreenModel() {
     MeshHubView v; meshHubView(v);
     m.master_heard = v.synced; m.beacon_rssi = v.beacon_rssi; m.via_echo = v.from_echo; m.on_backup = v.eb_on;
     m.hotspot = wifiApActive; m.hotspot_min = hubHotspotUntil ? (hubHotspotUntil - now) / 60000UL + 1 : 0;
+    if (!m.note[0]) holeScreenLine(m.note, sizeof(m.note));   // D64: own hole line in the home footer (replaces "Hold 3s: hotspot")
   }
   // focus (chalet)
   m.focus_node = meshFocusNode(); m.n_cols = 0; m.bait_cm = 0;

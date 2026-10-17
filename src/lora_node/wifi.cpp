@@ -50,11 +50,24 @@ void saveWifiCredentials(const char* ssid, const char* password) {
 
 // Check serial for WiFi config commands: WIFI:ssid:password
 void checkSerialWifiConfig() {
-  if (!Serial.available()) return;
-  
-  String line = Serial.readStringUntil('\n');
+  // D64: characters are collected as they arrive and the line is handled at Enter. readStringUntil() with the
+  // 20 ms timeout of the SONAR_REAL builds (D62) split a typed command into one "line" per keystroke: nothing
+  // typed by hand ever matched (pasted lines did). No blocking, whatever the timeout.
+  static String acc;
+  bool complete = false;
+  while (Serial.available()) {
+    const char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') { if (acc.length()) complete = true; if (complete) break; }
+    else if (c == 8 || c == 127) { if (acc.length()) acc.remove(acc.length() - 1); }
+    else if (acc.length() < 200) acc += c;
+  }
+  if (!complete) return;
+  String line = acc; acc = "";
   line.trim();
+  if (!line.length()) return;
+  { String u = line.substring(0, 4); u.toUpperCase(); if (u == "HOLE") { line = "HOLE" + line.substring(4); line.toUpperCase(); } }
   
+  if (sonarSerialCommand(line)) return;   // D62: STAT / REG / CAL / INFO of the real sonar (SONAR_REAL builds)
   if (line.startsWith("WIFI:")) {
     // Format: WIFI:ssid:password
     int firstColon = line.indexOf(':', 5);
@@ -254,6 +267,14 @@ void checkSerialWifiConfig() {
       Serial.printf("  %-8s %3u %-8s (%u-%u, default %u)  %s\n", f.key, sonarPrm[i], f.unit, f.lo, f.hi, f.def, f.name);
     }
     Serial.println(F("Usage: KNOB <key> <value> | KNOB DEFAULTS | KNOB RESEND (chalet: sent to every sonar hole)"));
+  } else if (line.startsWith("HOLE")) {   // D64: own hole wiring test
+    if (!HAS_LOCAL_SENSOR || currentRole == ROLE_GATEWAY_OFFSHORE) { Serial.println(F("HOLE: this build has no own hole")); return; }
+    String a = line.substring(4); a.trim();
+    if (a == "ARM") armSetLocal(true, false);
+    else if (a == "DISARM") armSetLocal(false, false);
+    else if (a == "CLEAR") holeTripClear();
+    holePrintStatus(Serial);
+    if (!a.length()) Serial.println(F("Usage: HOLE | HOLE ARM | HOLE DISARM | HOLE CLEAR (= button press while tripped)"));
   } else if (line == "PERF") {
     perfPrint();   // v2: loop timing since the last PERF
   } else if (line == "RADIO") {
@@ -266,6 +287,9 @@ void checkSerialWifiConfig() {
     preferences.clear();
     preferences.end();
     Serial.println(F("WiFi credentials cleared!"));
+  } else {
+    Serial.printf("Unknown command \"%s\". Commands: HOLE, PERF, RADIO, KNOB, BUZZ, DEMO, SIM, SONAR, HOTSPOT, WIFI:ssid:pass"
+                  "%s\n", line.c_str(), SONAR_REAL ? ", STAT, INFO, REG, CAL" : "");
   }
 }
 

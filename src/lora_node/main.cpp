@@ -14,6 +14,9 @@
  *    only #include <Arduino.h> and missing prototypes were added.)
  */
 #include "chalet.h"
+#include <arm_button.h>   // v2 (D61): arming button + armed / disarmed state (lib/IceMesh, host-tested)
+#include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
+#include <esp_system.h>   // D65: esp_reset_reason()
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBALS (declared in chalet.h)
@@ -26,6 +29,8 @@ uint32_t sonarPrmChangedMs = 0;   // hub: when the knobs last changed (sonar con
 uint16_t sonarPrmGen = 0;         // bumps on every change: local fake sonars re-apply
 uint8_t baitCm5[256];
 int16_t holePosDm[256][2];
+volatile uint32_t g_nowQueued = 0, g_nowDone = 0; volatile unsigned long g_nowDoneMs = 0;   // D62: ESP-NOW in flight
+static void onEspNowSent(const uint8_t*, esp_now_send_status_t) { g_nowDone++; g_nowDoneMs = millis(); }
 uint16_t baitGen = 0;
 uint32_t buttonHeldMs = 0;            // > 0 while the button is held (display shows the hold bar)
 uint32_t connectInfoUntil = 0;        // show the "how to connect" screen until then
@@ -99,6 +104,22 @@ const unsigned long BUTTON_DEBOUNCE_MS = 300;
 bool displaySleeping = false;
 unsigned long lastActivityTime = 0;
 const unsigned long DISPLAY_SLEEP_MS = 5UL * 60UL * 1000UL;  // 5 minutes
+// D65: why did we boot? Kept across resets (RTC memory survives everything but power-off) so a brownout or
+// watchdog loop shows on serial and on the boot screen instead of looking like "the box went to sleep".
+RTC_NOINIT_ATTR uint32_t g_bootCount;
+RTC_NOINIT_ATTR uint32_t g_bootMagic;
+static const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "CRASH";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "WATCHDOG";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_EXT: return "ext reset";
+    default: return "unknown";
+  }
+}
 NodeRole currentRole = NODE_ROLE;
 NetworkState network;
 portMUX_TYPE networkMux = portMUX_INITIALIZER_UNLOCKED;
@@ -141,6 +162,7 @@ unsigned long lastLoRaRxTime = 0;   // When last valid packet was received
 
 void setup() {
   Serial.begin(DEBUG_BAUD);
+  if (SONAR_REAL) Serial.setTimeout(20);   // D62: readStringUntil() must not stall the sonar ticks for the default 1 s
   delay(500);
 
   Serial.println();
@@ -152,6 +174,13 @@ void setup() {
   Serial.printf("Role:        %s\n", getRoleName(currentRole));
   Serial.printf("Network ID:  0x%02X\n", NETWORK_ID);
   Serial.printf("Firmware:    v2, built %s %s\n", __DATE__, __TIME__);
+  {   // D65
+    const esp_reset_reason_t r = esp_reset_reason();
+    if (g_bootMagic != 0xB007C0DEUL || r == ESP_RST_POWERON) { g_bootMagic = 0xB007C0DEUL; g_bootCount = 0; }
+    g_bootCount++;
+    Serial.printf("Reset:       %s (boot %lu since power-on)%s\n", resetReasonName(r), (unsigned long)g_bootCount,
+                  r == ESP_RST_BROWNOUT ? "  <- supply sagged: battery flat / weak, or a load spike" : "");
+  }
   Serial.println();
 
   // BUG FIX #8: Enable hardware watchdog timer (30 second timeout)
@@ -252,10 +281,12 @@ void setup() {
   }
 
   if (espNowReady) meshSetEbSender(ebSend);   // v2: backbone frames go out as ESP-NOW broadcasts
+  setupSonarReal();   // v2 (D62): TUSS4470 on the own hole (SONAR_REAL builds), after the radio so the SPI hosts are settled
 
   // Setup user button for silencing (GPIO0 on Heltec V3)
   pinMode(USER_BUTTON, INPUT_PULLUP);
   DEBUG_PRINTLN(F("User button (GPIO0) enabled for silencing"));
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) setupArmButton();   // v2 (D61): arming button of the hub's own hole
 
   // Startup display
   display.clearBuffer();
@@ -319,6 +350,7 @@ void loop() {
   // Handle keyboard input
   loopCardKB();
   loopButton();  // Handle PRG button for silencing
+  loopArmButton();   // v2 (D61): arming button (hub roles)
   loopOptions(); // v2: Wi-Fi scan started from Options > Wi-Fi
 
   // ESP-NOW frames queued by the Wi-Fi task callback (C9)
@@ -398,9 +430,11 @@ void loop() {
 
     case ROLE_SENSOR_LORA:
       loopLocalSensor();
+      if (SONAR_REAL) checkSerialWifiConfig();   // D62: STAT / KNOB / REG / CAL / INFO on the bench
       break;
       
     case ROLE_RELAY_LORA:
+      if (SONAR_REAL) checkSerialWifiConfig();   // D62
       break;
   }
   
@@ -447,6 +481,11 @@ void setupDisplay() {
   {
     char b[32]; snprintf(b, sizeof(b), "built %.6s %.5s", __DATE__, __TIME__);
     display.drawStr(0, 41, b);
+    const esp_reset_reason_t r = esp_reset_reason();   // D65: a reboot loop is visible on the box itself
+    if (r != ESP_RST_POWERON && r != ESP_RST_SW && r != ESP_RST_EXT) {
+      snprintf(b, sizeof(b), "%s x%lu", resetReasonName(r), (unsigned long)g_bootCount);
+      display.drawStr(0, 52, b);
+    }
   }
   display.drawStr(0, 60, "Starting...");
   display.sendBuffer();
@@ -1461,6 +1500,7 @@ void setupEspNow() {
   }
 
   esp_now_register_recv_cb(onEspNowRecv);
+  esp_now_register_send_cb(onEspNowSent);   // D62: frames in flight, for the sonar capture
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, ESPNOW_BROADCAST, 6);
@@ -1504,6 +1544,7 @@ void setupEbChalet() {
   }
   if (esp_now_init() != ESP_OK) { Serial.println(F("Backbone: ESP-NOW init failed")); return; }
   esp_now_register_recv_cb(onEspNowRecv);
+  esp_now_register_send_cb(onEspNowSent);   // D62: keeps the in-flight count balanced (the chalet has no sonar)
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, ESPNOW_BROADCAST, 6);
   peer.channel = 0;   // v2: 0 = the current Wi-Fi channel (the router's when the chalet joined one)
@@ -1522,7 +1563,7 @@ void setupEbChalet() {
 }
 
 bool ebSend(const uint8_t* frame, size_t len) {
-  return espNowReady && esp_now_send(ESPNOW_BROADCAST, frame, len) == ESP_OK;
+  return espNowReady && nowSend(ESPNOW_BROADCAST, frame, len) == ESP_OK;
 }
 
 // Hub: commands for tip-up nodes (relay on/off). A sleeping node only listens right after it
@@ -1539,6 +1580,7 @@ void devCmdQueue(uint8_t node, uint8_t cmd, uint8_t value) {
 }
 
 void devCmdOnNodeHeard(uint8_t node) {
+  armAllOnNodeHeard(node);   // D61: a pending arm-all applies to every tip-up as it shows up
   for (auto& d : devCmds) {
     if (d.node == 0) continue;
     if (millis() - d.since > 3600000UL) { d.node = 0; continue; }   // node never showed up: drop after 1 h
@@ -1546,7 +1588,7 @@ void devCmdOnNodeHeard(uint8_t node) {
     DevCmdMessage m;
     m.network_id = NETWORK_ID; m.sender_id = NODE_ID; m.msg_type = MSG_DEV_CMD;
     m.target = node; m.cmd = d.cmd; m.value = d.value;
-    esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
+    nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
     if (++d.sends >= 3) d.node = 0;
   }
 }
@@ -1754,7 +1796,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
           node->last_direct_seen = millis();  // Track direct ESP-NOW timestamp
           node->received_direct = true;       // Mark as having direct path
         }
-        triggerBuzzer(3);  // Sound alert
+        if (!HAS_FLAG(msg->flags, FLAG_DISARMED)) triggerBuzzer(3);  // Sound alert (D61: never from a disarmed hole)
 
         // BUG FIX #4: Send ACK back to the sensor node
         // This allows the sensor to exit its 30-second wait loop early and save battery
@@ -1766,7 +1808,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
           ack.ack_node_id = msg->node_id;
           ack.ack_msg_type = MSG_ALERT;
           ack.reserved = 0;
-          esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&ack, sizeof(ack));
+          nowSend(ESPNOW_BROADCAST, (uint8_t*)&ack, sizeof(ack));
           DEBUG_PRINTF("Sent ACK to node %d for ALERT\n", msg->node_id);
         }
       }
@@ -2081,6 +2123,7 @@ void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t
     }
     DEBUG_PRINTF("Node %d: FISH_ON cleared\n", nodeId);
   }
+  if (HAS_FLAG(flags, FLAG_DISARMED) && !HAS_FLAG(node->flags, FLAG_DISARMED)) node->alarm.clear();   // D64: disarmed at the hole = acknowledged
   
   node->flags = flags;
   node->battery_mv = batteryMv;
@@ -2243,9 +2286,64 @@ void readBattery() {
 // LOCAL SENSOR
 // ═══════════════════════════════════════════════════════════════════════════
 
+// D64: Hall latch (HOLE_HALL_LATCH, default) = flips counted by the pin interrupt, trip logic in lib/IceMesh
+// hall_latch.h; reed = level + polarity setting. Every raw level change is printed (HOLE: ...) whatever the arm
+// state, so a wiring test needs no chalet: serial `HOLE` prints the whole picture, `HOLE ARM|DISARM|CLEAR` act.
+#if HOLE_HALL_LATCH
+static icemesh::HallLatch hall;                 // no deep sleep here: plain RAM, zeroed at boot
+static volatile uint32_t hallEdges = 0;
+static void IRAM_ATTR hallIsr() { hallEdges++; }
+static void hallPoll() {
+  noInterrupts(); const uint32_t n = hallEdges; hallEdges = 0; interrupts();
+  hall.edges(n, (uint8_t)digitalRead(REED_PIN), millis());
+}
+#endif
+static uint8_t holeRawLast = 2;                 // 2 = not read yet
+static uint32_t holeRawChanges = 0;
+
+void holePrintStatus(Stream& out) {
+  const uint8_t raw = (uint8_t)digitalRead(REED_PIN);
+  #if HOLE_HALL_LATCH
+  hallPoll();
+  out.printf("HOLE: GPIO%d level %u | Hall latch: %lu flips since boot, run %u/%u, trip %s, last flip %lu s ago | ",
+             REED_PIN, raw, (unsigned long)hall.total, hall.run, hall.trigger_flips, hall.on ? "ON" : "off",
+             (unsigned long)((millis() - (uint32_t)hall.last_ms) / 1000));
+  #else
+  out.printf("HOLE: GPIO%d level %u | reed: polarity %s -> %s | ", REED_PIN, raw, settings.reedActiveHigh ? "HIGH" : "LOW",
+             (settings.reedActiveHigh ? raw == HIGH : raw == LOW) ? "FLAG UP" : "down");
+  #endif
+  out.printf("%s%s, fish %s, seq %u, %lu level changes seen", localArmed() ? "ARMED" : "DISARMED", localReedMasked ? " (masked until down)" : "",
+             localFishOn ? "ON" : "off", localSequence, (unsigned long)holeRawChanges);
+  #if BTN_PIN >= 0
+  out.printf(" | button GPIO%d level %d (0 = pressed)", BTN_PIN, digitalRead(BTN_PIN));
+  #endif
+  out.println();
+}
+
+void holeScreenLine(char* out, size_t n) {   // hub home footer: pin level, flips, trip, arm; "" when no hole
+  out[0] = 0;
+  if (!HAS_LOCAL_SENSOR || currentRole == ROLE_GATEWAY_OFFSHORE) return;
+  #if HOLE_HALL_LATCH
+  snprintf(out, n, "G%d=%u %luflip %s%s", REED_PIN, (unsigned)digitalRead(REED_PIN), (unsigned long)hall.total,
+           hall.on ? "TRIP" : "-", localArmed() ? "" : " DIS");
+  #else
+  snprintf(out, n, "G%d=%u %s%s", REED_PIN, (unsigned)digitalRead(REED_PIN), localReedState ? "FLAG" : "-", localArmed() ? "" : " DIS");
+  #endif
+}
+
 void setupLocalSensor() {
-  DEBUG_PRINTLN(F("Setting up local sensor..."));
   pinMode(REED_PIN, INPUT_PULLUP);
+  holeRawLast = (uint8_t)digitalRead(REED_PIN);
+  #if HOLE_HALL_LATCH
+  hall = icemesh::HallLatch();
+  hall.settings(TRIGGER_FLIPS, HALL_WINDOW_MS, (uint32_t)HALL_CLEAR_SEC * 1000UL);
+  hall.boot(holeRawLast, false, millis());
+  attachInterrupt(digitalPinToInterrupt(REED_PIN), hallIsr, CHANGE);
+  Serial.printf("Own hole: Hall latch on GPIO%d (trip = %u flip%s within %u s, clears after %u s still), level now %u\n",
+                REED_PIN, TRIGGER_FLIPS, TRIGGER_FLIPS > 1 ? "s" : "", HALL_WINDOW_MS / 1000, HALL_CLEAR_SEC, holeRawLast);
+  #else
+  Serial.printf("Own hole: reed switch on GPIO%d, flag up = %s, level now %u\n", REED_PIN, settings.reedActiveHigh ? "HIGH" : "LOW", holeRawLast);
+  #endif
 }
 
 void loopLocalSensor() {
@@ -2254,9 +2352,30 @@ void loopLocalSensor() {
   if (millis() - lastReedCheck < 100) return;
   lastReedCheck = millis();
 
-  // Read reed switch with polarity setting
-  bool reedRaw = digitalRead(REED_PIN);
+  const uint8_t reedRaw = (uint8_t)digitalRead(REED_PIN);
+  #if HOLE_HALL_LATCH
+  hallPoll();
+  bool reedState = hall.active(millis());
+  #else
   bool reedState = settings.reedActiveHigh ? (reedRaw == HIGH) : (reedRaw == LOW);
+  #endif
+  if (reedRaw != holeRawLast) {   // D64: wiring feedback, printed whatever the arm state
+    holeRawLast = reedRaw; holeRawChanges++;
+    #if HOLE_HALL_LATCH
+    Serial.printf("HOLE: GPIO%d %u -> %u, flip %lu, run %u/%u, trip %s%s\n", REED_PIN, reedRaw ^ 1, reedRaw, (unsigned long)hall.total,
+                  hall.run, hall.trigger_flips, hall.on ? "ON" : "off", localArmed() ? "" : " (DISARMED: ignored)");
+    #else
+    Serial.printf("HOLE: GPIO%d %u -> %u (%s)%s\n", REED_PIN, reedRaw ^ 1, reedRaw, reedState ? "flag up" : "down", localArmed() ? "" : " (DISARMED: ignored)");
+    #endif
+  }
+  // D61: a trip cleared by the button (or by a disarm) stays cleared until the flag has gone down; disarmed = ignored
+  if (localReedMasked) { if (!reedState) localReedMasked = false; reedState = false; }
+  if (!localArmed()) {
+    #if HOLE_HALL_LATCH
+    if (reedState) { hall.on = false; hall.run = 0; }   // movement while disarmed never carries into the re-arm
+    #endif
+    reedState = false;
+  }
   
   if (reedState != localReedState) {
     localReedState = reedState;
@@ -2324,7 +2443,7 @@ void sendResetAllCommand() {
 
   // Send via ESP-NOW to reach sensor nodes
   if (espNowReady) {
-    esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
+    nowSend(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
     DEBUG_PRINTLN("ESP-NOW: Reset command sent");
     delay(100);  // Give it time to transmit
   }
@@ -2381,7 +2500,8 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
     else if (meshDemoNode(u.node)) meshDemoName(u.node, n->name, sizeof(n->name));
   }
   const bool wasFish = HAS_FLAG(n->flags, FLAG_FISH_ON);
-  const bool fish = (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING);
+  const bool disarmed = (u.flags & MESH_LF_DISARMED) != 0;   // D61: a disarmed hole never alarms
+  const bool fish = !disarmed && (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING);
   n->initialized = true;
   n->via_lora = true;
   n->role = ROLE_SENSOR_ONLY;
@@ -2394,6 +2514,8 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   }
   if (u.flags & MESH_LF_LOWBAT) SET_FLAG(n->flags, FLAG_LOW_BATTERY); else CLEAR_FLAG(n->flags, FLAG_LOW_BATTERY);
   if (u.flags & MESH_LF_SIM) SET_FLAG(n->flags, FLAG_SIM); else CLEAR_FLAG(n->flags, FLAG_SIM);
+  if (disarmed) { if (!HAS_FLAG(n->flags, FLAG_DISARMED)) n->alarm.clear(); SET_FLAG(n->flags, FLAG_DISARMED); }   // D64: disarmed at the hole = acknowledged
+  else CLEAR_FLAG(n->flags, FLAG_DISARMED);
   if (u.new_state == MESH_LS_FAULT) SET_FLAG(n->flags, FLAG_SENSOR_ERROR); else CLEAR_FLAG(n->flags, FLAG_SENSOR_ERROR);
   if (fish && !wasFish) {
     SET_FLAG(n->flags, FLAG_FISH_ON);
@@ -2423,7 +2545,7 @@ static void networkResetFromChalet() {
     msg.msg_type = MSG_RESET_CMD;
     msg.reset_delay_sec = 0;
     msg.timestamp = millis() / 1000;
-    esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
+    nowSend(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
   }
   showOverlayMessage("Network reset", 1500);
   delay(100 * (NODE_ID % 10));   // stagger hub reboots
@@ -2448,7 +2570,8 @@ void meshLoop() {
         const uint16_t mv = self ? localBatteryMv : n.battery_mv;
         uint8_t st = lineStateOf(n, self);
         uint8_t fl = HAS_FLAG(n.flags, FLAG_LOW_BATTERY) ? MESH_LF_LOWBAT : 0;
-        if (self) { if (own_sim) fl |= MESH_LF_SIM; if (hubSimTripped(NODE_ID)) st = MESH_LS_TRIPPED; }
+        if (HAS_FLAG(n.flags, FLAG_DISARMED)) fl |= MESH_LF_DISARMED;   // D61 (own hole: armSetLocal keeps the flag)
+        if (self) { if (own_sim) fl |= MESH_LF_SIM; if (hubSimTripped(NODE_ID) && localArmed()) st = MESH_LS_TRIPPED; }
         else if (HAS_FLAG(n.flags, FLAG_SIM)) fl |= MESH_LF_SIM;
         meshHubObserveNode(n.node_id, st, 0, fl, batteryMvToPercent(mv));
       }
@@ -2472,6 +2595,8 @@ void meshLoop() {
         sonarKnobApply(dev, val);   // dev = knob index
       } else if (cmd == MESH_CMD_SET_BAIT) {
         baitApply(dev, val);        // own / test hole here, tip-up after its next message
+      } else if (cmd == MESH_CMD_SET_ARM) {
+        armApply(dev, val != 0);    // D61: own hole here, tip-ups after their next message
       }
     }
   } else {
@@ -2490,11 +2615,12 @@ void meshLoop() {
         bool mismatch = (idx0 < 0);
         if (!mismatch) {
           const NodeState& n0 = network.nodes[idx0];
-          const bool fish = (snap[i].state == MESH_LS_TRIPPED || snap[i].state == MESH_LS_RUNNING);
+          const bool fish = !(snap[i].flags & MESH_LF_DISARMED) && (snap[i].state == MESH_LS_TRIPPED || snap[i].state == MESH_LS_RUNNING);
           mismatch = (fish != (bool)HAS_FLAG(n0.flags, FLAG_FISH_ON)) ||
                      ((snap[i].state == MESH_LS_OFFLINE) == n0.online) ||
                      ((snap[i].state == MESH_LS_FAULT) != (bool)HAS_FLAG(n0.flags, FLAG_SENSOR_ERROR)) ||
-                     (((snap[i].flags & MESH_LF_SIM) != 0) != (bool)HAS_FLAG(n0.flags, FLAG_SIM));
+                     (((snap[i].flags & MESH_LF_SIM) != 0) != (bool)HAS_FLAG(n0.flags, FLAG_SIM)) ||
+                     (((snap[i].flags & MESH_LF_DISARMED) != 0) != (bool)HAS_FLAG(n0.flags, FLAG_DISARMED));
         }
         if (mismatch) {
           MeshNodeUpdate fix = {snap[i].node, snap[i].owner, 0xFF, snap[i].state, snap[i].turns, snap[i].flags};
@@ -2587,7 +2713,7 @@ static void sendSonarCtrl(bool sim, uint8_t focus) {
   m.focus_node = focus; m.sim_on = sim ? 1 : 0;
   m.n_params = icemesh::sonar::P_COUNT;   // v2 (D42): the sonar knobs ride along
   memcpy(m.params, sonarPrm.v, icemesh::sonar::P_COUNT);
-  esp_now_send(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
+  nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
 }
 
 // =============================================================================================
@@ -2654,6 +2780,281 @@ bool hubSimTripped(uint8_t node) {
   return s->tripped;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 (D61) ARMING BUTTON — hub roles, for the hub's own hole. BTN_PIN to GND (pull-up); the PRG button stays
+// the screen button. Short press = arm / disarm (own hole tripped: clears the trip instead), hold 3 s = report
+// now. LED: armed 2 short, disarmed 1 long, trip cleared 1 short, report 3 short; buzzer chirp on arm / disarm.
+// Disarmed = the flag is ignored (no FISH ON). Saved in NVS ("node" / "armed"); the chalet's CMD_SET_ARM and
+// the button both set it: last action wins. The logic (debounce, 3 s, actions) is lib/IceMesh/src/arm_button.h.
+// ═══════════════════════════════════════════════════════════════════════════
+static icemesh::ArmState armState;              // zero = armed
+static icemesh::ArmButton armBtn;
+static bool armBtnOn = false;
+bool localReedMasked = false;                   // trip cleared by the button: reed ignored until the flag is down
+static struct { uint8_t left; uint16_t on_ms; uint32_t at; bool on; } armLed;   // non-blocking blink pattern
+
+static void armLedStart(uint8_t times, uint16_t on_ms) {
+  if (!armBtnOn) return;
+  armLed.left = times; armLed.on_ms = on_ms; armLed.at = millis(); armLed.on = true;
+  digitalWrite(LED_PIN, HIGH);
+}
+static void armLedTick() {
+  if (!armLed.on && armLed.left == 0) return;
+  const uint32_t el = millis() - armLed.at;
+  if (armLed.on && el >= armLed.on_ms) { digitalWrite(LED_PIN, LOW); armLed.on = false; armLed.at = millis(); armLed.left--; }
+  else if (!armLed.on && armLed.left && el >= 120) { digitalWrite(LED_PIN, HIGH); armLed.on = true; armLed.at = millis(); }
+}
+
+bool localArmed() { return currentRole == ROLE_GATEWAY_OFFSHORE || armState.armed(); }
+
+// the trip of the own hole ends now (same as the flag going down): real reed (masked until it is down) or sim
+static void localTripClear() {
+  { HoleSim* hs = hubSimSlot(NODE_ID, false); if (hs) { hs->tripped = false; hs->next_ms = 0; } }
+  #if HOLE_HALL_LATCH
+  hall.on = false; hall.run = 0;   // D64: the latch trip ends now; the next quarter turn starts a new count
+  #endif
+  if (!HAS_FLAG(network.nodes[0].flags, FLAG_FISH_ON) && !localReedState) return;
+  if (localReedState) localReedMasked = true;
+  localReedState = false; localFishOn = false;
+  CLEAR_FLAG(network.nodes[0].flags, FLAG_FISH_ON);
+  network.nodes[0].fish_on_time = 0;
+  network.nodes[0].alarm.clear();   // D64: acted at the hole: FISH ON leaves this screen now (D41 latch would wait for a silence)
+  for (int i = 0; i < ALERT_HISTORY_SIZE; i++) if (alertHistory[i].nodeId == NODE_ID) alertHistory[i].active = false;
+  localSequence++; network.nodes[0].last_seq = localSequence;
+  updateAlertState();
+  meshSyncNodesNow();
+}
+
+void holeTripClear() { localTripClear(); Serial.println(F("Own hole: trip cleared (serial)")); }
+
+void armSetLocal(bool armed, bool remote) {
+  if (armed == armState.armed()) return;
+  armState.set(armed);
+  if (armed) CLEAR_FLAG(network.nodes[0].flags, FLAG_DISARMED); else SET_FLAG(network.nodes[0].flags, FLAG_DISARMED);
+  if (!armed) localTripClear();
+  Preferences p; p.begin("node", false); p.putBool("armed", armed); p.end();
+  armLedStart(armed ? 2 : 1, armed ? 80 : 600);
+  triggerBuzzer(1);
+  meshSyncNodesNow();
+  Serial.printf("Own hole %s (%s)\n", armed ? "ARMED" : "DISARMED", remote ? "set by the chalet" : "button");
+}
+
+// hub: CMD_SET_ARM from the chalet beacon (own hole here; 255 = own hole + every tip-up heard)
+static int8_t armAllPending = -1;   // 255 command: value handed to every ESP-NOW tip-up as it is heard (slots are few)
+void armApply(uint8_t hole, bool armed) {
+  if (hole == NODE_ID || hole == 255) armSetLocal(armed, true);
+  if (hole == 255) armAllPending = armed ? 1 : 0;
+  else if (hole != NODE_ID && !isMyVirtualHole(hole)) devCmdQueue(hole, DEVCMD_ARM, armed ? 1 : 0);
+}
+void armAllOnNodeHeard(uint8_t node) {   // from devCmdOnNodeHeard: the tip-up listens right after it transmitted
+  if (armAllPending < 0 || node == 0 || node >= 128) return;
+  DevCmdMessage m;
+  m.network_id = NETWORK_ID; m.sender_id = NODE_ID; m.msg_type = MSG_DEV_CMD;
+  m.target = node; m.cmd = DEVCMD_ARM; m.value = (uint8_t)armAllPending;
+  nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
+}
+
+// chalet: arm / disarm a hole from the page (the hole reports what it runs with: LF_DISARMED -> FLAG_DISARMED)
+void armSet(uint8_t hole, bool armed) {
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { armApply(hole, armed); return; }
+  meshSetArm(hole, armed);
+  Serial.printf("Arm command: hole %u -> %s\n", hole, armed ? "armed" : "disarmed");
+}
+
+void setupArmButton() {
+  { Preferences p; p.begin("node", true); armState.set(p.getBool("armed", true)); p.end(); }
+  if (!armState.armed()) SET_FLAG(network.nodes[0].flags, FLAG_DISARMED);
+  #if BTN_PIN >= 0
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT); digitalWrite(LED_PIN, LOW);
+  armBtnOn = true;
+  armBtn = icemesh::ArmButton();
+  Serial.printf("Arming button on GPIO%d, own hole %s\n", BTN_PIN, armState.armed() ? "armed" : "DISARMED");
+  #else
+  Serial.printf("No arming button, own hole %s\n", armState.armed() ? "armed" : "DISARMED");
+  #endif
+}
+
+void loopArmButton() {
+  if (!armBtnOn) return;
+  armLedTick();
+  #if BTN_PIN >= 0
+  const bool tripped = HAS_FLAG(network.nodes[0].flags, FLAG_FISH_ON) || hubSimTripped(NODE_ID);
+  const bool down = digitalRead(BTN_PIN) == LOW;
+  { static bool wasDown = false; if (down != wasDown) { wasDown = down; Serial.printf("BTN: GPIO%d %s\n", BTN_PIN, down ? "pressed" : "released"); } }
+  switch (armState.apply(armBtn.feed(down, millis()), tripped)) {
+    case icemesh::ARM_TOGGLE_ARM: {
+      const bool want = armState.armed();   // apply() toggled it; armSetLocal does the change (NVS, flag, feedback)
+      armState.set(!want); armSetLocal(want, false);
+      break;
+    }
+    case icemesh::ARM_CLEAR_TRIP:
+      localTripClear();
+      armLedStart(1, 80);
+      Serial.println(F("Own hole: trip cleared by the button"));
+      break;
+    case icemesh::ARM_REPORT:
+      readBattery();
+      meshSyncNodesNow();
+      armLedStart(3, 80);
+      Serial.println(F("Own hole: report (button held)"));
+      break;
+    default: break;
+  }
+  #endif
+}
+
+// =============================================================================================
+// v2 (D62) REAL SONAR ON THE HELTEC (SONAR_REAL=1 + HAS_LOCAL_SENSOR): the own hole of a hub / LoRa tip-up /
+// relay runs the TUSS4470 shield 002 like the WROOM tip-up (src/sensor_node sonarLoop): 250 ms ticks, a ping every
+// ticksPerPing (knobs pinghz / idlehz, focus), processing -> blocks -> meshHubPushSonar, i.e. the same path as the
+// fake own-hole blocks (this module's TDMA slot or the backbone). Fake data only when the chalet asks (sim bit of
+// this hole); shield absent or sonar off -> as before (fake only when asked, else nothing). No deep sleep on these
+// roles: tuss::sleep() when the sonar stops (sim on, hardware present but not running).
+// Radio-quiet capture (D54 on the WROOM): a LoRa transmit runs in the radio task, above loop(), so it cannot be
+// held back; a ping due while one is on the air / planned within SONAR_PING_EST_US, or an ESP-NOW frame is in
+// flight, moves to the next 250 ms tick (once: the second time it pings anyway and counts "busy at ping").
+// Bench (SONAR_BENCH=1): one BENCH line per 2 s on Serial; STAT / KNOB / REG / CAL / INFO commands (wifi.cpp ->
+// sonarSerialCommand). No REC / RAW / phone page here: the chalet page is the viewer.
+// =============================================================================================
+static bool g_sonarHwOk = false;
+static icemesh::sonar::SonarSource* sonarReal = nullptr;   // the own hole's processing (real codes), ~15 KB
+static uint32_t g_rfWaitN = 0, g_rfWaitUsMax = 0, g_rfBusyAtPing = 0;   // as the WROOM BENCH line
+static bool sonarStatAsk = false;
+static char sonarBenchBuf[512];
+
+void setupSonarReal() {
+  #if SONAR_REAL
+  if (!HAS_LOCAL_SENSOR || currentRole == ROLE_GATEWAY_OFFSHORE) return;   // the chalet has no hole
+  g_sonarHwOk = tuss::begin();
+  if (!g_sonarHwOk) tuss::sleep();   // begin() had already switched the VDRV regulator on: no draw from a shield we cannot talk to
+  Serial.printf("Sonar TUSS4470: %s\n", g_sonarHwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
+  if (g_sonarHwOk) Serial.printf("Sonar ADC: clock %lu Hz, measured %lu Hz, free heap %u B\n",
+                                 (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), (unsigned)ESP.getFreeHeap());
+  #endif
+}
+
+// kept textually in sync with sonarBenchFormat in src/sensor_node/main.cpp (copy, not shared: the WROOM has its own counters)
+static void sonarBenchFormat(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
+  char edge[16];
+  if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
+  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(clock %lu)%s t0=%d%s raw_max=%u%s edge=%s ping=%lums%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
+                (unsigned long)pi.adc_hz, (unsigned long)tuss::clockHz(), pi.clk_ok ? "" : (pi.nolimit ? "(SHORT)" : "(LIMITED)"), pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
+                edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
+                o.ring_alarm ? "(RING ALARM)" : "", o.spikes, o.long_echoes);
+  static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
+  for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(sonarBenchBuf) - 32; i++)
+    k += snprintf(sonarBenchBuf + k, sizeof(sonarBenchBuf) - k, " %.2fm:%s", (double)o.t[i].depth, L[o.t[i].label & 3]);
+  if (k > 0 && k < (int)sizeof(sonarBenchBuf) - 80)
+    snprintf(sonarBenchBuf + k, sizeof(sonarBenchBuf) - k, " | rf: waited %lu pings (max %lu us), busy at ping %lu", (unsigned long)g_rfWaitN, (unsigned long)g_rfWaitUsMax, (unsigned long)g_rfBusyAtPing);
+}
+
+// INFO + KNOBS lines as the WROOM recording writes them (same keys; o4 is always -1 on the Heltec)
+static void sonarInfoLines() {
+  uint16_t cal[17]; tuss::getCalibration(cal);
+  char name[24]; snprintf(name, sizeof(name), "%s", NODE_NAME);
+  for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
+  char buf[512];
+  int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d vbat_mv=%u heap=%lu cal=",
+                   millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
+                   (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
+                   (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, localBatteryMv, (unsigned long)ESP.getFreeHeap());
+  for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
+  Serial.println(buf);
+  k = snprintf(buf, sizeof(buf), "KNOBS %lu", millis());
+  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT && k > 0 && k < (int)sizeof(buf) - 24; i++)
+    k += snprintf(buf + k, sizeof(buf) - k, " %s=%u", icemesh::sonar::paramInfo(i).key, sonarPrm[i]);
+  Serial.println(buf);
+}
+
+// Serial: STAT, REG <hex addr> [<hex value>], CAL [17 numbers], INFO (the WROOM's words and replies). KNOB is the
+// existing hub command (wifi.cpp): it sets the chalet's knob set here (sonarPrm, saved) and the sonar follows.
+bool sonarSerialCommand(const String& in) {
+  if (!SONAR_REAL) return false;
+  String l = in; l.trim();
+  const int sp0 = l.indexOf(' ');
+  String w = sp0 > 0 ? l.substring(0, sp0) : l; w.toUpperCase();
+  String rest = sp0 > 0 ? l.substring(sp0 + 1) : String(""); rest.trim();
+  String r;
+  if (w == "STAT") {
+    sonarStatAsk = true;
+    r = tuss::ok() ? String(sonarBenchBuf[0] ? sonarBenchBuf : "STAT: next ping") : String("TUSS4470 not answering (SPI wiring / SONAR_PIN_*)");
+  } else if (w == "INFO") {
+    sonarInfoLines(); r = "INFO sent";
+  } else if (w == "REG" && rest.length()) {
+    const int sp = rest.indexOf(' ');
+    const uint8_t addr = (uint8_t)strtol(rest.substring(0, sp > 0 ? sp : rest.length()).c_str(), nullptr, 16);
+    if (sp > 0) tuss::writeReg(addr, (uint8_t)strtol(rest.substring(sp + 1).c_str(), nullptr, 16));
+    char b[48]; snprintf(b, sizeof(b), "TUSS4470 reg 0x%02X = 0x%02X", addr, tuss::readReg(addr));
+    r = b;
+  } else if (w == "CAL") {
+    uint16_t pts[17]; tuss::getCalibration(pts);
+    if (rest.length()) {
+      uint16_t np[17]; int k = 0; bool okv = true; char* c = const_cast<char*>(rest.c_str()); char* e;
+      while (k < 17) { const long v = strtol(c, &e, 10); if (e == c) break; if (v < 0 || v > 4095) okv = false; np[k++] = (uint16_t)v; c = e; }
+      if (k == 17 && okv) { tuss::setCalibration(np); memcpy(pts, np, sizeof(pts)); }
+      else r = "CAL needs 17 numbers 0..4095 (raw 0, 256 ... 4096 -> corrected); stored curve unchanged\n";
+    }
+    r += "ADC calibration:"; for (int k = 0; k < 17; k++) { r += " "; r += String(pts[k]); }
+  } else return false;
+  Serial.println(r);
+  return true;
+}
+
+// D62: the real hole's bait: the chalet's value when set (D43), else no bait labels / flags (D47; the fake own hole
+// keeps the prototype's lure)
+static void sonarRealBait() {
+  if (sonarReal == nullptr) return;
+  if (baitCm5[NODE_ID]) baitToSource(sonarReal, NODE_ID);
+  else if (sonarReal->proc.bait_m > 0) sonarReal->proc.bait_m = -1;
+}
+
+// one 250 ms tick of the real own-hole sonar: ping when due (radio quiet), process, push the blocks
+static void sonarRealTick(bool focus) {
+  #if SONAR_REAL
+  static uint8_t tick_n = 0;
+  static bool deferred = false;
+  static uint32_t deferredAtUs = 0;
+  static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
+  static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0, lastBench = 0;
+  const uint8_t tpp = sonarReal->ticksPerPing(focus);
+  if (++tick_n < tpp) return;
+  // radio quiet: nothing in flight on ESP-NOW (2 ms guard after the last send callback) and no LoRa transmit on
+  // the air or planned inside the ping. Not quiet: wait one tick, once.
+  const bool nowInFlight = (g_nowQueued != g_nowDone) || (millis() - g_nowDoneMs) < SONAR_RF_GUARD_US / 1000UL;
+  const bool quiet = !nowInFlight && meshLoraQuiet(SONAR_PING_EST_US, SONAR_RF_GUARD_US);
+  if (!quiet && !deferred) { deferred = true; deferredAtUs = micros(); g_rfWaitN++; return; }
+  if (deferred) { const uint32_t us = micros() - deferredAtUs; if (us > g_rfWaitUsMax) g_rfWaitUsMax = us; }
+  if (!quiet) g_rfBusyAtPing++;
+  const uint8_t ticks = tick_n;   // deferral included: the processing gets the real time since the last ping
+  tick_n = 0; deferred = false;
+  const uint32_t t0 = micros();
+  tuss::PingInfo pi;
+  if (tuss::ping(sonarPrm, focus, codes, pi)) {
+    icemesh::sonar::Block out[2];
+    const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 2);
+    for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
+    if (sonarStatAsk || SONAR_BENCH) sonarBenchFormat(pi, sonarReal->lastProc());
+    if (sonarStatAsk || (SONAR_BENCH && millis() - lastBench >= 2000UL)) {
+      sonarStatAsk = false; lastBench = millis();
+      Serial.println(sonarBenchBuf);
+    }
+  }
+  const uint32_t dt = micros() - t0;
+  if (dt > usMax) usMax = dt;
+  usSum += dt; cnt++;
+  if (millis() - lastReport >= 60000UL) {
+    lastReport = millis();
+    DEBUG_PRINTF("Sonar real: %s, ping cost avg %lu us max %lu us\n", focus ? "FOCUS" : "base", (unsigned long)(usSum / cnt), (unsigned long)usMax);
+    usMax = 0; usSum = 0; cnt = 0;
+  }
+  #else
+  (void)focus;
+  #endif
+}
+
 void sonarHubLoop() {
   static unsigned long lastTick = 0, lastCtrl = 0, lastObserve = 0, simOffSince = 0;
   static uint16_t prmGen = 0xFFFF;
@@ -2663,20 +3064,26 @@ void sonarHubLoop() {
   if (prmGen != sonarPrmGen) {   // v2 (D42): knobs changed: the hub's own fake sonars use them too
     prmGen = sonarPrmGen;
     if (ownSonar) ownSonar->proc.prm = sonarPrm;
+    if (sonarReal) sonarReal->proc.prm = sonarPrm;   // D62: the real hole too (the driver reads sonarPrm at each ping)
     if (sonarVirt) for (uint8_t k = 0; k < 4; k++) sonarVirt[k].proc.prm = sonarPrm;
   }
   static uint16_t bGen = 0xFFFF;
   if (bGen != baitGen) {         // v2 (D43): bait depth per hole
     bGen = baitGen;
     baitToSource(ownSonar, NODE_ID);
+    sonarRealBait();
     if (sonarVirt) for (uint8_t k = 0; k < 4; k++) baitToSource(&sonarVirt[k], sonarVirt[k].node());
   }
   const bool global = meshSonarSim();                       // chalet: test holes (virtual) on
   const bool sim = global || realSonarSim;                  // tip-ups may run fake sonar
   const uint8_t focus = meshFocusNode();
 
-  // own hole: fake sonar when asked (independent of the virtual holes)
-  if (hubHoleSim(NODE_ID) & MESH_SIM_SONAR) {
+  // own hole: fake sonar when asked (independent of the virtual holes); D62: else the real sonar when the
+  // shield answered (same 250 ms ticks, same block path)
+  const bool ownFake = (hubHoleSim(NODE_ID) & MESH_SIM_SONAR) != 0;
+  const bool ownReal = SONAR_REAL && g_sonarHwOk && !ownFake;
+  static bool realRunning = false, realSlept = false;
+  if (ownFake) {
     static unsigned long ownTick = 0;
     if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->proc.prm = sonarPrm; ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); baitToSource(ownSonar, NODE_ID); ownTick = millis(); }
     if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
@@ -2686,6 +3093,25 @@ void sonarHubLoop() {
       const uint8_t n = ownSonar->tick(focus == NODE_ID, out, 2);
       for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     }
+  }
+  if (ownReal) {
+    static unsigned long realTick = 0;
+    if (!realRunning) {
+      realRunning = true; realSlept = false; realTick = millis();
+      if (sonarReal == nullptr) { sonarReal = new icemesh::sonar::SonarSource(); sonarReal->proc.prm = sonarPrm; }
+      sonarReal->begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());   // fresh tracks; the fake scene inside is unused
+      sonarReal->proc.prm = sonarPrm; sonarRealBait();
+      Serial.println(F("Sonar: real sonar on the own hole"));
+    }
+    if (millis() - realTick > 1000UL) realTick = millis() - 250UL;   // loop() was busy: don't burst
+    while (millis() - realTick >= 250UL) {
+      realTick += 250UL;
+      sonarRealTick(focus == NODE_ID);
+    }
+  } else if (realRunning || (g_sonarHwOk && !realSlept)) {   // stopped / not started (the chalet asked for fake data): shield to sleep, no power switch
+    realRunning = false; realSlept = true;
+    tuss::sleep();
+    Serial.println(F("Sonar: real sonar off (simulation on), TUSS4470 asleep"));
   }
 
   // control for the tip-up nodes: every second while on, at once after a node transmitted,

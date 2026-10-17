@@ -28,13 +28,30 @@ The firmware here (driver, processing, mesh, web page) is our own; it is not a f
 
 | Board | Role | Firmware |
 |---|---|---|
-| Heltec WiFi LoRa 32 V3 | Chalet (master, web page, buzzer), hub, relay, LoRa tip-up | `src/lora_node/` |
+| Heltec WiFi LoRa 32 V3 | Chalet (master, web page, buzzer), hub, relay, LoRa tip-up, see roles below | `src/lora_node/` |
 | ESP32 WROOM | Tip-up: Hall latch on the spool, optional sonar shield | `src/sensor_node/` |
 | ESP32-C3 Super Mini | Tip-up with a reed switch (older head) | `src/sensor_node/` |
 
+## Roles (what each board does on the network)
+
+| Role | Board | Env / `flash.py` purpose | Talks to | Own hole | Sonar |
+|---|---|---|---|---|---|
+| Chalet | Heltec V3 | `cabin` / `chalet` | every hub and LoRa tip-up over LoRa (beacon master); the phone over Wi-Fi | no | no (viewer only) |
+| Hub | Heltec V3 | `hub` / `hub`, `--sonar`, `--bench` | the WROOM / C3 tip-ups of its pocket over ESP-NOW; the chalet over LoRa | yes (reed / Hall on GPIO 4, button GPIO 5) | optional (shield on its own hole) |
+| Relay | Heltec V3 | `relay` / `relay` | repeats LoRa between a far hub and the chalet | no by default (`HAS_LOCAL_SENSOR=false`; set true in devices.ini for a hole) | only with a hole |
+| LoRa tip-up | Heltec V3 | `sensor_lora` / `sensor_lora`, `--sonar` | the chalet directly over LoRa; no ESP-NOW, serves no other hole | yes | optional |
+| Tip-up | ESP32 WROOM | `sensor_wroom` / `tipup_wroom`, `--sonar`, `--bench` | the nearest hub over ESP-NOW, deep sleep between events | yes (Hall latch GPIO 27, button GPIO 33) | optional |
+| Tip-up (v1 head) | ESP32-C3 | `sensor_c3` / `tipup_c3` | the nearest hub over ESP-NOW | yes (reed GPIO 4) | no |
+
+Hub vs LoRa tip-up on the same Heltec: both are one hole with a sonar option and the same wiring; the hub also collects
+the pocket of WROOM tip-ups around it and forwards them. A lone hole with no WROOM around it is a LoRa tip-up; a
+hole with WROOM tip-ups around it is a hub. Neither sleeps.
+
 ## Winter 2026 sonar tip-up: wiring (ESP32 DevKit V1 30-pin + TUSS4470 shield 002, hand-wired)
 
-Build env: `sensor_wroom_sonar` (or `sensor_wroom_sonar_bench` for the bucket test). Pins = `src/sensor_node/sonar_tuss4470.h`.
+Build env: `sensor_wroom_sonar` (or `sensor_wroom_sonar_bench` for the bucket test). Pins = `lib/SonarTuss/src/sonar_tuss4470.h` (WROOM block).
+
+![WROOM devkit + shield 002 wiring](images/wiring_wroom_shield002.png)
 Bench build on a phone: join the Wi-Fi **IceFish-bench-<node id>**, open **http://192.168.4.1** (live values, A-scan,
 knobs, notes, RAW captures, record and download the test file).
 
@@ -52,7 +69,40 @@ knobs, notes, RAW captures, record and download the test file).
 | 10 | - | **J4 middle pin (VCC)**, no jumper on J4 | MT3608 output + (MT3608 GND to shield GND) |
 | - | not wired | D2, D3, RESET, AREF, 3.3V, VIN | OUT_4 / OUT_3 comparators unused (`SONAR_PIN_O4 = -1`) |
 
-Also on the ESP32: Hall latch -> GPIO27, battery divider (2:1) -> GPIO34, LED GPIO2.
+Also on the ESP32: Hall latch OUT -> GPIO27 (US1881 VDD from the pack, 3.5 V min, not 3.3 V), battery divider (2:1) -> GPIO34, LED GPIO2, **arming button GPIO33 -> button -> GND**
+(D61: short press arm / disarm, press while tripped clears it, hold 3 s = report; no resistor, internal pull-up).
+On the Heltec V3 (hub / LoRa tip-up) the arming button is **GPIO5 -> button -> GND** (PRG stays the screen button).
+
+### Heltec V3 + shield 002 (hub, LoRa tip-up, relay with a hole; D62)
+
+Build env: `hub_sonar` / `sensor_lora_sonar` (`hub_sonar_bench` for the bucket test: `BENCH` line on the USB serial
+port every 2 s). Same driver, pins = the Heltec block of `lib/SonarTuss/src/sonar_tuss4470.h` (est., to verify on the
+board). The chalet keeps no sonar. See docs/SONAR_DRIVER.md, "Heltec V3 build".
+
+![Heltec V3 + shield 002 wiring](images/wiring_heltec_v3_shield002.png)
+
+Supply = the WROOM's: 3 x L91 -> TPS63020 3.3 V into the Heltec **3V3 pin** (and the shield "5V" pin), the Hall
+latch VDD **from the pack** (US1881: 3.5-24 V, 3.3 V is below its minimum; its open-drain output is fine with the
+ESP32 pull-up), MT3608 from the pack for the 21.5 V, 2:1 divider from the pack to **GPIO2** (`config.h` VBAT_PIN; the
+onboard VBAT_Read on GPIO1 sees nothing, there is no LiPo on the JST). Pack switch off while USB is plugged: the
+Heltec's own regulator drives the same 3V3 rail.
+
+| # | Heltec WiFi LoRa 32 V3 | Shield 002 header | Signal |
+|---|---|---|---|
+| 1 | **3.3V** pin | **5V** pin | TUSS4470 VDD. **Never 5 V** (same reason as the WROOM table, row 1) |
+| 2 | GND | GND | common ground (supply, MT3608, Heltec, shield) |
+| 3 | GPIO47 | D13 | SCLK |
+| 4 | GPIO33 | D12 | SDO -> MISO |
+| 5 | GPIO48 | D11 | MOSI -> SDI |
+| 6 | GPIO34 | D10 | NCS |
+| 7 | GPIO38 | D8 | IO1 (held high) |
+| 8 | GPIO39 | D9 | IO2 (burst) |
+| 9 | GPIO6 (ADC1_CH5) | A0 | VOUT echo envelope (twist with its own GND wire) |
+| 10 | - | **J4 middle pin (VCC)**, no jumper on J4 | MT3608 output + at 21.5 V (MT3608 GND to shield GND); MT3608 input from the 3 x L91 pack, as on the WROOM |
+| - | not wired | D2, D3, RESET, AREF, 3.3V, VIN | OUT_4 / OUT_3 unused (`SONAR_PIN_O4 = -1`) |
+
+Already used on the V3: 8-14 LoRa, 17/18/21 OLED, 41/42 CardKB, 7 buzzer, 4 reed, 2 battery divider, 35 LED, 36 Vext,
+1/37 VBAT read / ADC ctrl, 5 arming button, 0 PRG. Shield set-up (jumpers, transducer header, MT3608) as below.
 
 Shield set-up:
 - Frequency jumpers: **JP3 + JP4 (200 kHz) only**; JP1/JP2 (40 kHz) and JP5/JP6 (custom) open.

@@ -195,6 +195,11 @@ static bool setMode(RadioMode m) {
 
 static volatile uint32_t g_tx_late_skips = 0;
 static const uint32_t MAX_TX_LATE_US = 1000;   // est.: later than this, the packet would overrun its slot
+// D62: radio state for the sonar capture on the hub (meshLoraQuiet): a transmit on the air, when the last one
+// ended, and when the next own transmission is planned (hubFrame / hubSearch; 0 = none known)
+static volatile bool g_tx_busy = false;
+static volatile uint32_t g_tx_end_us = 0;
+static volatile uint32_t g_next_tx_us = 0;
 
 // Transmit at `at_us`. Slot transmissions (slot = true) are dropped if we are already more than
 // MAX_TX_LATE_US late; others go out now. `end_us` = TxDone time.
@@ -207,12 +212,14 @@ static bool txAt(const uint8_t* buf, size_t len, RadioMode m, uint32_t at_us, ui
     return false;
   }
   clearIrq();
-  if (radio.startTransmit(buf, len) != RADIOLIB_ERR_NONE) { standbyXosc(); return false; }
+  g_tx_busy = true;
+  if (radio.startTransmit(buf, len) != RADIOLIB_ERR_NONE) { standbyXosc(); g_tx_busy = false; return false; }
   const uint32_t limit = nowUs() + modeAirtimeUs(m, static_cast<uint16_t>(len)) + 50000;   // est. margin
   const bool ok = waitIrq(limit);
   end_us = ok ? g_irq_us : nowUs();
   radio.finishTransmit();
   standbyXosc();
+  g_tx_end_us = nowUs(); g_tx_busy = false;
   if (ok) g_tx = g_tx + 1;
   return ok;
 }
@@ -337,7 +344,7 @@ static void cmdQueue(uint8_t cmd, uint8_t target, uint8_t value) {   // under lo
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == CMD_SET_CHANNEL) { g_cmdq[i].value = value; return; }   // newest choice wins
   }
-  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT) {   // same target: newest value wins
+  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT || cmd == CMD_SET_ARM) {   // same target: newest value wins
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == cmd && g_cmdq[i].target == target) { g_cmdq[i].value = value; return; }
   }
@@ -545,7 +552,7 @@ static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
     g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
   }
   if (cmd == CMD_SET_CHANNEL) g_pending_since_ms = millis();
-  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT) && g_devq_n < 4) {
+  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT || cmd == CMD_SET_ARM) && g_devq_n < 4) {
     g_devq[g_devq_n].cmd = cmd; g_devq[g_devq_n].target = g_hub->last_cmd_target; g_devq[g_devq_n].value = g_hub->last_cmd_value;
     g_devq_n = static_cast<uint8_t>(g_devq_n + 1);
   }
@@ -630,6 +637,18 @@ static void hubSearch(uint32_t& next_join_us) {
     txAt(jb, n, MODE_SF9_BW500, nowUs(), end, false);
     next_join_us = nowUs() + 1500000 + (esp_random() % 3000000);   // ALOHA: 1.5-4.5 s (est.)
   }
+  g_next_tx_us = next_join_us;
+}
+
+// D62: the next slot this hub may transmit in, from slot `from` on (own HUB / ECHO slot, or a JOIN slot while it
+// has no slot of its own); 0 = none in this plan
+static uint32_t nextOwnTxUs(const Beacon& plan, const SlotTime* times, uint32_t ref, uint8_t from, bool own_slot) {
+  for (uint8_t i = from; i < plan.n_slots; i++) {
+    const Slot& s = plan.slots[i];
+    const bool mine = (s.kind == SLOT_HUB || s.kind == SLOT_ECHO) ? (s.owner == g_hub->self) : (s.kind == SLOT_JOIN && !own_slot);
+    if (mine) return ref + times[i].tx;
+  }
+  return 0;
 }
 
 // Runs the slots of the current plan that are still ahead. Returns when the frame is done or a
@@ -637,14 +656,16 @@ static void hubSearch(uint32_t& next_join_us) {
 static void hubFrame() {
   static uint8_t buf[MAX_PACKET];
   static uint8_t rx[MAX_PACKET];
-  Beacon plan; SlotTime times[MAX_SLOTS]; uint32_t ref; uint32_t frame_us;
+  Beacon plan; SlotTime times[MAX_SLOTS]; uint32_t ref; uint32_t frame_us; bool own_slot;
   {
     Lock l;
     plan = g_hub->plan; memcpy(times, g_hub->times, sizeof(times));
     ref = g_hub->sync.ref(); frame_us = g_hub->sync.frameUs();
+    own_slot = g_hub->hasOwnSlot();
   }
   for (uint8_t i = 0; i < plan.n_slots; i++) {
     if (static_cast<int32_t>(ref + times[i].end - nowUs()) < 0) continue;     // already past
+    g_next_tx_us = nextOwnTxUs(plan, times, ref, i, own_slot);   // D62: for the sonar capture
     const Slot& s = plan.slots[i];
     SlotAction act;
     { Lock l; act = g_hub->action(i, (esp_random() % 3) == 0); }
@@ -686,6 +707,7 @@ static void hubFrame() {
     }
   }
   { Lock l; g_hub->endFrame(); }
+  g_next_tx_us = nextOwnTxUs(plan, times, ref + frame_us, 0, own_slot);   // D62: est.: the next frame repeats the plan
   hubChannelUpdate(true);
 
   // next beacon: listen around its expected start (REF), then the echo slots of the old plan
@@ -717,7 +739,7 @@ static void hubTask() {
     }
     g_hub_lora_on = lora_on;
     if (!lora_on) {   // ESP-NOW only: radio idle, keep following channel changes for the way back
-      if (!g_lora_idle) { standbyXosc(); g_lora_idle = true; }
+      if (!g_lora_idle) { standbyXosc(); g_lora_idle = true; g_next_tx_us = 0; }
       hubChannelUpdate(false);
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
@@ -790,6 +812,16 @@ void meshHubObserveNode(uint8_t node, uint8_t state, uint8_t turns, uint8_t flag
 }
 
 void meshHubSetBattery(uint16_t mv) { g_battery_mv = mv; }
+
+bool meshLoraQuiet(uint32_t horizon_us, uint32_t guard_us) {
+  if (!g_radio_ok || g_lora_idle) return true;
+  if (g_tx_busy) return false;
+  const uint32_t now = nowUs();
+  if (now - g_tx_end_us < guard_us) return false;
+  const uint32_t nx = g_next_tx_us;
+  if (nx != 0) { const int32_t d = static_cast<int32_t>(nx - now); if (d > 0 && static_cast<uint32_t>(d) < horizon_us) return false; }
+  return true;
+}
 
 void meshHubView(MeshHubView& v) {
   memset(&v, 0, sizeof(v));
@@ -946,6 +978,12 @@ void meshSetBait(uint8_t hole, uint8_t v5) {   // chalet: bait depth of one hole
   if (!g_chalet || g_ch == nullptr) return;
   Lock l;
   cmdQueue(CMD_SET_BAIT, hole, v5);
+}
+
+void meshSetArm(uint8_t hole, bool armed) {   // chalet: arm / disarm one hole (255 = all), D61
+  if (!g_chalet || g_ch == nullptr || hole == 0) return;
+  Lock l;
+  cmdQueue(CMD_SET_ARM, hole, armed ? 1 : 0);
 }
 
 void meshSetSonarParam(uint8_t id, uint8_t value) {   // chalet: one sonar knob for every sonar hole (beacon)

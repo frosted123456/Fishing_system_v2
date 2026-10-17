@@ -63,9 +63,13 @@
 #include "config.h"
 #include "messages.h"
 #include <hall_latch.h>         // v2 (D46): spool-shaft Hall latch
+#include <arm_button.h>         // v2 (D61): arming button + armed / disarmed state
 #include <driver/rtc_io.h>
 #include <sys/time.h>
 #include "sonar_tuss4470.h"    // v2 (D43): real sonar (TUSS4470), only with SONAR_REAL=1
+#if defined(BTN_PIN) && BTN_PIN >= 0 && SONAR_REAL && (BTN_PIN == SONAR_PIN_BOOST || BTN_PIN == SONAR_PIN_O4)
+#error "BTN_PIN collides with a sonar pin (the pod v0.3 env must set BTN_PIN=-1)"
+#endif
 #include "bench_web.h"         // v2 (D56): phone test page, bench build only
 #include <sonar_sim.h>      // v2: fake sonar for the sonar test mode (lib/IceMesh)
 #include <eb_link.h>        // v2: ESP-NOW backbone relay (lib/IceMesh)
@@ -96,6 +100,22 @@ void simApplyCmd();
 bool simTripActive();
 volatile int8_t devCmdRelay = -1;
 volatile int16_t devCmdBait = -1;            // v2 (D43): bait depth from the chalet (5 cm steps), applied by sonarLoop           // relay command received (-1 none, 0 off, 1 on)
+
+// v2 (D61) ARMING BUTTON (config.h BTN_PIN, -1 = no button: the chalet's command still works) and the armed /
+// disarmed state of this hole. Disarmed: spool movement is ignored (no FISH ON, no alert), heartbeats go on.
+// Short press = arm / disarm (tripped: clears the trip instead), hold 3 s = status report now. Kept in RTC memory
+// across deep sleep and in NVS ("node" / "armed") across reboots; button and DEVCMD_ARM both set it: last wins.
+RTC_DATA_ATTR icemesh::ArmState armState;    // plain struct, zero = armed (like HallLatch)
+volatile int8_t devCmdArm = -1;              // -1 none, 0 disarm, 1 arm
+#if BTN_PIN >= 0
+static icemesh::ArmButton armBtn;
+#endif
+void armLoadSetting(bool power_on);
+void armApplyCmd();
+void armPollFor(uint32_t ms);                // delay(ms) that watches the button and the chalet's command
+void armOnWake();
+void armBtnWake();
+static void armFlags();
 static icemesh::RxRing<8, 250> ebRing;
 static uint32_t ebRelayed = 0;
 void ebRelayLoadSetting(bool power_on);
@@ -294,6 +314,9 @@ void setup() {
     case ESP_SLEEP_WAKEUP_TIMER:
       DEBUG_PRINTLN(F("Wake: Heartbeat timer"));
       break;
+    case ESP_SLEEP_WAKEUP_EXT1:
+      DEBUG_PRINTLN(F("Wake: arming button (EXT1)"));   // D61: handled once ESP-NOW is up (armOnWake)
+      break;
     default:
       DEBUG_PRINTF("Wake: Power on / reset (%d)\n", wakeReason);
       SET_FLAG(currentFlags, FLAG_FIRST_BOOT);
@@ -305,11 +328,12 @@ void setup() {
 
   // Store wake reason for next cycle
   lastWakeReason = wakeReason;
-  ebRelayLoadSetting(wakeReason != ESP_SLEEP_WAKEUP_EXT0 && wakeReason != ESP_SLEEP_WAKEUP_GPIO &&
-                     wakeReason != ESP_SLEEP_WAKEUP_TIMER);
-  simLoadSetting(wakeReason != ESP_SLEEP_WAKEUP_EXT0 && wakeReason != ESP_SLEEP_WAKEUP_GPIO &&
-                 wakeReason != ESP_SLEEP_WAKEUP_TIMER);
+  const bool powerOn = wakeReason != ESP_SLEEP_WAKEUP_EXT0 && wakeReason != ESP_SLEEP_WAKEUP_GPIO &&
+                       wakeReason != ESP_SLEEP_WAKEUP_TIMER && wakeReason != ESP_SLEEP_WAKEUP_EXT1;
+  ebRelayLoadSetting(powerOn);
+  simLoadSetting(powerOn);
   if (simBits) SET_FLAG(currentFlags, FLAG_SIM);
+  armLoadSetting(powerOn);   // D61
 
   // Check if we're in FISH_ON monitor mode (fast heartbeat)
   if (fishOnMonitorMode) {
@@ -331,6 +355,7 @@ void setup() {
     SET_FLAG(currentFlags, FLAG_FISH_ON);
     reedTriggered = true;
   }
+  if (!armState.armed()) reedTriggered = false;   // D61: disarmed, a pin wake is not an alert (reed boards)
   
   // Check battery level
   if (batteryMv < BATTERY_LOW_MV && batteryMv > 0) {
@@ -355,6 +380,10 @@ void setup() {
     }
   }
 
+  #if BTN_PIN >= 0
+  if (wakeReason == ESP_SLEEP_WAKEUP_EXT1) armOnWake();   // D61: the press that woke us (may still be held)
+  #endif
+
   // Send message based on wake reason
   if (reedTriggered) {
     DEBUG_PRINTLN(F(">>> Sending ALERT"));
@@ -365,6 +394,7 @@ void setup() {
   }
 
   delay(50);  // P3 FIX: Reduced from 100ms to 50ms - adequate for ESP-NOW TX completion
+  armApplyCmd();   // D61: the hub answers our message with pending commands; a disarm ends a trip at once
 
   // BUG FIX #3: Enhanced alert retry logic
   // If alert triggered, stay awake longer and re-send alerts periodically
@@ -379,8 +409,8 @@ void setup() {
            !HAS_FLAG(currentFlags, FLAG_ACKNOWLEDGED) &&
            (millis() - waitStart < ALERT_WAIT_TIMEOUT_MS)) {
 
-      // Check reed switch less frequently to save power (every 500ms)
-      delay(ALERT_REED_CHECK_MS);
+      // Check reed switch less frequently to save power (every 500ms); the button is watched meanwhile (D61)
+      armPollFor(ALERT_REED_CHECK_MS);
 
       // Re-check reed switch state
       if (!readReedSwitch()) {
@@ -422,6 +452,7 @@ void setup() {
   }
   ebRelayApplyCmd();
   simApplyCmd();
+  armApplyCmd();
   if (SONAR_SIM_ALLOWED && sonarSimOn && SLEEP_ENABLED) {
     DEBUG_PRINTLN(F("Sonar ON - staying awake"));
     return;
@@ -473,6 +504,7 @@ void loop() {
   #endif
   ebRelayLoop();
   simApplyCmd();
+  armApplyCmd();
 
   // Update uptime every second
   if (millis() - lastUptimeUpdate >= 1000) {
@@ -516,7 +548,7 @@ void loop() {
     alertRetryCount++;
   }
   
-  delay(DEBOUNCE_MS);
+  armPollFor(DEBOUNCE_MS);   // D61: the loop pause doubles as the button poll
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -541,6 +573,11 @@ void setupPins() {
 #else
   pinMode(REED_PIN, INPUT_PULLUP);
 #endif
+
+  #if BTN_PIN >= 0
+  rtc_gpio_deinit((gpio_num_t)BTN_PIN);   // D61: back from the RTC mode of the ext1 wake
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  #endif
 
   #ifdef LED_PIN
   if (LED_PIN >= 0) {
@@ -826,7 +863,13 @@ void readBattery() {
 }
 
 static bool readReedHw();
-bool readReedSwitch() { return readReedHw() || simTripActive(); }   // v2: a simulated trip looks like the real flag
+static void armDropTrip();
+bool readReedSwitch() {   // v2: a simulated trip looks like the real flag
+  const bool t = readReedHw() || simTripActive();
+  if (armState.armed()) return t;
+  if (t) armDropTrip();   // D61 disarmed: movement is ignored and nothing stays latched for the re-arm
+  return false;
+}
 
 static bool readReedHw() {
 #if HALL_LATCH
@@ -1015,6 +1058,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     if (c->target == NODE_ID && c->cmd == DEVCMD_RELAY) devCmdRelay = c->value ? 1 : 0;
     if (c->target == NODE_ID && c->cmd == DEVCMD_SIM) devCmdSim = c->value;
     if (c->target == NODE_ID && c->cmd == DEVCMD_BAIT) devCmdBait = c->value;
+    if (c->target == NODE_ID && c->cmd == DEVCMD_ARM) devCmdArm = c->value ? 1 : 0;   // D61
     return;
   }
 
@@ -1117,6 +1161,7 @@ void enterDeepSleep() {
     esp_wifi_stop();
   #endif
 
+  armBtnWake();   // D61: the button wakes us too (ext1, beside the Hall ext0)
   if (SONAR_REAL) tuss::sleep();   // shield stays powered (no enable wire): low-power mode over SPI
   esp_deep_sleep_start();
 }
@@ -1149,6 +1194,7 @@ void enterDeepSleepFast() {
     esp_wifi_stop();
   #endif
 
+  armBtnWake();   // D61
   if (SONAR_REAL) tuss::sleep();   // shield stays powered (no enable wire): low-power mode over SPI
   esp_deep_sleep_start();
 }
@@ -1189,6 +1235,7 @@ bool validateAndInitRtcData() {
 #if HALL_LATCH
     hall = icemesh::HallLatch();   // garbage here = a false trip at boot
 #endif
+    armState = icemesh::ArmState();   // D61: zero = armed (NVS value loaded on power-on)
     expectedSleepSec = 0;
     lastWakeReason = ESP_SLEEP_WAKEUP_UNDEFINED;
     alertsSilenced = false;
@@ -1328,6 +1375,134 @@ bool simTripActive() {
   }
   return false;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 (D61) ARMING BUTTON / ARMED STATE
+// ═══════════════════════════════════════════════════════════════════════════
+static void armFlags() {
+  if (armState.armed()) CLEAR_FLAG(currentFlags, FLAG_DISARMED); else SET_FLAG(currentFlags, FLAG_DISARMED);
+}
+
+void armLoadSetting(bool power_on) {
+  if (power_on) {
+    Preferences p;
+    p.begin("node", true);
+    armState.set(p.getBool("armed", true));
+    p.end();
+  }
+  armFlags();
+  if (!armState.armed()) DEBUG_PRINTLN(F("Hole DISARMED (button / chalet)"));
+}
+
+static void armSave() {
+  Preferences p;
+  p.begin("node", false);
+  p.putBool("armed", armState.armed());
+  p.end();
+}
+
+// the trip of this hole ends now (same as the line going still): latch, simulation, flag
+static void armDropTrip() {
+#if HALL_LATCH
+  hall.on = false; hall.run = 0;
+#endif
+  simTripEnd = 0; simNextTrip = 0;
+  CLEAR_FLAG(currentFlags, FLAG_FISH_ON);
+  reedTriggered = false;
+}
+
+// LED feedback: armed = 2 short, disarmed = 1 long, trip cleared = 1 short, report sent = 3 short
+static void armLed(icemesh::ArmAction a) {
+  switch (a) {
+    case icemesh::ARM_TOGGLE_ARM: if (armState.armed()) blinkLed(2, 80, 120); else blinkLed(1, 600, 0); break;
+    case icemesh::ARM_CLEAR_TRIP: blinkLed(1, 80, 0); break;
+    case icemesh::ARM_REPORT:     blinkLed(3, 80, 120); break;
+    default: break;
+  }
+}
+
+// what the state change means for this cycle, then tell the hub right away (the chalet shows it)
+static void armChanged(bool remote) {
+  armFlags();
+  armDropTrip();   // both ways: a disarm drops the trip, an arm drops flips counted while disarmed
+  armSave();
+  DEBUG_PRINTF("Hole %s (%s)\n", armState.armed() ? "ARMED" : "DISARMED", remote ? "chalet" : "button");
+  if (espNowReady) sendStatus(MSG_STATUS);
+}
+
+static void armAct(icemesh::ArmAction a) {
+  switch (a) {
+    case icemesh::ARM_TOGGLE_ARM: armChanged(false); break;
+    case icemesh::ARM_CLEAR_TRIP:
+      armDropTrip();
+      DEBUG_PRINTLN(F("Trip cleared by the button"));
+      if (espNowReady) sendStatus(MSG_STATUS);
+      break;
+    case icemesh::ARM_REPORT:
+      readBattery();
+      if (espNowReady) sendStatus(MSG_STATUS);
+      DEBUG_PRINTLN(F("Status report (button held)"));
+      break;
+    default: return;
+  }
+  armLed(a);
+}
+
+void armApplyCmd() {
+  const int8_t c = devCmdArm;
+  if (c < 0) return;
+  devCmdArm = -1;
+  const bool on = (c == 1);
+  if (on == armState.armed()) return;
+  armState.set(on);
+  armChanged(true);
+  armLed(icemesh::ARM_TOGGLE_ARM);
+}
+
+#if BTN_PIN >= 0
+static void armPoll() {
+  armAct(armState.apply(armBtn.feed(digitalRead(BTN_PIN) == LOW, millis()), HAS_FLAG(currentFlags, FLAG_FISH_ON)));
+}
+
+void armPollFor(uint32_t ms) {
+  const unsigned long t0 = millis();
+  do { armPoll(); armApplyCmd(); delay(10); } while (millis() - t0 < ms);
+}
+
+// woke by the button: already released = a short press (boot took longer than the press); still held = time
+// it from now (the ~0.3 s of boot, est., is not counted: a hold must reach 3 s from here)
+void armOnWake() {
+  armBtn = icemesh::ArmButton();
+  const bool tripped = HAS_FLAG(currentFlags, FLAG_FISH_ON);
+  if (digitalRead(BTN_PIN) != LOW) { armAct(armState.apply(icemesh::ARM_EV_SHORT, tripped)); return; }
+  const unsigned long t0 = millis();
+  while (millis() - t0 < icemesh::ArmButton::HOLD_MS + 500UL) {
+    const icemesh::ArmEvent e = armBtn.feed(digitalRead(BTN_PIN) == LOW, millis());
+    if (e != icemesh::ARM_EV_NONE) { armAct(armState.apply(e, tripped)); return; }   // SHORT on release, LONG at 3 s
+    delay(10);
+  }
+}
+
+// before deep sleep: ext1 wake on the button (low), pull-up kept by the RTC IO. The Hall latch keeps its ext0
+// wake (the ESP32 runs both); the RTC peripherals stay on for the pull-ups (hallArmWake sets that too).
+void armBtnWake() {
+  // a hold-for-report still held at sleep time would re-wake at once and its release would read as a short
+  // press (toggle): wait for the release first (bounded)
+  const unsigned long t0 = millis(); unsigned long up = 0;
+  while (millis() - t0 < 5000UL) {
+    if (digitalRead(BTN_PIN) == LOW) up = 0; else if (!up) up = millis(); else if (millis() - up >= icemesh::ArmButton::BOUNCE_MS) break;
+    delay(5);
+  }
+  rtc_gpio_pullup_en((gpio_num_t)BTN_PIN);
+  rtc_gpio_pulldown_dis((gpio_num_t)BTN_PIN);
+  esp_sleep_enable_ext1_wakeup(1ULL << BTN_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+}
+#else
+void armPollFor(uint32_t ms) { const unsigned long t0 = millis(); do { armApplyCmd(); delay(10); } while (millis() - t0 < ms); }
+void armOnWake() {}
+void armBtnWake() {}
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2 BACKBONE RELAY
@@ -1604,10 +1779,15 @@ String sonarCommand(const String& in, bool fromWeb) {
 #if SONAR_BENCH && SONAR_REAL
 static String sonarWebCommand(const String& c) { return sonarCommand(c, true); }
 #endif
-void sonarSerial() {
-  if (!SONAR_REAL || !Serial.available()) return;
-  String l = Serial.readStringUntil('\n');
-  sonarCommand(l, false);
+void sonarSerial() {   // D64: line collected at Enter (readStringUntil + 20 ms timeout split typed commands per key)
+  if (!SONAR_REAL) return;
+  static String acc;
+  while (Serial.available()) {
+    const char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') { if (acc.length()) { String l = acc; acc = ""; sonarCommand(l, false); } }
+    else if (c == 8 || c == 127) { if (acc.length()) acc.remove(acc.length() - 1); }
+    else if (acc.length() < 200) acc += c;
+  }
 }
 
 void sonarLoop() {

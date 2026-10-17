@@ -50,6 +50,10 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id);
 void meshHubObserveNode(uint8_t node, uint8_t state, uint8_t turns, uint8_t flags, uint8_t battery_pct);
 void meshHubSetBattery(uint16_t mv);
 void meshHubView(MeshHubView& v);
+// D62: for the sonar capture: true when no LoRa transmit is on the air, the last one ended more than guard_us
+// ago and no own transmission (slot, echo, join) is planned within horizon_us. The transmit runs in the radio
+// task (higher priority than loop): it cannot be held back, only avoided. LoRa off (ESP-NOW only) = quiet.
+bool meshLoraQuiet(uint32_t horizon_us, uint32_t guard_us);
 
 // ---- both ----
 void meshRequestSilence(bool on);            // hub: request in the next packets; chalet: beacon state
@@ -100,10 +104,11 @@ bool meshEbRelay();
 void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
 bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value);   // hub: SET_RELAY / SET_SIM received (MESH_CMD_*)
 void meshSetHoleSim(uint8_t hole, uint8_t value);       // chalet: CMD_SET_SIM in the beacon (hole ID or 255 = all)
-enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5, MESH_CMD_SET_BAIT = 6 };   // = icemesh::tdma::BeaconCmd
+enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5, MESH_CMD_SET_BAIT = 6, MESH_CMD_SET_ARM = 7 };   // = icemesh::tdma::BeaconCmd
 void meshSetSonarParam(uint8_t id, uint8_t value);   // chalet: knob for every sonar hole (CMD_SONAR_PARAM)
 void meshSetBait(uint8_t hole, uint8_t v5);          // chalet: bait depth of one hole, 5 cm steps (CMD_SET_BAIT)
-enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02 };
+void meshSetArm(uint8_t hole, bool armed);           // chalet: arm / disarm one hole or 255 = all (CMD_SET_ARM, D61)
+enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02, MESH_LF_DISARMED = 0x04 };
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)
 

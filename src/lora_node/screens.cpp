@@ -188,10 +188,11 @@ void homeHub(u8g2_t* u, const ScreenModel& m, bool blink) {
     symbol(u, 0, y + 2, h.state, blink);
     char nm[24]; holeName(h, nm, sizeof(nm));
     u8g2_SetFont(u, F_SMALL);
-    char b[8]; if (h.batt <= 100) snprintf(b, sizeof(b), "%u%%", h.batt); else snprintf(b, sizeof(b), "-");
-    fit(u, nm, 80);
+    char b[12]; if (h.batt <= 100) snprintf(b, sizeof(b), "%u%%", h.batt); else snprintf(b, sizeof(b), "-");
+    const bool dis = h.disarmed && h.state != SH_OFFLINE;   // D61
+    fit(u, nm, dis ? 68 : 80);
     u8g2_DrawStr(u, 11, y + 8, nm);
-    right(u, y + 8, h.state == SH_OFFLINE ? "off" : b);
+    right(u, y + 8, h.state == SH_OFFLINE ? "off" : dis ? "DISARMED" : b);
     y += 9;
   }
 }
@@ -218,6 +219,7 @@ void holesPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
     char d[20];
     if (h.state == SH_OFFLINE) snprintf(d, sizeof(d), "offline");
     else if (h.state == SH_FISH) snprintf(d, sizeof(d), "FISH %lu:%02lu", (unsigned long)(h.since_s / 60), (unsigned long)(h.since_s % 60));
+    else if (h.disarmed) snprintf(d, sizeof(d), "DISARMED");   // D61
     else if (h.son.valid && (h.son.status & 1)) snprintf(d, sizeof(d), "ICE?");                  // ring-down: slush on the transducer?
     else if (h.son.valid && m.setup_s) snprintf(d, sizeof(d), "echo %udB", h.son.bottom_snr);    // level check while setting up
     else if (h.son.valid && (h.son.status & 2)) snprintf(d, sizeof(d), "near bait");

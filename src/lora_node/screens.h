@@ -29,6 +29,7 @@ struct ScrHole {
   uint32_t since_s;          // FISH: seconds since the trip
   ScrSonar son;              // valid = this hole has a sonar
   uint8_t sim;               // simulation on this hole: bit0 sonar, bit1 Hall sensor (trips)
+  bool disarmed;             // D61: the hole's button / the chalet disarmed it (spool movement ignored)
 };
 
 struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; bool demo; };   // demo = fake hub inside the chalet

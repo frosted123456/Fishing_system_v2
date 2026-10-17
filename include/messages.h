@@ -32,7 +32,8 @@ enum NodeRole : uint8_t {
 #define FLAG_FIRST_BOOT     (1 << 2)
 #define FLAG_SIM            (1 << 3)   // v2: this node runs a simulation (fake sonar / fake trips); was FLAG_CONFIG_MODE, never used
 #define FLAG_CONFIG_MODE    FLAG_SIM   // legacy name
-#define FLAG_LORA_OK        (1 << 4)
+#define FLAG_DISARMED       (1 << 4)   // v2 (D61): the hole's button / the chalet disarmed it: spool movement ignored, no FISH ON
+#define FLAG_LORA_OK        FLAG_DISARMED   // legacy name (never used)
 #define FLAG_ESPNOW_OK      (1 << 5)
 #define FLAG_SENSOR_ERROR   (1 << 6)
 #define FLAG_ACKNOWLEDGED   (1 << 7)
@@ -235,7 +236,7 @@ typedef struct __attribute__((packed)) {
 
 // v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
 // (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
-enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3 };   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)
+enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3, DEVCMD_ARM = 4 };   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)   // DEVCMD_ARM value: 1 armed, 0 disarmed (D61)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;

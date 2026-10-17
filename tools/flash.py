@@ -46,8 +46,8 @@ def main():
     ap.add_argument("--id", type=int, help="node ID, unique on the network: 1-100 (101-124 = demo network, 128-255 = test holes)")
     ap.add_argument("--name", default=None, help="name shown on the screens (default: Hole N / role)")
     ap.add_argument("--port", help="serial port (COM7, /dev/ttyUSB0); omit = PlatformIO guesses")
-    ap.add_argument("--sonar", action="store_true", help="WROOM tip-up with the TUSS4470 shield")
-    ap.add_argument("--bench", action="store_true", help="bucket test build (real sonar from boot, no hub)")
+    ap.add_argument("--sonar", action="store_true", help="with the TUSS4470 shield 002 (tipup_wroom, hub, sensor_lora)")
+    ap.add_argument("--bench", action="store_true", help="bucket test build: BENCH line every 2 s (tipup_wroom: real sonar from boot, no hub; hub: chalet optional)")
     ap.add_argument("--env", help="re-flash an env already in devices.ini")
     ap.add_argument("--build-only", action="store_true")
     ap.add_argument("--monitor", action="store_true", help="open the serial monitor after the upload")
@@ -57,7 +57,8 @@ def main():
     else:
         if not a.purpose or a.id is None: ap.error("purpose and --id are needed (or --env)")
         if not (1 <= a.id <= 100): ap.error("--id must be 1-100 (101-124 demo network, 128-255 test holes)")
-        if (a.sonar or a.bench) and a.purpose != "tipup_wroom": ap.error("--sonar / --bench are for tipup_wroom")
+        if a.sonar and a.purpose not in ("tipup_wroom", "hub", "sensor_lora"): ap.error("--sonar is for tipup_wroom, hub, sensor_lora")
+        if a.bench and a.purpose not in ("tipup_wroom", "hub"): ap.error("--bench is for tipup_wroom or hub")
         if a.bench: a.sonar = True
         name = a.name or {"chalet": "Chalet", "hub": "Hub %d" % a.id, "relay": "Relay %d" % a.id, "sensor_lora": "Hole %d" % a.id}.get(a.purpose, "Hole %d" % a.id)
         env, text = block(a.purpose, a.id, name, a.sonar, a.bench)
