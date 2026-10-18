@@ -8,39 +8,51 @@
 void setupWebServer() {
   DEBUG_PRINTLN(F("Setting up web server..."));
 
+  // D74: every change (POST) needs the PIN when one is set; GETs stay open. The header must be collected to be readable.
+  { static const char* HDRS[] = {"X-Pin"}; server.collectHeaders(HDRS, 1); }
+#define POST_PIN(path, fn) server.on(path, HTTP_POST, []() { if (!webPinOk()) return; fn(); })
   server.on("/", HTTP_GET, handleWebRoot);
   server.on("/api/status", HTTP_GET, handleWebApi);
-  server.on("/api/silence", HTTP_POST, handleWebApiSilence);
-  server.on("/api/node/name", HTTP_POST, handleWebApiNodeName);
-  server.on("/api/node/bait", HTTP_POST, handleWebApiNodeBait);    // v2 (D43): bait depth per hole
-  server.on("/api/node/arm", HTTP_POST, handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
-  server.on("/api/node/selftest", HTTP_POST, handleWebApiNodeSelfTest);   // D70: ask a hole for its wiring check
+  server.on("/api/map/pack", HTTP_GET, handleWebApiMapPack);                                // D74: offline contours
+  server.on("/api/map/pack", HTTP_POST, handleWebApiMapPackPost, handleWebApiMapPackUpload);  // (PIN checked inside)
+  POST_PIN("/api/map/clear", handleWebApiMapClear);
+  server.on("/api/tile", HTTP_GET, handleWebApiTile);                                        // D75: offline tile store
+  server.on("/api/tile", HTTP_POST, handleWebApiTilePost, handleWebApiTileUpload);
+  server.on("/api/tiles", HTTP_GET, handleWebApiTiles);
+  POST_PIN("/api/tiles/clear", handleWebApiTilesClear);
+  POST_PIN("/api/gps", handleWebApiGpsPost);                                                  // D76: origin / pin / clear from the page
+  POST_PIN("/api/silence", handleWebApiSilence);
+  POST_PIN("/api/node/name", handleWebApiNodeName);
+  POST_PIN("/api/node/bait", handleWebApiNodeBait);    // v2 (D43): bait depth per hole
+  POST_PIN("/api/node/arm", handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
+  POST_PIN("/api/node/selftest", handleWebApiNodeSelfTest);   // D70: ask a hole for its wiring check
   server.on("/api/selftest", HTTP_GET, handleWebApiSelfTest);               // D70: last result of ?id=
-  server.on("/api/node/pos", HTTP_POST, handleWebApiNodePos);      // v2 (D51): position on the pocket map
+  POST_PIN("/api/node/pos", handleWebApiNodePos);      // v2 (D51): position on the pocket map
   server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
   server.on("/api/settings", HTTP_GET, handleWebApiSettingsGet);
-  server.on("/api/settings", HTTP_POST, handleWebApiSettingsPost);
+  POST_PIN("/api/settings", handleWebApiSettingsPost);
   server.on("/remote-config", HTTP_GET, handleWebRemoteConfig);   // not linked from the suite: no remote config over the v2 mesh yet
-  server.on("/api/remote-config", HTTP_POST, handleWebApiRemoteConfig);
+  POST_PIN("/api/remote-config", handleWebApiRemoteConfig);
   server.on("/api/remote-config/status", HTTP_GET, handleWebApiRemoteConfigStatus);
   server.on("/radio", HTTP_GET, handleWebRoot);
   server.on("/api/radio", HTTP_GET, handleWebApiRadio);
-  server.on("/api/radio", HTTP_POST, handleWebApiRadioPost);
+  POST_PIN("/api/radio", handleWebApiRadioPost);
   server.on("/sonar", HTTP_GET, handleWebRoot);
   server.on("/api/sonar", HTTP_GET, handleWebApiSonar);
-  server.on("/api/sonar", HTTP_POST, handleWebApiSonarPost);
+  POST_PIN("/api/sonar", handleWebApiSonarPost);
   server.on("/api/sonar/glance", HTTP_GET, []() {   // v2: every hole, ~3 min of sonar summaries (since = frame)
     const uint16_t since = (uint16_t)strtoul(server.arg("since").c_str(), nullptr, 10);
     server.send(200, "application/json", meshSonarGlanceJson(since));
   });
   server.on("/api/sim", HTTP_GET, handleWebApiSim);
   server.on("/api/sonar/knobs", HTTP_GET, handleWebApiKnobs);       // v2 (D42): sonar processing knobs
-  server.on("/api/sonar/knobs", HTTP_POST, handleWebApiKnobsPost);
-  server.on("/api/sim", HTTP_POST, handleWebApiSimPost);
+  POST_PIN("/api/sonar/knobs", handleWebApiKnobsPost);
+  POST_PIN("/api/sim", handleWebApiSimPost);
   server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
   server.on("/api/sonar/bg", HTTP_GET, handleWebApiSonarBg);
 
+#undef POST_PIN
   server.begin();
   DEBUG_PRINTLN(F("Web server ready on port 80"));
 }
@@ -77,9 +89,12 @@ void handleWebApi() {
   doc["setup_arm_s"] = meshSetupArmInS();
   doc["cm_per_turn"] = settings.cmPerTurn;   // D69: for the "line out" estimate
   { static const char* const TRN[] = {"auto", "lora", "espnow", "ebfirst"}; const uint8_t t = meshTransport(); doc["transport"] = TRN[t <= 3 ? t : 0]; }
-  { GpsStatus g; if (gpsStatus(g)) { JsonObject gj = doc.createNestedObject("gps"); gj["fix"] = g.fix; gj["sats"] = g.sats; gj["hdop"] = g.hdop_x10 / 10.0; gj["data"] = g.sentences > 0; gj["origin"] = g.origin_set; if (g.fix) { gj["lat"] = g.lat_e7 / 1e7; gj["lon"] = g.lon_e7 / 1e7; } } }   // D73
+  { GpsStatus g; if (gpsStatus(g)) { JsonObject gj = doc.createNestedObject("gps"); gj["fix"] = g.fix; gj["sats"] = g.sats; gj["hdop"] = g.hdop_x10 / 10.0; gj["data"] = g.sentences > 0; gj["origin"] = g.origin_set; if (g.origin_set) { gj["lat0"] = g.lat0_e7 / 1e7; gj["lon0"] = g.lon0_e7 / 1e7; } if (g.fix) { gj["lat"] = g.lat_e7 / 1e7; gj["lon"] = g.lon_e7 / 1e7; } } }   // D73
   doc["lora_ch"] = meshLoraChannel() + 1;
   doc["master"] = "chalet";
+  doc["map_bytes"] = (uint32_t)mapPackBytes();   // D74: offline contour pack stored (0 = none)
+  doc["map_max"] = (uint32_t)mapPackMax();
+  doc["pin"] = settings.webPin[0] != 0;          // D74: changes need the PIN
 
   // WiFi status
   JsonObject wifi = doc.createNestedObject("wifi");
@@ -176,7 +191,7 @@ static void chaletSelfTest() {
   if (gps) {
     doc["gps_sentences"] = g.sentences; doc["gps_bad"] = g.bad; doc["gps_data_age_s"] = g.data_age_s == 0xFFFFFFFF ? -1 : (int)g.data_age_s;
     doc["gps_swapped"] = g.swapped; doc["gps_fix"] = g.fix; doc["gps_sats"] = g.sats; doc["gps_hdop"] = g.hdop_x10 / 10.0; doc["gps_origin"] = g.origin_set;
-    doc["gps_rx_pin"] = g.swapped ? GPS_TX_PIN : GPS_RX_PIN;
+    doc["gps_rx_pin"] = g.rx_pin; doc["gps_scanning"] = g.scanning; doc["gps_baud"] = g.baud; doc["gps_levels"] = g.levels ? g.levels : "";
     if (g.fix) { doc["gps_lat"] = g.lat_e7 / 1e7; doc["gps_lon"] = g.lon_e7 / 1e7; }
   }
   readBattery();
@@ -195,7 +210,7 @@ void handleWebApiNodeSelfTest() {
   if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
   const int id = doc["nodeId"] | 0;
   if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
-  if (currentRole == ROLE_GATEWAY_OFFSHORE && id == NODE_ID) chaletSelfTest();   // D73: the box itself, answered at once
+  if (currentRole == ROLE_GATEWAY_OFFSHORE && id == NODE_ID) { GpsStatus g; if (gpsStatus(g) && !g.sentences && !g.scanning) gpsScanStart(); chaletSelfTest(); }   // D73: the box itself, answered at once; no NMEA yet = start the pin scan
   else if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetSelfTest((uint8_t)id);
   else if (id == NODE_ID) { holeSelfTest(g_ownSelfTest, true); g_ownSelfTestAt = millis() ? millis() : 1; meshHubSelfTestReport(NODE_ID, (const uint8_t*)&g_ownSelfTest); }
   else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, 0);
@@ -309,11 +324,12 @@ void handleWebApiSilence() {
 
 
 void handleWebApiSettingsGet() {
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<320> doc;
   doc["buzzerEnabled"] = settings.buzzerEnabled;
   doc["alertHoldSec"] = settings.alertHoldSec;
   doc["alarmHoldMin"] = settings.alarmHoldMin;
   doc["cmPerTurn"] = settings.cmPerTurn;   // D69
+  doc["pinSet"] = settings.webPin[0] != 0;   // D74 (the PIN itself is never sent)
   doc["nearBaitBeep"] = settings.nearBaitBeep;
   doc["beamDeg"] = settings.beamDeg;   // v2 (D52)
   doc["heartbeatSec"] = settings.heartbeatSec;
@@ -335,7 +351,7 @@ void handleWebApiSettingsPost() {
     return;
   }
 
-  StaticJsonDocument<256> doc;
+  StaticJsonDocument<384> doc;   // D74: one more member (webPin)
   DeserializationError error = deserializeJson(doc, server.arg("plain"));
   if (error) {
     DEBUG_PRINTF("JSON parse error: %s\n", error.c_str());
@@ -357,6 +373,13 @@ void handleWebApiSettingsPost() {
   if (doc.containsKey("beamDeg")) { settings.beamDeg = (uint8_t)constrain(doc["beamDeg"].as<int>(), 5, 60); changed = true; }
   if (doc.containsKey("nearBaitBeep")) { settings.nearBaitBeep = doc["nearBaitBeep"].as<bool>(); changed = true; }
   if (doc.containsKey("cmPerTurn")) { settings.cmPerTurn = (uint8_t)constrain(doc["cmPerTurn"].as<int>(), 0, 60); changed = true; }   // D69
+  if (doc.containsKey("webPin")) {   // D74: "" = off, else 4-8 digits (this POST already passed the old PIN)
+    const char* p = doc["webPin"] | "";
+    const size_t n = strlen(p); bool digits = n == 0 || (n >= 4 && n <= 8);
+    for (size_t i = 0; digits && i < n; i++) if (p[i] < '0' || p[i] > '9') digits = false;
+    if (!digits) { server.send(400, "application/json", "{\"error\":\"PIN: 4 to 8 digits, or empty to turn it off\"}"); return; }
+    strlcpy(settings.webPin, p, sizeof(settings.webPin)); changed = true;
+  }
   if (doc.containsKey("alarmHoldMin")) {   // v2: 0 = until silenced
     settings.alarmHoldMin = (uint8_t)constrain(doc["alarmHoldMin"].as<int>(), 0, 120);
     changed = true;

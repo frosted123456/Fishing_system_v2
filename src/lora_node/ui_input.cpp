@@ -49,6 +49,7 @@ void loopCardKB() {
 // =============================================================================================
 static ScreenModel scr;
 static uint8_t scrPage = PG_HOME, scrSub = 0;
+static uint8_t gpsSel = 0; static uint32_t gpsClearArmMs = 0;   // D73: GPS page selection, two-step clear
 bool scrDirty = true;                  // another screen used the display: resend the next frame
 static bool scrMenu = false;           // CardKB menu (list of pages) open
 static uint8_t scrMenuSel = 0;
@@ -95,6 +96,7 @@ static void buildScreenModel() {
     h.state = holeStateOf(n);
     if (n.node_id == NODE_ID && hubSimTripped(NODE_ID) && localArmed()) h.state = SH_FISH;
     h.disarmed = HAS_FLAG(n.flags, FLAG_DISARMED) != 0;   // D61
+    h.px_dm = holePosDm[n.node_id][0]; h.py_dm = holePosDm[n.node_id][1];   // D73
     h.batt = n.battery_mv ? batteryMvToPercent(n.battery_mv) : 255;
     h.since_s = h.state == SH_FISH ? (now - (n.alarm.since_ms ? n.alarm.since_ms : (n.fish_on_time ? n.fish_on_time : now))) / 1000 : 0;
     { const uint8_t dv = meshDemoSim(n.node_id); h.sim = dv != 0xFF ? (dv & 3) : (HAS_FLAG(n.flags, FLAG_SIM) ? 1 : 0); }
@@ -142,6 +144,12 @@ static void buildScreenModel() {
     if (!m.note[0]) holeScreenLine(m.note, sizeof(m.note));   // D64: own hole line in the home footer (replaces "Hold 3s: hotspot")
     m.own_disarmed = HAS_LOCAL_SENSOR && !localArmed();   // D68
   }
+  // D73: GPS page
+  { GpsStatus g; m.gps_built = gpsStatus(g);
+    m.gps_data = g.sentences > 0; m.gps_fix = g.fix; m.gps_scanning = g.scanning; m.gps_origin = g.origin_set;
+    m.gps_sats = g.sats; m.gps_hdop_x10 = g.hdop_x10; m.gps_rx_pin = g.rx_pin;
+    if (gpsSel > m.n_holes) gpsSel = 0;
+    m.gps_sel = gpsSel; }
   // focus (chalet)
   m.focus_node = meshFocusNode(); m.n_cols = 0; m.bait_cm = 0;
   if (chalet && m.focus_node && scrPage == PG_FOCUS) {
@@ -278,7 +286,7 @@ void optBuild(ScrOptions* o) {
       static const char* const FN[] = {"low", "normal", "high", "custom"};
       optRow(o, OI_SONAR, 0, "Sonar", FN[icemesh::sonar::presetOf(sonarPrm)], true);
       optRow(o, OI_DISPLAY, 0, "Display", settings.unitsMetric ? "m" : "ft", true);
-      { GpsStatus g; if (gpsStatus(g)) { if (g.fix) snprintf(v, sizeof(v), "%u sats", g.sats); else snprintf(v, sizeof(v), g.sentences ? "no fix" : "no data"); optRow(o, OI_GPS, 0, "Pin holes (GPS)", v, true); } }
+      // D73: GPS lives on its own page (GPS / pin holes); the OM_GPS submenu stays reachable from the web/serial only
     } else {
       optRow(o, OI_RELAY, 0, "ESP-NOW relay", settings.ebRelay ? "ON" : "OFF");
       optRow(o, OI_REED, 0, "Reed polarity", settings.reedActiveHigh ? "HIGH" : "LOW");
@@ -332,7 +340,7 @@ void optBuild(ScrOptions* o) {
     optRow(o, OI_K_DEFAULTS, 0, "Defaults", "");
   } else if (optMenu == OM_GPS) {   // D73
     GpsStatus g; gpsStatus(g);
-    if (!g.sentences) snprintf(v, sizeof(v), g.swapped ? "no data (pins?)" : "waiting...");
+    if (!g.sentences) snprintf(v, sizeof(v), g.scanning ? "scan GPIO%d" : "no data", g.rx_pin);
     else if (!g.fix) snprintf(v, sizeof(v), "%u sats, no fix", g.sats);
     else snprintf(v, sizeof(v), "%u sats %u.%u", g.sats, g.hdop_x10 / 10, g.hdop_x10 % 10);
     optRow(o, OI_G_STATUS, 0, "GPS", v);
@@ -576,6 +584,7 @@ static bool optKey(uint8_t k) {
 static bool scrPageAvailable(uint8_t p) {
   const bool chalet = currentRole == ROLE_GATEWAY_OFFSHORE;
   if (!chalet && (p == PG_SONAR || p == PG_FOCUS || p == PG_TEST)) return false;   // the hub has no sonar store
+  if (p == PG_GPS) return chalet && scr.gps_built;   // D73
   if (p == PG_SONAR || p == PG_FOCUS) { for (uint8_t i = 0; i < scr.n_holes; i++) if (scr.holes[i].son.valid) return true; return false; }
   return true;
 }
@@ -591,11 +600,11 @@ void scrStep(int dir) {
 }
 
 // ---- CardKB menu: Esc opens the list of pages, up/down + Enter opens one, Esc in a page comes back here ----
-static const uint8_t MENU_ORDER[] = {PG_HOME, PG_HOLES, PG_SONAR, PG_FOCUS, PG_NETWORK, PG_CONNECT, PG_TEST, PG_OPTIONS};
+static const uint8_t MENU_ORDER[] = {PG_HOME, PG_HOLES, PG_SONAR, PG_FOCUS, PG_GPS, PG_NETWORK, PG_CONNECT, PG_TEST, PG_OPTIONS};
 static uint8_t menuPages[PG_COUNT], menuN = 0;
 
 void menuBuild(ScrOptions* o) {
-  static const char* const NAMES[PG_COUNT] = {"Home", "Sonar", "Focus", "Holes", "Network", "Test / simulation", "Connect phone", "Settings"};
+  static const char* const NAMES[PG_COUNT] = {"Home", "Sonar", "Focus", "Holes", "GPS / pin holes", "Network", "Test / simulation", "Connect phone", "Settings"};
   menuN = 0;
   for (uint8_t k = 0; k < sizeof(MENU_ORDER); k++) {
     const uint8_t p = MENU_ORDER[k];
@@ -607,6 +616,7 @@ void menuBuild(ScrOptions* o) {
       else if (p == PG_NETWORK) snprintf(r.value, sizeof(r.value), "ch%u", scr.lora_ch);
       else if (p == PG_CONNECT && scr.chalet) snprintf(r.value, sizeof(r.value), "%s", scr.sta ? "Wi-Fi OK" : "hotspot");
       else if (p == PG_TEST && simAnyOn()) snprintf(r.value, sizeof(r.value), "SIM ON");
+      else if (p == PG_GPS) snprintf(r.value, sizeof(r.value), "%s", scr.gps_fix ? "fix" : scr.gps_data ? "no fix" : "no data");
     }
     menuPages[menuN++] = p;
   }
@@ -662,6 +672,7 @@ static void scrScroll(int dir) {
     case PG_HOLES: { const uint8_t n = screenHolesPages(scr); scrSub = (uint8_t)((scrSub + n + dir) % n); break; }
     case PG_SONAR: { const uint8_t n = screenSonarPages(scr); scrSub = (uint8_t)((scrSub + n + dir) % n); break; }
     case PG_FOCUS: focusStep(dir); break;
+    case PG_GPS: { const uint8_t n = (uint8_t)(1 + scr.n_holes); gpsSel = (uint8_t)((gpsSel + n + dir) % n); gpsClearArmMs = 0; break; }   // D73
     default: break;
   }
 }
@@ -674,6 +685,14 @@ void scrAction(bool kb) {
     case PG_HOLES: scrSub = (uint8_t)((scrSub + 1) % screenHolesPages(scr)); break;
     case PG_SONAR: scrSub = (uint8_t)((scrSub + 1) % screenSonarPages(scr)); break;
     case PG_FOCUS: focusStep(+1); break;
+    case PG_GPS: {   // D73: Enter = origin here / pin the hole here / (twice) clear its position
+      if (!kb) break;
+      if (gpsSel == 0) { showOverlayMessage(gpsSetOrigin() ? "Origin = here" : "No GPS fix", 1000); break; }
+      // D77: Enter always pins (re-pins a placed hole: the box is where the hole is, that is the truth); Del / Backspace clears
+      const ScrHole& h = scr.holes[gpsSel - 1];
+      showOverlayMessage(!scr.gps_fix ? "No GPS fix" : !scr.gps_origin ? "Set 'Chalet here' first" : gpsPinHole(h.id) ? (h.px_dm != POS_UNSET ? "Pinned (moved)" : "Pinned") : "Too far (3 km+)", 1200);
+      break;
+    }
     case PG_TEST: if (currentRole == ROLE_GATEWAY_OFFSHORE) { const bool on = !simAnyOn(); simAll(on); showOverlayMessage(on ? "Simulation ON" : "Simulation OFF", 1000); } break;
     case PG_CONNECT: if (kb && currentRole == ROLE_GATEWAY_OFFSHORE) { scrPage = PG_OPTIONS; optMenu = OM_MAIN; optOpen(OM_WIFI); } break;
     default: break;
@@ -892,6 +911,14 @@ void handleKeyPress(char key) {
     case KEY_ENTER: scrAction(true); break;
     case 's': case 'S': silenceAlerts(); showOverlayMessage(alertsSilenced ? "Silenced" : "Unsilenced", 800); break;
     case KEY_ESC: menuOpen(); break;   // back to the menu, pick another page
+    case KEY_BACKSP: case 0x7F:   // D77: GPS page, Del / Backspace = forget the selected hole's position (twice within 4 s)
+      if (scrPage == PG_GPS && gpsSel > 0 && gpsSel - 1 < scr.n_holes) {
+        const ScrHole& h = scr.holes[gpsSel - 1];
+        if (h.px_dm == POS_UNSET) { showOverlayMessage("Not on the map", 800); break; }
+        if (gpsClearArmMs && millis() - gpsClearArmMs < 4000) { posSet(h.id, POS_UNSET, POS_UNSET); gpsClearArmMs = 0; showOverlayMessage("Position cleared", 1000); }
+        else { gpsClearArmMs = millis(); showOverlayMessage("Del again: clear it", 1500); }
+      }
+      break;
     case '+': case '=': case '-': case '_': case 'a': case 'A':   // v2: depth scale of the Sonar / Focus page
       if (scrPage == PG_SONAR || scrPage == PG_FOCUS) {
         uint8_t& idx = scrPage == PG_SONAR ? settings.sonDepthIdx : settings.focusDepthIdx;

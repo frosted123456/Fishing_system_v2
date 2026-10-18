@@ -162,14 +162,25 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // D73: GPS on the chalet box (NEO-6M class, 9600 baud NMEA) on UART1. GPS_RX_PIN = the ESP32 pin the module's TX is
 // on. Frank's wiring (2023, "pretty sure 45/46"): if nothing arrives in GPS_SWAP_MS the firmware swaps the two once.
 // -D GPS_RX_PIN=-1 for a chalet without GPS.
+// Frank's box follows the BLKOutComms Heltec V3 diagram (found 2026-10-18): GT-U7 TXD -> GPIO48, RXD -> GPIO47,
+// VCC -> 3V3, GND through a transistor whose gate is GPIO26 (the pin that read LOW against the pull-up: its
+// gate pull-down). The firmware drives the gate HIGH or the module has no ground = no power. GPS_EN_PIN2 = 46,
+// the gate of the meshtastic.org wiring, driven too (harmless). -D GPS_EN_PIN=-1 for a box with a direct GND.
 #ifndef GPS_RX_PIN
-#define GPS_RX_PIN          46
+#define GPS_RX_PIN          48
 #endif
 #ifndef GPS_TX_PIN
-#define GPS_TX_PIN          45
+#define GPS_TX_PIN          47
+#endif
+#ifndef GPS_EN_PIN
+#define GPS_EN_PIN          26
+#endif
+#ifndef GPS_EN_PIN2
+#define GPS_EN_PIN2         46
 #endif
 #define GPS_BAUD            9600
-#define GPS_SWAP_MS         4000
+#define GPS_SWAP_MS         4000    // nothing on the configured pin for this long after boot: scan the header pins
+#define GPS_SCAN_MS         1500    // listening time per candidate pin (a NEO-6M sends a burst every second)
 #define VBAT_DIVIDER        2.0         // External 100k+100k divider
 #define VBAT_REF_MV         3300        // ESP32-S3 ADC reference with 11dB atten
 

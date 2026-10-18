@@ -290,6 +290,7 @@ void setup() {
   DEBUG_PRINTLN(F("User button (GPIO0) enabled for silencing"));
   if (currentRole != ROLE_GATEWAY_OFFSHORE) setupArmButton();   // v2 (D61): arming button of the hub's own hole
   gpsSetup();   // D73: chalet GPS (UART1)
+  mapPackSetup();   // D74: offline map pack storage (chalet, LittleFS)
 
   // Startup display
   display.clearBuffer();

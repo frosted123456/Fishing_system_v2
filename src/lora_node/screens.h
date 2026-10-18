@@ -11,7 +11,7 @@
 #endif
 
 enum ScrHoleState : uint8_t { SH_OK = 0, SH_FISH = 1, SH_OFFLINE = 2, SH_FAULT = 3, SH_LOWBAT = 4 };
-enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_NETWORK, PG_TEST, PG_CONNECT, PG_OPTIONS, PG_COUNT };
+enum ScrPage : uint8_t { PG_HOME = 0, PG_SONAR, PG_FOCUS, PG_HOLES, PG_GPS, PG_NETWORK, PG_TEST, PG_CONNECT, PG_OPTIONS, PG_COUNT };   // D73: PG_GPS = pin holes
 
 // Sonar at a glance (from the BASE block of every hole): bottom + every target, not just the nearest
 struct ScrTarget { uint16_t depth_cm; uint8_t level; bool bait; };   // level 1-3
@@ -30,6 +30,7 @@ struct ScrHole {
   ScrSonar son;              // valid = this hole has a sonar
   uint8_t sim;               // simulation on this hole: bit0 sonar, bit1 Hall sensor (trips)
   bool disarmed;             // D61: the hole's button / the chalet disarmed it (spool movement ignored)
+  int16_t px_dm, py_dm;      // D73: map position (POS_UNSET = none)
 };
 
 struct ScrHubLink { uint8_t id; int8_t lora_rssi; bool lora_ok, eb_ok; uint8_t eb_hops; bool demo; };   // demo = fake hub inside the chalet
@@ -63,6 +64,10 @@ struct ScreenModel {
   bool master_heard; int8_t beacon_rssi; bool via_echo, on_backup;
   bool hotspot; uint32_t hotspot_min;
   bool own_disarmed;         // D68: hub / LoRa tip-up: its own hole is disarmed (inverse bar on the home page)
+  // D73: GPS page (chalet)
+  bool gps_built, gps_data, gps_fix, gps_scanning, gps_origin;
+  uint8_t gps_sats; uint16_t gps_hdop_x10; int8_t gps_rx_pin;
+  uint8_t gps_sel;           // selected row: 0 = "Chalet here", 1.. = holes[gps_sel - 1]
   // connect
   char ssid[28]; char pass[20]; char url[32]; bool sta;   // sta = on the cabin Wi-Fi
   char sta_ssid[33]; char sta_state[20];                  // cabin Wi-Fi name ("" = none set), "not found", ...

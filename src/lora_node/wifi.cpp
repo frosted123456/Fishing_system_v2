@@ -65,6 +65,7 @@ void checkSerialWifiConfig() {
   String line = acc; acc = "";
   line.trim();
   if (!line.length()) return;
+  if (line[0] == '$') { gpsFeedSerialLine(line.c_str()); return; }   // D73: GPS module wired to the RX header pin (UART0)
   { String u = line.substring(0, 4); u.toUpperCase(); if (u == "HOLE") { line = "HOLE" + line.substring(4); line.toUpperCase(); } }
   
   if (sonarSerialCommand(line)) return;   // D62: STAT / REG / CAL / INFO of the real sonar (SONAR_REAL builds)
@@ -268,6 +269,15 @@ void checkSerialWifiConfig() {
       Serial.printf("  %-8s %3u %-8s (%u-%u, default %u)  %s\n", f.key, sonarPrm[i], f.unit, f.lo, f.hi, f.def, f.name);
     }
     Serial.println(F("Usage: KNOB <key> <value> | KNOB DEFAULTS | KNOB RESEND (chalet: sent to every sonar hole)"));
+  } else if (line == "GPS" || line == "GPS SCAN") {   // D73
+    GpsStatus g;
+    if (!gpsStatus(g)) Serial.println(F("GPS: not in this build / not the chalet"));
+    else {
+      if (line == "GPS SCAN") gpsScanStart();
+      Serial.printf("GPS: rx GPIO%d%s, %lu sentences (%lu bad), %s, %u sats, HDOP %u.%u, origin %s\n", g.rx_pin, g.scanning ? " (scanning)" : "",
+                    (unsigned long)g.sentences, (unsigned long)g.bad, g.fix ? "FIX" : "no fix", g.sats, g.hdop_x10 / 10, g.hdop_x10 % 10, g.origin_set ? "set" : "not set");
+      if (g.fix) Serial.printf("GPS: %.6f, %.6f\n", g.lat_e7 / 1e7, g.lon_e7 / 1e7);
+    }
   } else if (line.startsWith("HOLE")) {   // D64: own hole wiring test
     if (!HAS_LOCAL_SENSOR || currentRole == ROLE_GATEWAY_OFFSHORE) { Serial.println(F("HOLE: this build has no own hole")); return; }
     String a = line.substring(4); a.trim();
@@ -277,6 +287,11 @@ void checkSerialWifiConfig() {
     else if (a == "TEST") { SelfTestResult r; holeSelfTest(r, true); meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r); }   // D70
     holePrintStatus(Serial);
     if (!a.length()) Serial.println(F("Usage: HOLE | HOLE ARM | HOLE DISARM | HOLE CLEAR (= button press while tripped) | HOLE TEST (wiring check)"));
+  } else if (line == "PIN CLEAR") {   // D74: forgot the web PIN? USB cable = physical access
+    settings.webPin[0] = 0; saveSettings(); Serial.println(F("PIN: web page PIN removed"));
+  } else if (line == "MAP" || line == "MAP CLEAR") {   // D74: offline map pack
+    if (line == "MAP CLEAR") mapPackClear();
+    Serial.printf("MAP: pack %u bytes, %u KB free for tiles%s\n", (unsigned)mapPackBytes(), (unsigned)(mapFree() / 1024), currentRole == ROLE_GATEWAY_OFFSHORE ? "" : " (chalet only)");
   } else if (line == "PERF") {
     perfPrint();   // v2: loop timing since the last PERF
   } else if (line == "RADIO") {
@@ -290,7 +305,7 @@ void checkSerialWifiConfig() {
     preferences.end();
     Serial.println(F("WiFi credentials cleared!"));
   } else {
-    Serial.printf("Unknown command \"%s\". Commands: HOLE, PERF, RADIO, KNOB, BUZZ, DEMO, SIM, SONAR, HOTSPOT, WIFI:ssid:pass"
+    Serial.printf("Unknown command \"%s\". Commands: HOLE, GPS, GPS SCAN, PERF, RADIO, KNOB, BUZZ, DEMO, SIM, SONAR, HOTSPOT, WIFI:ssid:pass"
                   "%s\n", line.c_str(), SONAR_REAL ? ", STAT, INFO, REG, CAL" : "");
   }
 }

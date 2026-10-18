@@ -115,11 +115,44 @@ Shield set-up:
 
 ### Chalet box: GPS (D73)
 
-NEO-6M class module on the Heltec V3's UART1: module **TX -> GPIO46**, module **RX -> GPIO45**, VCC 3.3 V, GND
-(`GPS_RX_PIN` / `GPS_TX_PIN` in `src/lora_node/config.h`; `-D GPS_RX_PIN=-1` for a box without GPS). If no NMEA
-sentence arrives in 4 s the firmware tries the two pins swapped and the wiring check says so. Used to pin holes on
-the pocket map from the OLED: Settings -> Pin holes (GPS) -> "Chalet here" (map origin) once, then carry the box to
-each hole and OK on its row; OK on a pinned hole asks to clear it. Same store as the web map (`/api/node/pos`).
+GT-U7 / NEO-6M class module wired as in the BLKOutComms Heltec V3 diagram: module **TXD -> GPIO48**, RXD -> GPIO47,
+VCC 3.3 V, and the module's GND through a transistor gated by **GPIO26** (`GPS_EN_PIN`, driven high; 46 = the
+meshtastic.org gate is driven too; a direct GND works as well). `GPS_RX_PIN` / `GPS_TX_PIN` / `GPS_EN_PIN` in `src/lora_node/config.h`; `-D GPS_RX_PIN=-1` for a box
+without GPS. No NMEA in 4 s = the firmware listens on each free header pin in turn (9600, then 38400, 115200 baud),
+keeps the one that answers, and the wiring check says which; the pin marked RX (USB serial) is accepted as well. Used to pin holes on
+the pocket map from the OLED page **GPS / pin holes** (CardKB): "Chalet here" (map origin) once, then carry the box to
+each hole, select it, Enter; Enter twice on a pinned hole clears it. Same store as the web map (`/api/node/pos`).
+
+### Chalet page: map, offline tiles, optional depth contours (D74, D75)
+
+The pocket map on the Holes tab is a real map: drag, pinch or +/− to zoom, ⌂ centres on the chalet. Layers **Map**
+(lakes, rivers, roads) and **Satellite**, Esri tiles fetched by the phone when it has internet; the chalet never goes
+online. Every tile the phone shows stays on the phone for next time, and **Save area** keeps the tiles of the visible
+area on the chalet (4.8 MB with `tools/partitions_chalet_8MB.csv` on `env:cabin`) so any phone has them on the ice.
+Nothing to prepare on the PC: at home on Wi-Fi, scroll to the spot, zoom to the lake, Save area. The map needs the
+chalet GPS origin to know where it is: tap the chalet marker → **Chalet here** (or the OLED GPS page).
+
+Tap a hole (or its "not on map" chip) for its sheet: bottom, fish, bait, line out, battery, link, distance and
+bearing from the chalet, and the actions: Arm / Disarm, bait, Watch sonar, **Pin here** (the box is at the hole:
+its GPS fix becomes the position), **Move / Tap the map**, Remove. The chalet sheet clears every position at once.
+**Depth** overlays CHS NONNA bathymetry where it exists (Ottawa River around Ottawa; nothing upstream of the Chats
+dam), online or saved with Save area; ⤢ expands the map.
+
+Depth contours are optional, where CHS NONNA bathymetry exists (Ottawa River around Ottawa-Gatineau yes, upstream of
+the Chats dam no; `--probe` shows the footprint):
+
+```
+pip install numpy rasterio matplotlib pyproj
+python tools/lake_prep.py --bbox 45.35 -76.30 45.65 -75.50 --nonna --probe
+python tools/lake_prep.py --bbox 45.40 -75.80 45.55 -75.60 --nonna --name "Ottawa-Gatineau" --add --out season.json
+```
+
+then Settings → Map & PIN → Store on chalet. GBLQ lake isobaths (Données Québec) work too: `--geojson`.
+
+**PIN** (off by default): Settings → Map & PIN. When set, every change from the page (arm, bait, settings,
+map) needs it; the page asks once per phone. It is a lock against another phone on the chalet Wi-Fi, not
+encryption: the chalet speaks plain HTTP on its own hotspot / your cabin Wi-Fi and must never be reachable from
+the internet (no port forwarding). Forgot the PIN: serial `PIN CLEAR`.
 
 ## Build and flash
 

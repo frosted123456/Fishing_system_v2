@@ -197,6 +197,37 @@ void homeHub(u8g2_t* u, const ScreenModel& m, bool blink) {
   }
 }
 
+// ---- GPS: pin holes (chalet). Row 0 = "Chalet here" (map origin), then the holes; the selected row is inverse ----
+void gpsPage(u8g2_t* u, const ScreenModel& m) {
+  char s[40];
+  if (!m.gps_data) snprintf(s, sizeof(s), m.gps_scanning ? "scan GPIO%d" : "no data", m.gps_rx_pin);
+  else if (!m.gps_fix) snprintf(s, sizeof(s), "%u sats, no fix", m.gps_sats);
+  else snprintf(s, sizeof(s), "%u sats %u.%u", m.gps_sats, m.gps_hdop_x10 / 10, m.gps_hdop_x10 % 10);
+  header(u, "GPS", s);
+  const uint8_t rows = 4, total = (uint8_t)(1 + m.n_holes);
+  uint8_t first = m.gps_sel >= rows ? (uint8_t)(m.gps_sel - rows + 1) : 0;
+  int y = 15;
+  u8g2_SetFont(u, F_MED);
+  for (uint8_t r = 0; r < rows && first + r < total; r++) {
+    const uint8_t i = (uint8_t)(first + r);
+    char nm[24], v[14];
+    if (i == 0) { snprintf(nm, sizeof(nm), "Chalet here"); snprintf(v, sizeof(v), "%s", m.gps_origin ? "origin set" : "-"); }
+    else {
+      const ScrHole& h = m.holes[i - 1];
+      holeName(h, nm, sizeof(nm));
+      if (h.px_dm != 0x7FFF) snprintf(v, sizeof(v), "%dE %dN", h.px_dm / 10, h.py_dm / 10); else snprintf(v, sizeof(v), "-");
+    }
+    const bool sel = i == m.gps_sel;
+    if (sel) { u8g2_DrawBox(u, 0, y, 128, 10); u8g2_SetDrawColor(u, 0); }
+    fit(u, nm, 76);
+    u8g2_DrawStr(u, 2, y + 8, nm);
+    right(u, y + 8, v);
+    if (sel) u8g2_SetDrawColor(u, 1);
+    y += 10;
+  }
+  if (total > rows) { snprintf(s, sizeof(s), "%u/%u", m.gps_sel + 1, total); u8g2_SetFont(u, F_SMALL); right(u, 63, s); }
+}
+
 // ---- holes list, 4 per page ----
 void holesPage(u8g2_t* u, const ScreenModel& m, uint8_t sub, bool blink) {
   const uint8_t pages = screenHolesPages(m);
@@ -475,6 +506,7 @@ uint8_t screenSonarPages(const ScreenModel& m) {
 const char* screenPageAction(const ScreenModel& m, uint8_t page) {
   switch (page) {
     case PG_HOLES: return screenHolesPages(m) > 1 ? "next 4 holes" : "";
+    case PG_GPS: return !m.kb ? "CardKB to pin" : !m.gps_fix ? "wait for a fix" : m.gps_sel == 0 ? "origin = here" : (m.holes[m.gps_sel - 1].px_dm != 0x7FFF ? "re-pin (Del=clear)" : "pin hole here");
     case PG_SONAR: return "";   // no footer room; paging by double press when > 9 holes
     case PG_FOCUS: return m.chalet ? "next hole" : "";
     case PG_TEST: {
@@ -496,6 +528,7 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
   if (m.menu) { optionsPage(u, m, blink, 255); return; }   // CardKB menu (list of pages)
   switch (page) {
     case PG_HOLES: holesPage(u, m, sub, blink); footer(u, m, page); break;
+    case PG_GPS: gpsPage(u, m); footer(u, m, page); break;
     case PG_SONAR: sonarPage(u, m, sub, blink); break;
     case PG_FOCUS: focusPage(u, m); break;
     case PG_NETWORK: networkPage(u, m); break;

@@ -190,6 +190,7 @@ void loadSettings() {
   settings.hideWeak = preferences.getBool("hideWeak", false);
   settings.nearBaitBeep = preferences.getBool("nearBeep", false);
   settings.beamDeg = preferences.getUChar("beamDeg", 14);
+  { String pin = preferences.getString("webPin", ""); strlcpy(settings.webPin, pin.c_str(), sizeof(settings.webPin)); }   // D74
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
   if (settings.lastLoraCh > 7) settings.lastLoraCh = 0;
@@ -227,6 +228,7 @@ void saveSettings() {
   preferences.putBool("hideWeak", settings.hideWeak);
   preferences.putBool("nearBeep", settings.nearBaitBeep);
   preferences.putUChar("beamDeg", settings.beamDeg);
+  preferences.putString("webPin", settings.webPin);   // D74
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);
 

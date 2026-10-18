@@ -149,10 +149,10 @@ body.has-alert{padding-bottom:84px}
 .stat{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:10px 12px}
 .stat span{display:block;color:var(--muted);font-size:.85rem}.stat strong{display:block;font-size:1.35rem;font-weight:700;line-height:1.2}
 .pmap .pmhd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-#pmap{display:block;width:100%;height:300px;border-radius:10px;background:#DCE9EC;touch-action:none}
-@media (max-width:520px){#pmap{height:240px}}
+#pmap{display:block;width:100%;height:340px;border-radius:10px;background:#DCE9EC;touch-action:none;cursor:grab}
+@media (max-width:520px){#pmap{height:300px}}
 .pmlegend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:.86rem;color:var(--muted)}.pmlegend .sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
-.pmchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.pmchips .btn{min-height:32px;padding:3px 10px;font-size:.9rem}.pmchips .btn[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.pmchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.pmwrap{position:relative}.pmfull{position:fixed;inset:0;z-index:50;border-radius:0;overflow:auto;padding:10px 12px}.pmfull #pmap{height:calc(100vh - 150px);border-radius:8px}.pmsheet{margin-top:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface)}.pmsheet .hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.pmsheet .nm{font-weight:700;font-size:1.05rem}.pmsheet .kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:4px 12px;margin:8px 0;font-size:.92rem}.pmsheet .kv span{color:var(--muted);display:block;font-size:.8rem}.pmsheet .acts{display:flex;flex-wrap:wrap;gap:6px}#pmDepth[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.pmchips .btn.ghost{border-style:dashed}.pmctl{position:absolute;right:8px;top:8px;display:flex;flex-direction:column;gap:4px}.pmctl button{width:34px;height:34px;border-radius:8px;border:1px solid var(--line);background:rgba(255,255,255,.92);color:var(--ink);font-size:20px;line-height:1;cursor:pointer}#pmLay button{min-height:30px;padding:2px 10px}.pmchips .btn{min-height:32px;padding:3px 10px;font-size:.9rem}.pmchips .btn[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .btn.small.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .ngrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px}
 @media (max-width:520px){.ngrid{grid-template-columns:minmax(0,1fr)}}
@@ -239,11 +239,14 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     </div>
     <div class="card pmap" id="pmapCard">
       <div class="pmhd"><h2 style="margin:0">Pocket map</h2>
-        <div class="btnrow"><button class="btn small" id="pmEdit" type="button" aria-pressed="false">Place holes</button><button class="btn small" id="pmRemove" type="button" hidden>Remove from map</button></div></div>
-      <canvas id="pmap" aria-label="Top view of the holes around the chalet: depth shading and bottom type"></canvas>
-      <div class="pmlegend"><span><i class="sw" style="background:#9ED3D9"></i>shallow</span><span><i class="sw" style="background:#15404C"></i>deep</span><span><i class="sw" style="background:#C9A25C"></i>hard</span><span><i class="sw" style="background:#A89A6A"></i>medium</span><span><i class="sw" style="background:#7E8A5A"></i>soft</span><span><i class="sw" style="background:var(--alert)"></i>fish on</span></div>
+        <div class="btnrow"><span class="seg" role="group" aria-label="Map layer" id="pmLay"><button type="button" data-lay="map" aria-pressed="true">Map</button><button type="button" data-lay="sat" aria-pressed="false">Satellite</button></span><button class="btn small" id="pmDepth" type="button" aria-pressed="false" title="CHS NONNA bathymetry where it exists (Ottawa River around Ottawa; not upstream of the Chats dam)">Depth</button><button class="btn small" id="pmSave" type="button" title="Keep the tiles of this area on the chalet for the ice (no internet)">Save area</button><button class="btn small" id="pmFull" type="button" aria-pressed="false" title="Expand the map">⤢</button></div></div>
+      <div class="pmwrap">
+      <canvas id="pmap" aria-label="Map of the holes around the chalet: drag to pan, pinch to zoom"></canvas>
+      <div class="pmctl"><button type="button" id="pmIn" aria-label="Zoom in">+</button><button type="button" id="pmOut" aria-label="Zoom out">−</button><button type="button" id="pmHome" aria-label="Centre on the chalet">⌂</button></div></div>
+      <div class="pmlegend"><span><i class="sw" style="background:#9ED3D9"></i>shallow</span><span><i class="sw" style="background:#15404C"></i>deep</span><span><i class="sw" style="background:#C9A25C"></i>hard</span><span><i class="sw" style="background:#A89A6A"></i>medium</span><span><i class="sw" style="background:#7E8A5A"></i>soft</span><span><i class="sw" style="background:var(--alert)"></i>fish on</span><span id="pmBg"></span></div>
       <p class="hint" id="pmHint" style="margin:6px 0 0"></p>
       <div class="pmchips" id="pmChips"></div>
+      <div class="pmsheet" id="pmSheet" hidden></div>
     </div>
     <label class="hint" style="display:flex;gap:8px;align-items:center;margin:0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
     <div class="ngrid" id="ngrid"></div>
@@ -389,6 +392,18 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <p class="sm" style="margin:0 0 6px">Asks a hole to test itself: sensor pin, arming button, battery, sonar shield (SPI, VDRV, a test ping) and radio. The result comes back over the mesh: a hub answers in a few seconds, a sleeping tip-up at its next heartbeat (up to 1 min).</p>
       <div class="acts" style="margin:0 0 6px"><select id="stHole"></select> <button class="btn small primary" type="button" id="stRun">Run</button> <span class="msg" id="stMsg"></span></div>
       <div id="stOut"></div>
+    </section>
+    <section class="card">
+      <h2>Map &amp; PIN</h2>
+      <p class="sm" style="margin:0 0 6px">Map tiles come from the internet through the phone; every tile seen stays on this phone, and <b>Save area</b> on the Holes tab keeps the tiles of an area on the chalet for any phone on the ice. Depth contours (optional, where CHS has data): a pack made on the PC with <code>tools/lake_prep.py</code>.</p>
+      <p class="hint" id="tlInfo" style="margin:0 0 6px"></p>
+      <div class="acts" style="margin:0 0 10px"><button class="btn small" type="button" id="tlClear">Clear saved areas on the chalet</button> <button class="btn small" type="button" id="tlPhone">Clear this phone's tile cache</button></div>
+      <div class="acts" style="margin:0 0 6px"><input type="file" id="mpFile" accept=".json,application/json" aria-label="Map pack file"> <button class="btn small primary" type="button" id="mpUp">Store on chalet</button> <button class="btn small" type="button" id="mpClear">Remove</button></div>
+      <p class="hint" id="mpInfo" style="margin:0 0 10px"></p>
+      <form class="form" id="pinForm">
+        <label class="f">PIN for changes (4-8 digits, empty = off)<input type="text" id="fPin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off" placeholder="off"><small id="fPinInfo">Off by default: anyone on the chalet Wi-Fi can arm holes or change settings. With a PIN, the page asks for it once per phone. Forgot it? Serial command <code>PIN CLEAR</code>. This is a lock, not encryption: never expose the chalet to the internet.</small></label>
+        <div><button class="btn" type="submit">Save PIN</button> <span class="msg" id="pinMsg"></span></div>
+      </form>
     </section>
     <section class="card">
       <h2>Network</h2>
@@ -742,7 +757,8 @@ function liveTargets() {
   if (!recs.length) return [];
   return recs[recs.length - 1].t.filter(t => t.s > 0.08).slice().sort((a, b) => a.d - b.d).slice(0, 5);
 }
-function updTargets() {
+function updTarget)rawliteral"
+R"rawliteral(s() {
   const el = $('tlist'), list = liveTargets();
   if (!list.length) { el.innerHTML = '<p class="empty">' + (recs.length ? 'Nothing moving under the hole right now.' : 'Waiting for pings…') + '</p>'; return; }
   const bait = list.find(t => t.slot === 0);
@@ -793,8 +809,7 @@ $('tlist').addEventListener('click', pickRow);
 /* ---------- Controls ---------- */
 const TOGGLES = [
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
-  ['bgsep', 'Still scene muted', 'Lake bed in san)rawliteral"
-R"rawliteral(d colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
+  ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
   ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
   ['dz', 'Bottom blind band', 'Light band just above the bottom line: a fish that close to the bottom returns at the same time as the bottom itself and cannot be told apart (any sonar). Thicker in deep water and with a long ping.']
 ];
@@ -901,6 +916,19 @@ syncControls(); loadList();
 'use strict';
 const $ = id => document.getElementById(id);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// D74: optional write PIN. Every non-GET carries "X-Pin" when the chalet asked for one (401): asked once, kept on this phone.
+const PIN = { v: null }; try { PIN.v = localStorage.getItem('chaletPin'); } catch (e) {}
+const rawFetch = window.fetch.bind(window);
+window.fetch = (url, o) => {
+  o = o || {}; const post = String(o.method || 'GET').toUpperCase() !== 'GET';
+  const run = () => { const h = Object.assign({}, o.headers || {}); if (post && PIN.v) h['X-Pin'] = PIN.v; return rawFetch(url, Object.assign({}, o, { headers: h })); };
+  return run().then(r => {
+    if (r.status !== 401 || !post) return r;
+    const p = prompt('This chalet asks for its PIN before it accepts a change (Settings → Map & PIN):'); if (p == null) return r;
+    PIN.v = p.trim(); try { localStorage.setItem('chaletPin', PIN.v); } catch (e) {}
+    return run();
+  });
+};
 // v2: every request gives up after 8 s (a half-open connection after a Wi-Fi blip would block that poll for minutes)
 const tfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
 window.tfetch = tfetch;
@@ -1055,6 +1083,7 @@ function renderNodes() {
   });
   $('ngrid').innerHTML = h || '<p class="empty">No hole heard yet.</p>';
   drawGlances();
+  if ((st.map_bytes || 0) !== pm.packBytes) pmLoadPack(st.map_bytes || 0);   // D74
   if (!pm.drag) drawPmap();
 }
 
@@ -1074,91 +1103,326 @@ function loadGlance() {
 }
 function cssVar(n, f) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || f; }
 // v2 (D42) depth scale of the hole cards: same auto scale for all, each hole its own auto scale, or fixed
-/* ---------- Pocket map (D51): holes placed by hand around the chalet, depth shading between them ---------- */
-const pm = { edit: false, sel: null, drag: null, view: null };
+/* ---------- Pocket map (D51 -> D75 tile map): pan / pinch / zoom, map or satellite tiles, holes on top ---------- */
+/* Tiles (Esri World Topo = lakes, rivers, roads; Esri World Imagery) are fetched by THIS PHONE when it has internet,
+   never by the chalet. Every tile shown is kept on the phone (IndexedDB) for the next trip, and "Save area" pushes the
+   tiles of the visible area to the chalet (its 4.8 MB store) so any phone gets them on the ice without internet.
+   Depth contours come from the optional map pack (Settings) where CHS data exists. Hole positions are metres east /
+   north of the chalet GPS origin (flat earth, fine for a few km); until "Chalet here" is done the map has no tiles. */
+const pm = { sel: null, placing: null, drag: null, view: null, pack: null, packBytes: 0, layer: 'map', depth: false, full: false, tiles: new Map(), net: { fails: 0, offUntil: 0 }, redraw: 0,
+  cz: null, ptrs: new Map(), pinch: null, pan: null, idb: null, idbFail: false, src: { net: 0, idb: 0, chalet: 0, miss: 0 }, saving: null, msg: null };
+try { pm.layer = localStorage.getItem('pmLayer') || 'map'; pm.depth = localStorage.getItem('pmDepth') === '1'; } catch (e) {}
+// D76 depth overlay: CHS NONNA bathymetry as WMS tiles (10 m product close up, 100 m zoomed out), transparent where unsurveyed
+function nonnaUrl(z, x, y) {
+  const R = 6378137, n = Math.pow(2, z), m = (tx, ty) => { const lon = tx / n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / n))) * 180 / Math.PI; return [R * lon * Math.PI / 180, R * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))]; };
+  const [x0, y1] = m(x, y), [x1, y0] = m(x + 1, y + 1);
+  return `https://nonna-geoserver.data.chs-shc.ca/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=${encodeURIComponent(z >= 12 ? 'nonna:NONNA 10' : 'nonna:NONNA 100')}&styles=&crs=EPSG:3857&bbox=${x0.toFixed(1)},${y0.toFixed(1)},${x1.toFixed(1)},${y1.toFixed(1)}&width=256&height=256&format=image/png&transparent=true`;
+}
+const LAYERS = { map: { url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${z}/${y}/${x}`, attr: 'Esri World Topo', max: 19 },
+  sat: { url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, attr: 'Esri World Imagery', max: 19 },
+  dep: { url: nonnaUrl, attr: 'depth: CHS NONNA', max: 19 } };
+const DEF_ORG = { lat: 45.5, lon: -75.7 };   // projection anchor while the chalet has no GPS origin (no tiles drawn then)
 const PM_FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
-function pmFit(cv) { const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr)); if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } return { w, h, dpr }; }
 const pmClamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function pmFit(cv) { const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr)); if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } return { w, h, dpr }; }
 const pmC = $('pmap'), pmX = pmC.getContext('2d');
 const PM_DEEP = [[0.0, [158, 211, 217]], [0.5, [60, 135, 150]], [1.0, [21, 64, 76]]];
 function pmColor(t) { t = pmClamp(t, 0, 1); let a = PM_DEEP[0], b = PM_DEEP[PM_DEEP.length - 1]; for (let i = 1; i < PM_DEEP.length; i++) if (t <= PM_DEEP[i][0]) { a = PM_DEEP[i - 1]; b = PM_DEEP[i]; break; } const u = (t - a[0]) / (b[0] - a[0] || 1); return a[1].map((c, k) => Math.round(c + (b[1][k] - c) * u)); }
+function pmOrigin() { const g = st && st.gps; return g && g.origin && g.lat0 != null ? { lat: +g.lat0, lon: +g.lon0 } : null; }
+function pmMetresToLL(o, x, y) { const c = Math.cos(o.lat * Math.PI / 180); return [o.lat + y / 111320, o.lon + x / (111320 * c)]; }
+function pmLLToMetres(o, lat, lon) { const c = Math.cos(o.lat * Math.PI / 180); return [(lon - o.lon) * 111320 * c, (lat - o.lat) * 111320]; }
+// Web Mercator, 256 px tiles: world pixel coordinates at zoom z
+function llToWorld(lat, lon, z) { const n = 256 * Math.pow(2, z), s = Math.sin(lat * Math.PI / 180); return [(lon + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n]; }
+function worldToLL(x, y, z) { const n = 256 * Math.pow(2, z); return [Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI, x / n * 360 - 180]; }
 function pmHoles() {
   const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {}; (L.nodes || []).forEach(x => { sonar[x.node] = x; });
   return (st && st.nodes || []).map(n => { const s = sonar[n.id]; const dr = pm.drag && pm.drag.id === n.id && pm.drag.moved; return { id: n.id, name: nodeName(n), x: dr ? pm.drag.x : n.px, y: dr ? pm.drag.y : n.py, placed: n.px != null, fish: !!n.fish && n.online !== false, off: n.online === false,
     depth: s && s.bottom < 2047 ? s.bottom / 100 : null, hard: s ? s.hard : 3 }; });
 }
-function pmView(w, h, holes) {
-  const pts = holes.filter(x => x.placed).map(x => [x.x, x.y]).concat([[0, 0]]);
-  let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0])), y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
-  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, span = Math.max(x1 - x0, y1 - y0, 40) * 1.3;
-  const k = Math.min(w, h) / span;   // px per metre, same both axes; y up = north
-  return { k, cx, cy, w, h, toPx: (x, y) => [w / 2 + (x - cx) * k, h / 2 - (y - cy) * k], toM: (px, py) => [cx + (px - w / 2) / k, cy - (py - h / 2) / k] };
+// view: centre (lat, lon) + zoom (CSS-pixel zoom; device pixels add log2(dpr)); first view fits the holes around the chalet
+function pmView(w, h, holes, dpr) {
+  const o = pmOrigin() || DEF_ORG, ok = o.lat + ',' + o.lon;
+  if (pm.cz && pm.cz.ok !== ok) pm.cz = null;   // origin set or moved: re-centre
+  if (!pm.cz) {
+    const pts = holes.filter(x => x.placed).map(x => [x.x, x.y]).concat([[0, 0]]);
+    const span = Math.max(...pts.map(p => Math.abs(p[0])), ...pts.map(p => Math.abs(p[1])), 60) * 2 * 1.3;   // metres across, chalet centred
+    const mpp = 40075016.686 * Math.cos(o.lat * Math.PI / 180) / 256;   // metres per CSS px at z = 0
+    pm.cz = { ok, lat: o.lat, lon: o.lon, z: pmClamp(Math.log2(mpp * Math.min(w, h) / dpr / span), 3, 19) };
+  }
+  const c = pm.cz, zf = c.z + Math.log2(dpr), zt = pmClamp(Math.round(zf), 0, 19), s = Math.pow(2, zf - zt);   // tiles at zt, scaled by s
+  const [cx, cy] = llToWorld(c.lat, c.lon, zt);
+  const k = 256 * Math.pow(2, zf) / (40075016.686 * Math.cos(c.lat * Math.PI / 180));   // device px per metre
+  const llToPx = (lat, lon) => { const [x, y] = llToWorld(lat, lon, zt); return [w / 2 + (x - cx) * s, h / 2 + (y - cy) * s]; };
+  const pxToLL = (px, py) => worldToLL(cx + (px - w / 2) / s, cy + (py - h / 2) / s, zt);
+  return { w, h, dpr, o, zt, s, k, cx, cy, llToPx, pxToLL,
+    toPx: (mx, my) => llToPx(...pmMetresToLL(o, mx, my)), toM: (px, py) => pmLLToMetres(o, ...pxToLL(px, py)) };
+}
+/* ---- tile sources: phone cache (IndexedDB) -> internet (kept in the cache) -> chalet store ---- */
+function idb() {
+  if (pm.idb || pm.idbFail) return Promise.resolve(pm.idb);
+  return new Promise(res => { try { const r = indexedDB.open('icetiles', 1); r.onupgradeneeded = () => r.result.createObjectStore('t'); r.onsuccess = () => { pm.idb = r.result; res(pm.idb); }; r.onerror = () => { pm.idbFail = true; res(null); }; } catch (e) { pm.idbFail = true; res(null); } });
+}
+function idbGet(key) { return idb().then(db => new Promise(res => { if (!db) return res(null); try { const r = db.transaction('t').objectStore('t').get(key); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); } catch (e) { res(null); } })); }
+function idbPut(key, blob) { idb().then(db => { if (!db) return; try { db.transaction('t', 'readwrite').objectStore('t').put(blob, key); } catch (e) {} }); }
+function idbClear() { return idb().then(db => new Promise(res => { if (!db) return res(); try { const r = db.transaction('t', 'readwrite').objectStore('t').clear(); r.onsuccess = () => res(); r.onerror = () => res(); } catch (e) { res(); } })); }
+function idbCount() { return idb().then(db => new Promise(res => { if (!db) return res(0); try { const r = db.transaction('t').objectStore('t').count(); r.onsuccess = () => res(r.result); r.onerror = () => res(0); } catch (e) { res(0); } })); }
+function pmOnline() { return navigator.onLine !== false && Date.now() > pm.net.offUntil; }
+const chaletTileUrl = (l, z, x, y) => `/api/tile?l=${l[0]}&z=${z}&x=${x}&y=${y}`;   // the chalet knows m / s
+function pmTile(l, z, x, y) {
+  const key = `${l}/${z}/${x}/${y}`; let t = pm.tiles.get(key);
+  if (t) return t;
+  if (pm.tiles.size > 400) { const k0 = pm.tiles.keys().next().value; const t0 = pm.tiles.get(k0); if (t0 && t0.url) URL.revokeObjectURL(t0.url); pm.tiles.delete(k0); }
+  t = { img: new Image(), ok: false, err: false, from: '', blob: null, url: null };
+  pm.tiles.set(key, t);
+  const show = (src, from) => { t.img.onload = () => { t.ok = true; t.from = from; if (from === 'net') pm.net.fails = 0; pmRedraw(); }; t.img.onerror = () => { if (from === 'net') { if (++pm.net.fails >= 4) { pm.net.offUntil = Date.now() + 60000; pm.net.fails = 0; } tryChalet(); } else { t.err = true; pmRedraw(); } }; t.img.src = src; };
+  const tryChalet = () => show(chaletTileUrl(l, z, x, y), 'chalet');
+  const tryNet = () => {
+    if (!pmOnline()) return tryChalet();
+    const url = LAYERS[l].url(z, x, y);
+    fetch(url, { mode: 'cors' }).then(r => r.ok ? r.blob() : Promise.reject()).then(b => { t.blob = b; idbPut(key, b); t.url = URL.createObjectURL(b); show(t.url, 'net'); })
+      .catch(() => show(url, 'net'));   // no CORS (or offline): plain image load, nothing to keep
+  };
+  idbGet(key).then(b => { if (b) { t.blob = b; t.url = URL.createObjectURL(b); show(t.url, 'idb'); } else tryNet(); });
+  return t;
+}
+function pmRedraw() { if (pm.redraw) return; pm.redraw = setTimeout(() => { pm.redraw = 0; drawPmap(); }, 50); }
+function pmTileRange(v, zt) {   // tiles covering the canvas at zoom zt
+  const f = Math.pow(2, zt - v.zt), n = 1 << zt;
+  const x0 = Math.floor((v.cx - v.w / 2 / v.s) * f / 256), x1 = Math.floor((v.cx + v.w / 2 / v.s) * f / 256), y0 = Math.floor((v.cy - v.h / 2 / v.s) * f / 256), y1 = Math.floor((v.cy + v.h / 2 / v.s) * f / 256);
+  return { x0: Math.max(0, x0), x1: Math.min(n - 1, x1), y0: Math.max(0, y0), y1: Math.min(n - 1, y1), n };
+}
+function pmDrawTiles(g, v) {
+  if (!pmOrigin()) return false;
+  pm.src = { net: 0, idb: 0, chalet: 0, miss: 0 };
+  const base = pmDrawLayer(g, v, pm.layer);
+  if (pm.depth) { g.globalAlpha = 0.75; pmDrawLayer(g, v, 'dep'); g.globalAlpha = 1; }
+  return base;
+}
+function pmDrawLayer(g, v, l) {
+  const r = pmTileRange(v, v.zt), ts = 256 * v.s;
+  let drawn = 0;
+  for (let ty = r.y0; ty <= r.y1; ty++) for (let tx = r.x0; tx <= r.x1; tx++) {
+    const px = v.w / 2 + (tx * 256 - v.cx) * v.s, py = v.h / 2 + (ty * 256 - v.cy) * v.s;
+    const t = pmTile(l, v.zt, tx, ty);
+    if (t.ok) { g.drawImage(t.img, px, py, ts + 0.5, ts + 0.5); drawn++; pm.src[t.from]++; continue; }
+    // not there yet: a parent tile (up to 3 levels out), scaled, so zooming in offline still shows something
+    let got = false;
+    for (let u = 1; u <= 3 && !got; u++) { const p = pm.tiles.get(`${l}/${v.zt - u}/${tx >> u}/${ty >> u}`); if (p && p.ok) { const q = 256 >> u; g.drawImage(p.img, (tx & ((1 << u) - 1)) * q, (ty & ((1 << u) - 1)) * q, q, q, px, py, ts + 0.5, ts + 0.5); drawn++; got = true; } }
+    if (!got && t.err) pm.src.miss++;
+  }
+  return drawn > 0;
+}
+function pmLoadPack(bytes) {
+  pm.packBytes = bytes; pm.pack = null;
+  if (!bytes) { drawPmap(); return; }
+  tfetch('/api/map/pack').then(r => r.ok ? r.json() : null).then(j => {
+    if (j) { const regs = Array.isArray(j.regions) ? j.regions : (Array.isArray(j.lines) ? [j] : []);   // v2 regions, v1 single
+      pm.pack = { regions: regs.filter(r => Array.isArray(r.lines) && r.lines.length).map(r => { const ds = r.lines.map(l => +l.d); return Object.assign({ dmin: Math.min(...ds), dmax: Math.max(...ds) }, r); }) }; }
+    drawPmap(); mpInfo();
+  }).catch(() => {});
+}
+function pmRegions(o) {   // regions of the pack within 50 km of the chalet origin
+  const P = pm.pack; if (!P || !o) return [];
+  return P.regions.filter(r => r.lat0 != null && Math.hypot(...pmLLToMetres(o, +r.lat0, +r.lon0)) < 50000);
+}
+function pmDrawContours(g, v, o, dpr, fmt) {
+  const regs = pmRegions(o); if (!regs.length) return false;
+  g.lineWidth = 1.2 * dpr; g.lineJoin = 'round'; g.font = `${9 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  let li = 0;
+  for (const P of regs) {
+    const [sx, sy] = pmLLToMetres(o, +P.lat0, +P.lon0), rng = Math.max(P.dmax - P.dmin, 1);
+    for (const L of P.lines) {
+      const p = L.p; li++; if (!p || p.length < 4) continue;
+      const c = pmColor((+L.d - P.dmin) / rng); g.strokeStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      g.beginPath(); let len = 0, lx = 0, ly = 0;
+      for (let i = 0; i < p.length; i += 2) { const [x, y] = v.toPx(sx + p[i] / 10, sy + p[i + 1] / 10); if (i) { len += Math.hypot(x - lx, y - ly); g.lineTo(x, y); } else g.moveTo(x, y); lx = x; ly = y; }
+      g.stroke();
+      if (len > 90 * dpr && v.k > 0.15) { const i = Math.floor((p.length / 2) * ((li * 0.37) % 1)) * 2; const [x, y] = v.toPx(sx + p[i] / 10, sy + p[i + 1] / 10); const lab = fmt(+L.d), w = g.measureText(lab).width;
+        g.fillStyle = 'rgba(255,255,255,0.75)'; g.fillRect(x - w / 2 - 2 * dpr, y - 6 * dpr, w + 4 * dpr, 12 * dpr); g.fillStyle = '#13262D'; g.fillText(lab, x, y); }
+    }
+  }
+  return true;
 }
 function drawPmap() {
   if (tab !== 'holes') return;
-  const { w, h, dpr } = pmFit(pmC), g = pmX, holes = pmHoles(), v = pmView(w, h, holes); pm.view = v;
+  const { w, h, dpr } = pmFit(pmC), g = pmX, holes = pmHoles(), v = pmView(w, h, holes, dpr); pm.view = v;
   const fmt = SON() ? SON().fmtD : m => m.toFixed(1) + ' m';
-  g.clearRect(0, 0, w, h);
+  const org = pmOrigin();
+  g.fillStyle = '#DCE9EC'; g.fillRect(0, 0, w, h);
+  const bg = pmDrawTiles(g, v);
+  const ctr = pmDrawContours(g, v, org, dpr, fmt);
   const known = holes.filter(x => x.placed && x.depth != null);
-  if (known.length) {   // inverse-distance depth field, faded away from the holes (no guessing far out)
+  if (known.length && v.k > 0.3) {   // inverse-distance depth field, faded away from the holes (no guessing far out)
     const ds = known.map(x => x.depth), dmin = Math.min(...ds), dmax = Math.max(...ds), rng = Math.max(dmax - dmin, 1);
-    const cell = 6 * dpr, reach = Math.max(25, v.k ? 0 : 0) ;
+    const cell = 6 * dpr;
     const img = g.createImageData(Math.ceil(w / cell), Math.ceil(h / cell)), d = img.data;
     for (let j = 0; j < img.height; j++) for (let i = 0; i < img.width; i++) {
       const [mx, my] = v.toM((i + 0.5) * cell, (j + 0.5) * cell);
       let sw = 0, sv = 0, near = 1e9;
       for (const hh of known) { const dd = Math.hypot(hh.x - mx, hh.y - my); near = Math.min(near, dd); const wgt = 1 / (dd * dd + 4); sw += wgt; sv += wgt * hh.depth; }
       const t = ((sv / sw) - dmin) / rng, c = pmColor(t), a = pmClamp(1 - (near - 12) / 25, 0, 1);   // solid within 12 m of a hole, gone past ~37 m
-      const o = (j * img.width + i) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = Math.round(a * 230);
+      const o = (j * img.width + i) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = Math.round(a * (bg || ctr ? 150 : 230));
     }
     const tmp = document.createElement('canvas'); tmp.width = img.width; tmp.height = img.height; tmp.getContext('2d').putImageData(img, 0, 0);
     g.imageSmoothingEnabled = true; g.drawImage(tmp, 0, 0, w, h);
-    // contour-ish: label the field every 1 m / 5 ft is overkill at this density; depth labels sit on the holes instead
   }
-  // grid every 10 m
-  g.strokeStyle = 'rgba(19,38,45,0.08)'; g.lineWidth = 1 * dpr;
-  const step = v.k * 10; if (step > 12 * dpr) { const [ox, oy] = v.toPx(0, 0); for (let x = ox % step; x < w; x += step) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); } for (let y = oy % step; y < h; y += step) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); } }
-  g.fillStyle = 'rgba(19,38,45,0.5)'; g.font = `${10 * dpr}px ${PM_FONT}`; g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('N ↑  grid 10 m', 6 * dpr, 4 * dpr);
+  // scale bar (bottom left) and attribution (bottom right)
+  { const want = 90 * dpr / v.k; const nice = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000].reduce((b, n) => Math.abs(n - want) < Math.abs(b - want) ? n : b, 5), px = nice * v.k, x = 8 * dpr, y = h - 10 * dpr;
+    g.strokeStyle = '#13262D'; g.lineWidth = 2 * dpr; g.beginPath(); g.moveTo(x, y); g.lineTo(x + px, y); g.moveTo(x, y - 4 * dpr); g.lineTo(x, y); g.moveTo(x + px, y - 4 * dpr); g.lineTo(x + px, y); g.stroke();
+    g.fillStyle = '#13262D'; g.font = `${10 * dpr}px ${PM_FONT}`; g.textAlign = 'left'; g.textBaseline = 'bottom'; g.fillText(nice >= 1000 ? (nice / 1000) + ' km' : nice + ' m', x + 3 * dpr, y - 2 * dpr);
+    if (bg) { g.textAlign = 'right'; g.fillStyle = 'rgba(19,38,45,0.7)'; g.fillText(LAYERS[pm.layer].attr, w - 6 * dpr, h - 3 * dpr); } }
+  g.fillStyle = 'rgba(19,38,45,0.6)'; g.font = `${10 * dpr}px ${PM_FONT}`; g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('N ↑', 6 * dpr, 4 * dpr);
   // chalet
-  { const [x, y] = v.toPx(0, 0); g.fillStyle = '#13262D'; g.beginPath(); g.moveTo(x, y - 9 * dpr); g.lineTo(x + 8 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y - 1 * dpr); g.lineTo(x - 8 * dpr, y - 1 * dpr); g.closePath(); g.fill();
-    g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'top'; g.fillText('chalet', x, y + 9 * dpr); }
+  { const [x, y] = v.toPx(0, 0); g.fillStyle = '#13262D'; g.strokeStyle = '#fff'; g.lineWidth = 1.5 * dpr; g.beginPath(); g.moveTo(x, y - 9 * dpr); g.lineTo(x + 8 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y - 1 * dpr); g.lineTo(x - 8 * dpr, y - 1 * dpr); g.closePath(); g.fill(); g.stroke();
+    g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'top'; g.lineWidth = 3 * dpr; g.strokeText('chalet', x, y + 9 * dpr); g.fillText('chalet', x, y + 9 * dpr); }
+  // live GPS position of the box (when it is not at the origin): small blue dot
+  if (st && st.gps && st.gps.fix && org && st.gps.lat != null) { const [x, y] = v.llToPx(+st.gps.lat, +st.gps.lon); if (Math.hypot(x - w / 2, y - h / 2) < 5000) { g.fillStyle = '#1C6CF2'; g.strokeStyle = '#fff'; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 5 * dpr, 0, Math.PI * 2); g.fill(); g.stroke(); } }
+  // selected hole: dashed line from the chalet with the distance
+  const selH = holes.find(x => x.id === pm.sel && x.placed);
+  if (selH) { const [x0, y0] = v.toPx(0, 0), [x1, y1] = v.toPx(selH.x, selH.y); g.setLineDash([6 * dpr, 5 * dpr]); g.strokeStyle = '#1C6C77'; g.lineWidth = 1.5 * dpr; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]);
+    const d = Math.hypot(selH.x, selH.y), lab = (d >= 1000 ? (d / 1000).toFixed(2) + ' km' : Math.round(d) + ' m') + ' · ' + Math.round((Math.atan2(selH.x, selH.y) * 180 / Math.PI + 360) % 360) + '°';
+    g.font = `600 ${10 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'bottom'; g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 3 * dpr; g.strokeText(lab, (x0 + x1) / 2, (y0 + y1) / 2 - 3 * dpr); g.fillStyle = '#13262D'; g.fillText(lab, (x0 + x1) / 2, (y0 + y1) / 2 - 3 * dpr); }
   // holes
   const HC = ['#C9A25C', '#A89A6A', '#7E8A5A', '#86A2AB'];
   for (const hh of holes) {
     if (!hh.placed) continue;
     const [x, y] = v.toPx(hh.x, hh.y), r = (hh.id === pm.sel ? 11 : 9) * dpr;
+    if (hh.fish) { g.beginPath(); g.arc(x, y, r + 6 * dpr, 0, Math.PI * 2); g.strokeStyle = 'rgba(194,65,45,0.45)'; g.lineWidth = 4 * dpr; g.stroke(); }
     g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fillStyle = hh.fish ? '#C2412D' : hh.off ? '#B8C6CA' : '#FFFFFF'; g.fill();
     g.lineWidth = 3 * dpr; g.strokeStyle = hh.depth != null ? HC[hh.hard] || HC[3] : '#86A2AB'; g.stroke();
     if (hh.id === pm.sel) { g.lineWidth = 2 * dpr; g.strokeStyle = '#1C6C77'; g.beginPath(); g.arc(x, y, r + 4 * dpr, 0, Math.PI * 2); g.stroke(); }
-    g.fillStyle = '#13262D'; g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'bottom'; g.fillText(hh.name, x, y - r - 2 * dpr);
-    if (hh.depth != null) { g.font = `${10 * dpr}px ${PM_FONT}`; g.textBaseline = 'top'; g.fillStyle = '#13262D'; g.fillText(fmt(hh.depth), x, y + r + 2 * dpr); }
+    g.fillStyle = '#13262D'; g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 3 * dpr; g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'bottom'; g.strokeText(hh.name, x, y - r - 2 * dpr); g.fillText(hh.name, x, y - r - 2 * dpr);
+    if (hh.depth != null) { g.font = `${10 * dpr}px ${PM_FONT}`; g.textBaseline = 'top'; g.strokeText(fmt(hh.depth), x, y + r + 2 * dpr); g.fillText(fmt(hh.depth), x, y + r + 2 * dpr); }
   }
-  // chips: unplaced holes (edit mode) and the hint
+  // legend line, chips, hint
+  const S = pm.src, srcTxt = !org ? 'no tiles until the chalet has its GPS origin (OLED: GPS / pin holes → Chalet here)' :
+    (bg ? (S.net ? 'online' : '') + (S.idb ? (S.net ? ' + ' : '') + 'phone cache' : '') + (S.chalet ? ((S.net || S.idb) ? ' + ' : '') + 'chalet store' : '') + (S.miss ? ` · ${S.miss} tile${S.miss > 1 ? 's' : ''} missing offline` : '') : (pmOnline() ? 'loading…' : 'offline: no tile of this area saved'));
+  $('pmBg').textContent = (pm.layer === 'sat' ? 'satellite' : 'map') + (pm.depth ? ' + depth' : '') + (srcTxt ? ' · ' + srcTxt : '') + (ctr ? ' · depth contours' : '');
   const un = holes.filter(x => !x.placed);
-  $('pmChips').innerHTML = pm.edit ? un.map(x => `<button class="btn" type="button" data-pm="${x.id}" aria-pressed="${pm.sel === x.id}">${esc(x.name)}</button>`).join('') : '';
-  $('pmRemove').hidden = !(pm.edit && pm.sel != null && holes.find(x => x.id === pm.sel && x.placed));
-  $('pmHint').textContent = pm.edit ? (pm.sel != null && !holes.find(x => x.id === pm.sel && x.placed) ? 'Tap the map where this hole is.' : 'Tap a hole name, then the map; drag a hole to move it. Distances are from the chalet, north up: pace them or use the phone map.') :
-    (un.length ? `${un.length} hole${un.length > 1 ? 's' : ''} not on the map yet: Place holes.` : (known.length < 3 ? 'Depth shading needs 3 holes with a sonar bottom.' : ''));
+  $('pmChips').innerHTML = un.map(x => `<button class="btn ghost" type="button" data-pm="${x.id}" aria-pressed="${pm.sel === x.id}">${esc(x.name)} · not on map</button>`).join('');
+  const plc = pm.placing != null ? holes.find(x => x.id === pm.placing) : null;
+  $('pmHint').textContent = pm.msg ? pm.msg : (plc ? `Tap the map where ${plc.name} is` + (plc.placed ? ', or drag its marker.' : '.') : (pm.saving ? pm.saving : (un.length ? `${un.length} hole${un.length > 1 ? 's' : ''} not on the map: tap its name, then "Pin here" (box at the hole) or "Tap the map".` : (known.length < 3 ? 'Depth shading between holes needs 3 holes with a sonar bottom.' : ''))));
+  pmSheetRender();
 }
+function pmFlash(m, ms) { pm.msg = m; drawPmap(); setTimeout(() => { if (pm.msg === m) { pm.msg = null; drawPmap(); } }, ms || 5000); }
+/* ---- hole / chalet sheet under the map (D76): what the hole reports, and what to do with it ---- */
+function pmSheetRender() {
+  const sh = $('pmSheet');
+  if (pm.sel == null) { sh.hidden = true; return; }
+  const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(2) + ' m', g = st && st.gps;
+  if (pm.sel === 'chalet') {
+    const fix = g && g.fix, o = pmOrigin();
+    sh.innerHTML = `<div class="hd"><span class="nm">Chalet box</span><span class="badge${fix ? ' on' : ''}">${fix ? 'GPS FIX · ' + g.sats + ' sats' : (g && g.data ? 'GPS: no fix yet' : 'no GPS')}</span></div>` +
+      `<div class="kv"><div><span>Map origin</span>${o ? o.lat.toFixed(5) + ', ' + o.lon.toFixed(5) : 'not set'}</div><div><span>Box now</span>${fix ? (+g.lat).toFixed(5) + ', ' + (+g.lon).toFixed(5) : '–'}</div><div><span>Holes on the map</span>${pmHoles().filter(x => x.placed).length} of ${pmHoles().length}</div></div>` +
+      `<div class="acts"><button class="btn small primary" type="button" data-gps="origin" ${fix ? '' : 'disabled'}>Chalet here (set the map origin)</button><button class="btn small" type="button" data-gps="clearall">Clear all hole positions</button><button class="btn small" type="button" data-close="1">Close</button></div>` +
+      `<p class="hint" style="margin:6px 0 0">The origin is where the chalet sits on the map (0, 0). Set it once with a fix; hole positions are metres from it, so moving the origin moves every hole with it.</p>`;
+    sh.hidden = false; return;
+  }
+  const n = (st && st.nodes || []).find(x => x.id === pm.sel); if (!n) { sh.hidden = true; return; }
+  const L = son ? son.list() : { nodes: [] }, s = (L.nodes || []).find(x => x.node === n.id), hh = pmHoles().find(x => x.id === n.id);
+  const off = n.online === false, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
+  const state = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : n.line ? '<span class="badge al">FLAG UP</span>' : n.lowbat ? '<span class="badge warn">LOW BATT</span>' : '<span class="badge on">OK</span>';
+  const seen = n.last_seen_sec == null ? '–' : (n.last_seen_sec < 60 ? n.last_seen_sec + ' s ago' : Math.round(n.last_seen_sec / 60) + ' min ago');
+  const q = n.turns || 0, cmt = st.cm_per_turn || 0, HARDT = ['hard', 'medium', 'soft', ''];
+  const dist = hh && hh.placed ? (Math.hypot(hh.x, hh.y) >= 1000 ? (Math.hypot(hh.x, hh.y) / 1000).toFixed(2) + ' km' : Math.round(Math.hypot(hh.x, hh.y)) + ' m') + ' · ' + Math.round((Math.atan2(hh.x, hh.y) * 180 / Math.PI + 360) % 360) + '° from the chalet' : 'not on the map';
+  sh.innerHTML = `<div class="hd"><span class="nm">${esc(nodeName(n))} <span class="sm">#${n.id}</span></span><span>${n.disarmed ? '<span class="badge">DISARMED</span>' : ''}${state}</span></div>` +
+    `<div class="kv"><div><span>Bottom</span>${s && s.bottom < 2047 ? fmt(s.bottom / 100) + ' ' + (HARDT[s.hard] || '') : 'no sonar'}</div><div><span>Fish</span>${s && s.fish ? s.fish + ' · nearest ' + fmt(s.near / 100) : (s ? 'none' : '–')}</div>` +
+    `<div><span>Bait</span>${n.bait ? fmt(n.bait / 100) : 'not set'}</div><div><span>Line</span>${q ? (q / 4).toFixed(q % 4 ? 2 : 0) + ' turn' + (q > 4 ? 's' : '') + (cmt ? ' ≈ ' + (q / 4 * cmt / 100).toFixed(1) + ' m out' : '') : '–'}</div>` +
+    `<div><span>Battery</span>${n.battery ? pct + ' % (' + (n.battery / 1000).toFixed(2) + ' V)' : '–'}</div><div><span>Heard</span>${seen}${n.rssi ? ' · ' + n.rssi + ' dBm' : ''}${n.via_lora ? ' · LoRa' : (n.via_espnow ? ' · ESP-NOW' : '')}</div><div><span>Position</span>${dist}</div></div>` +
+    `<div class="acts">${armButton(n)}<button class="btn small" type="button" data-bait="${n.id}">${n.bait ? 'Bait ' + fmt(n.bait / 100) : 'Set bait'}</button>${s ? `<button class="btn small primary" type="button" data-watch="${n.id}">Watch sonar</button>` : ''}<button class="btn small" type="button" data-rename="${n.id}">Rename</button>` +
+    `<button class="btn small" type="button" data-pin="${n.id}" ${g && g.fix && pmOrigin() ? '' : 'disabled'} title="the chalet box is at this hole right now (GPS)">Pin here</button><button class="btn small" type="button" data-move="${n.id}" aria-pressed="${pm.placing === n.id}">${hh && hh.placed ? 'Move' : 'Tap the map'}</button>${hh && hh.placed ? `<button class="btn small" type="button" data-unpin="${n.id}">Remove from map</button>` : ''}<button class="btn small" type="button" data-close="1">Close</button></div>`;
+  sh.hidden = false;
+}
+$('pmSheet').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.close) { pm.sel = null; pm.placing = null; drawPmap(); return; }
+  if (b.dataset.gps === 'origin') { api('/api/gps', { origin: true }).then(j => { pmFlash(j && j.error ? j.error : 'Origin set: the chalet is here.'); pm.cz = null; loadStatus(); }).catch(() => pmFlash('Failed.')); return; }
+  if (b.dataset.gps === 'clearall') { if (!confirm('Forget the position of every hole?')) return; api('/api/gps', { clear: 'all' }).then(() => { pm.sel = null; loadStatus(); }).catch(() => {}); return; }
+  if (b.dataset.pin) { api('/api/gps', { pin: +b.dataset.pin }).then(j => { pmFlash(j && j.error ? j.error : 'Pinned at the box position.'); loadStatus(); }).catch(() => pmFlash('Failed.')); return; }
+  if (b.dataset.move) { pm.placing = pm.placing === +b.dataset.move ? null : +b.dataset.move; drawPmap(); return; }
+  if (b.dataset.unpin) { pmPost(+b.dataset.unpin, null); pm.placing = null; return; }
+  nodeActions(e);   // arm / bait / watch / rename: same as the hole cards
+});
 function pmHit(px, py) { const v = pm.view; if (!v) return null; let best = null, bd = 18 * (window.devicePixelRatio || 1); for (const hh of pmHoles()) { if (!hh.placed) continue; const [x, y] = v.toPx(hh.x, hh.y), d = Math.hypot(x - px, y - py); if (d < bd) { bd = d; best = hh; } } return best; }
 function pmEvt(e) { const r = pmC.getBoundingClientRect(), dpr = window.devicePixelRatio || 1; return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr]; }
 function pmPost(id, x, y) { fetch('/api/node/pos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(x == null ? { nodeId: id } : { nodeId: id, x: +x.toFixed(1), y: +y.toFixed(1) }) }).then(() => loadStatus()).catch(() => {}); }
+// zoom by dz keeping the map point under (px, py) still
+function pmZoomAt(dz, px, py) {
+  const v = pm.view; if (!v) return; const c = pm.cz, z1 = pmClamp(c.z + dz, 3, LAYERS[pm.layer].max), f = Math.pow(2, z1 - c.z);
+  const wx = v.cx + (px - v.w / 2) / v.s, wy = v.cy + (py - v.h / 2) / v.s;   // world px (zt) under the pointer
+  const [lat, lon] = worldToLL(wx + (v.cx - wx) / f, wy + (v.cy - wy) / f, v.zt);
+  c.lat = lat; c.lon = lon; c.z = z1; drawPmap();
+}
+function pmPanBy(dx, dy) { const v = pm.view, c = pm.cz; if (!v) return; const [lat, lon] = worldToLL(v.cx - dx / v.s, v.cy - dy / v.s, v.zt); c.lat = pmClamp(lat, -85, 85); c.lon = lon; drawPmap(); }
 pmC.addEventListener('pointerdown', e => {
-  if (!pm.edit) { const hh = pmHit(...pmEvt(e)); if (hh) { pm.sel = hh.id; drawPmap(); } return; }
-  const [px, py] = pmEvt(e), hh = pmHit(px, py);
-  if (hh) { pm.sel = hh.id; pm.drag = { id: hh.id, moved: false, x: hh.x, y: hh.y }; pmC.setPointerCapture(e.pointerId); drawPmap(); return; }
-  if (pm.sel != null && !pmHoles().find(x => x.id === pm.sel && x.placed)) { const [mx, my] = pm.view.toM(px, py); pmPost(pm.sel, mx, my); pm.sel = null; }
+  const [px, py] = pmEvt(e); pm.ptrs.set(e.pointerId, [px, py]); pmC.setPointerCapture(e.pointerId);
+  if (pm.ptrs.size === 2) { const P = [...pm.ptrs.values()]; pm.pinch = { d: Math.hypot(P[0][0] - P[1][0], P[0][1] - P[1][1]), mx: (P[0][0] + P[1][0]) / 2, my: (P[0][1] + P[1][1]) / 2 }; pm.pan = null; pm.drag = null; return; }
+  const hh = pmHit(px, py);
+  if (hh) { pm.sel = hh.id; if (pm.placing === hh.id) pm.drag = { id: hh.id, moved: false, x: hh.x, y: hh.y }; drawPmap(); return; }
+  { const [cx, cy] = pm.view ? pm.view.toPx(0, 0) : [-1e9, 0]; if (Math.hypot(cx - px, cy - py) < 16 * (window.devicePixelRatio || 1) && pm.placing == null) { pm.sel = 'chalet'; drawPmap(); return; } }
+  pm.pan = { x: px, y: py, moved: false, t: Date.now() };
 });
 pmC.addEventListener('pointermove', e => {
-  if (!pm.drag) return; const [px, py] = pmEvt(e), [mx, my] = pm.view.toM(px, py);
-  pm.drag.x = mx; pm.drag.y = my; pm.drag.moved = true;
-  const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n) { n.px = mx; n.py = my; } drawPmap();
+  if (!pm.ptrs.has(e.pointerId)) return;
+  const [px, py] = pmEvt(e); pm.ptrs.set(e.pointerId, [px, py]);
+  if (pm.pinch && pm.ptrs.size >= 2) {
+    const P = [...pm.ptrs.values()], d = Math.hypot(P[0][0] - P[1][0], P[0][1] - P[1][1]), mx = (P[0][0] + P[1][0]) / 2, my = (P[0][1] + P[1][1]) / 2;
+    if (d > 0 && pm.pinch.d > 0) pmZoomAt(Math.log2(d / pm.pinch.d), mx, my);
+    pmPanBy(mx - pm.pinch.mx, my - pm.pinch.my); pm.pinch = { d, mx, my }; return;
+  }
+  if (pm.drag) { const [mx, my] = pm.view.toM(px, py); pm.drag.x = mx; pm.drag.y = my; pm.drag.moved = true; const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n) { n.px = mx; n.py = my; } drawPmap(); return; }
+  if (pm.pan) { const dx = px - pm.pan.x, dy = py - pm.pan.y; if (pm.pan.moved || Math.hypot(dx, dy) > 6 * (window.devicePixelRatio || 1)) { pm.pan.moved = true; pmPanBy(dx, dy); pm.pan.x = px; pm.pan.y = py; } }
 });
-pmC.addEventListener('pointerup', () => { if (!pm.drag) return; if (pm.drag.moved) pmPost(pm.drag.id, pm.drag.x, pm.drag.y); pm.drag = null; });
-$('pmEdit').addEventListener('click', () => { pm.edit = !pm.edit; pm.sel = null; $('pmEdit').setAttribute('aria-pressed', String(pm.edit)); $('pmEdit').classList.toggle('on', pm.edit); $('pmEdit').textContent = pm.edit ? 'Done' : 'Place holes'; drawPmap(); });
-$('pmRemove').addEventListener('click', () => { if (pm.sel != null) { pmPost(pm.sel, null); pm.sel = null; } });
-$('pmChips').addEventListener('click', e => { const b = e.target.closest('[data-pm]'); if (b) { pm.sel = pm.sel === +b.dataset.pm ? null : +b.dataset.pm; drawPmap(); } });
+function pmUp(e) {
+  const [px, py] = pm.ptrs.get(e.pointerId) || pmEvt(e); pm.ptrs.delete(e.pointerId);
+  if (pm.pinch) { if (pm.ptrs.size < 2) pm.pinch = null; pm.pan = null; return; }
+  if (pm.drag) { if (pm.drag.moved) { pmPost(pm.drag.id, pm.drag.x, pm.drag.y); pm.placing = null; } pm.drag = null; return; }
+  if (pm.pan) { const tap = !pm.pan.moved; pm.pan = null;
+    if (tap && pm.placing != null) { const [mx, my] = pm.view.toM(px, py); pmPost(pm.placing, mx, my); pm.placing = null; }
+    else if (tap && pm.sel != null) { pm.sel = null; drawPmap(); } }
+}
+pmC.addEventListener('pointerup', pmUp); pmC.addEventListener('pointercancel', pmUp);
+pmC.addEventListener('wheel', e => { e.preventDefault(); const [px, py] = pmEvt(e); pmZoomAt(e.deltaY < 0 ? 0.5 : -0.5, px, py); }, { passive: false });
+pmC.addEventListener('dblclick', e => { const [px, py] = pmEvt(e); pmZoomAt(1, px, py); });
+$('pmIn').addEventListener('click', () => { const v = pm.view; if (v) pmZoomAt(1, v.w / 2, v.h / 2); });
+$('pmOut').addEventListener('click', () => { const v = pm.view; if (v) pmZoomAt(-1, v.w / 2, v.h / 2); });
+$('pmHome').addEventListener('click', () => { pm.cz = null; drawPmap(); });
+function pmSetLayer(l) { pm.layer = l; try { localStorage.setItem('pmLayer', l); } catch (e) {} $('pmLay').querySelectorAll('[data-lay]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lay === l))); pm.net.offUntil = 0; drawPmap(); }
+$('pmLay').addEventListener('click', e => { const b = e.target.closest('[data-lay]'); if (b) pmSetLayer(b.dataset.lay); });
+pmSetLayer(pm.layer);
+window.addEventListener('online', () => { pm.net.offUntil = 0; pmRedraw(); });
+$('pmChips').addEventListener('click', e => { const b = e.target.closest('[data-pm]'); if (b) { pm.sel = pm.sel === +b.dataset.pm ? null : +b.dataset.pm; pm.placing = null; drawPmap(); } });
+$('pmDepth').addEventListener('click', () => { pm.depth = !pm.depth; $('pmDepth').setAttribute('aria-pressed', String(pm.depth)); try { localStorage.setItem('pmDepth', pm.depth ? '1' : '0'); } catch (e) {} drawPmap(); });
+$('pmDepth').setAttribute('aria-pressed', String(pm.depth));
+$('pmFull').addEventListener('click', () => { pm.full = !pm.full; $('pmapCard').classList.toggle('pmfull', pm.full); $('pmFull').setAttribute('aria-pressed', String(pm.full)); $('pmFull').textContent = pm.full ? '⤡' : '⤢'; document.body.style.overflow = pm.full ? 'hidden' : ''; drawPmap(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && pm.full) $('pmFull').click(); });
 new ResizeObserver(() => drawPmap()).observe(pmC);
+window.pmDbg = { pm, drawPmap, idbClear, idbCount };   // for tests / the browser console
+/* ---- "Save area": the tiles of the visible area (this zoom and one out) of the current layer, to the chalet store ---- */
+function pmTileBlob(l, z, x, y) {   // from the phone cache, else the internet (CORS); null when neither
+  const key = `${l}/${z}/${x}/${y}`;
+  return idbGet(key).then(b => b || (pmOnline() ? fetch(LAYERS[l].url(z, x, y), { mode: 'cors' }).then(r => r.ok ? r.blob() : null).then(b => { if (b) idbPut(key, b); return b; }).catch(() => null) : null));
+}
+function pmSaveArea() {
+  const v = pm.view; if (!v || pm.saving || !pmOrigin()) return;
+  const list = [], lays = pm.depth ? [pm.layer, 'dep'] : [pm.layer];
+  for (const l of lays) for (const z of [v.zt - 1, v.zt]) { if (z < 3) continue; const r = pmTileRange(v, z); for (let y = r.y0; y <= r.y1; y++) for (let x = r.x0; x <= r.x1; x++) list.push([l, z, x, y]); }
+  if (list.length > 240) { pm.saving = `Too much at once (${list.length} tiles): zoom in a bit.`; drawPmap(); setTimeout(() => { pm.saving = null; drawPmap(); }, 5000); return; }
+  let done = 0, kb = 0, failed = 0, stop = false;
+  const step = () => {
+    if (stop || done + failed >= list.length) )rawliteral"
+R"rawliteral({ pm.saving = stop ? `Chalet store full after ${done} tiles (${kb.toFixed(0)} KB). Settings → Map: clear old areas.` : `Saved ${done} tile${done > 1 ? 's' : ''} (${kb.toFixed(0)} KB)` + (failed ? `, ${failed} not available (no internet / CORS)` : '') + ' on the chalet.'; drawPmap(); setTimeout(() => { pm.saving = null; drawPmap(); }, 6000); mpInfo(); return; }
+    const [l, z, x, y] = list[done + failed];
+    pm.saving = `Saving area to the chalet… ${done + failed}/${list.length}`; drawPmap();
+    pmTileBlob(l, z, x, y).then(b => {
+      if (!b) { failed++; return; }
+      const fd = new FormData(); fd.append('tile', b, 't');
+      return fetch(chaletTileUrl(l, z, x, y), { method: 'POST', body: fd }).then(r => r.json()).then(j => { if (j && j.ok) { done++; kb += b.size / 1024; } else if (j && j.error === 'full') stop = true; else failed++; });
+    }).catch(() => { failed++; }).then(step);
+  };
+  step();
+}
+$('pmSave').addEventListener('click', pmSaveArea);
 
 let glScale = 'common', glUnitKey = '';
 try { glScale = localStorage.getItem('glScale') || 'common'; } catch (e) { /* private mode */ }
@@ -1216,7 +1480,7 @@ function drawGlances() {
   });
 }
 window.addEventListener('resize', drawGlances);
-$('ngrid').addEventListener('click', e => {
+function nodeActions(e) {
   const w = e.target.closest('[data-watch]');
   if (w) { if (SON()) SON().focus(+w.dataset.watch); showTab('sonar'); return; }
   const bt = e.target.closest('[data-bait]');
@@ -1244,7 +1508,8 @@ $('ngrid').addEventListener('click', e => {
   if (name === null) return;
   if (name.length > 15) { alert('15 characters max.'); return; }
   api('/api/node/name', { nodeId: id, name }).then(() => loadStatus()).catch(() => {});
-});
+}
+$('ngrid').addEventListener('click', nodeActions);
 
 /* ---------- Radio tab ---------- */
 const TM = { off: 0, rotate: 1, 'SF9/500': 2, 'SF8/500': 3, 'SF7/500': 4 };
@@ -1342,9 +1607,42 @@ function loadSettings() {
     $('fNear').setAttribute('aria-checked', String(!!d.nearBaitBeep));
     if (d.beamDeg) { $('fBeam').value = d.beamDeg; if (SON()) SON().setBeam(+d.beamDeg); }
     if (d.cmPerTurn !== undefined) $('fTurn').value = d.cmPerTurn;
+    $('fPin').placeholder = d.pinSet ? 'set (type a new one to change it)' : 'off';
   }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
   loadSim();
+  mpInfo();
 }
+/* ---------- D74 map pack + PIN ---------- */
+function mpInfo() {
+  tfetch('/api/tiles').then(r => r.json()).then(t => { idbCount().then(n => { $('tlInfo').textContent = `Chalet: ${t.count} tile${t.count === 1 ? '' : 's'} saved (${(t.bytes / 1024).toFixed(0)} KB), ${(t.free / 1024).toFixed(0)} KB free · this phone: ${n} tile${n === 1 ? '' : 's'} cached.`; }); }).catch(() => {});
+  const b = st && st.map_bytes || 0;
+  const mx = st && st.map_max || 0;
+  $('mpInfo').textContent = b ? `Pack on the chalet: ${(b / 1024).toFixed(0)} KB of ${(mx / 1024).toFixed(0)} KB` + (pm.pack ? ` · ${pm.pack.regions.length} region${pm.pack.regions.length > 1 ? 's' : ''}: ` + pm.pack.regions.map(r => `${r.name || 'unnamed'} (${r.lines.length} lines)`).join(', ') : '') : `No map pack on the chalet (room for ${(mx / 1024).toFixed(0)} KB).`;
+}
+$('mpUp').addEventListener('click', () => {
+  const f = $('mpFile').files[0]; if (!f) { $('mpInfo').textContent = 'Pick the pack file first (lake_prep.py writes it).'; return; }
+  const mx = st && st.map_max || 0;
+  if (mx && f.size > mx) { $('mpInfo').textContent = `Too big: ${(f.size / 1024).toFixed(0)} KB, the chalet has room for ${(mx / 1024).toFixed(0)} KB. Coarser --interval / --simplify, or fewer regions.`; return; }
+  const fd = new FormData(); fd.append('pack', f, 'pack.json');
+  $('mpInfo').textContent = `Sending ${(f.size / 1024).toFixed(0)} KB…`; $('mpUp').disabled = true;
+  const c = new AbortController(), t = setTimeout(() => c.abort(), 90000);
+  fetch('/api/map/pack', { method: 'POST', body: fd, signal: c.signal }).then(r => r.json()).then(j => { $('mpInfo').textContent = j.ok ? 'Stored.' : 'Refused: ' + (j.error || '?'); pm.packBytes = -1; loadStatus(); })
+    .catch(() => { $('mpInfo').textContent = 'Upload failed (Wi-Fi?).'; }).finally(() => { clearTimeout(t); $('mpUp').disabled = false; });
+});
+$('tlClear').addEventListener('click', () => { if (!confirm('Remove every saved map area from the chalet?')) return; api('/api/tiles/clear', {}).then(() => { pm.tiles.clear(); mpInfo(); }).catch(() => {}); });
+$('tlPhone').addEventListener('click', () => { idbClear().then(() => { pm.tiles.clear(); mpInfo(); drawPmap(); }); });
+$('mpClear').addEventListener('click', () => { if (!confirm('Remove the map pack from the chalet?')) return; api('/api/map/clear', {}).then(() => { pm.packBytes = -1; loadStatus(); }).catch(() => {}); });
+$('pinForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = $('fPin').value.trim();
+  if (v && !/^[0-9]{4,8}$/.test(v)) { $('pinMsg').textContent = '4 to 8 digits.'; return; }
+  api('/api/settings', { webPin: v }).then(j => {
+    if (j && j.error) { $('pinMsg').textContent = j.error; return; }
+    PIN.v = v || null; try { if (v) localStorage.setItem('chaletPin', v); else localStorage.removeItem('chaletPin'); } catch (x) {}
+    $('pinMsg').textContent = v ? 'PIN set.' : 'PIN off.'; $('fPin').value = ''; loadSettings();
+  }).catch(() => { $('pinMsg').textContent = 'Save failed.'; });
+  setTimeout(() => { $('pinMsg').textContent = ''; }, 4000);
+});
 ['fBuzzer', 'fReed', 'fNear'].forEach(id => $(id).addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); }));
 $('setForm').addEventListener('submit', e => {
   e.preventDefault();
@@ -1371,9 +1669,10 @@ function stRender(d) {
   if (d.chalet) {   // D73: the box itself
     if (!d.gps_built) h += info('GPS', 'not in this firmware (GPS_RX_PIN = -1)');
     else {
-      h += ok(d.gps_sentences > 0, 'GPS module talking (UART)', 'NO DATA: VCC / GND / TX wire, 9600 baud?');
+      if (!d.gps_sentences && d.gps_levels) h += info('Pin levels (last scan round)', `${d.gps_levels} <small>pull-down on: H = driven high = a powered module's TX, L = nothing there (or the module unpowered), ~ = toggling. A live module shows H or ~ on exactly one pin; all L = no power to the module, or its TX is not on a header pin</small>`);
+      h += ok(d.gps_sentences > 0, 'GPS module talking (UART)', d.gps_scanning ? `NO DATA YET: scanning the header pins for the module's TX (now GPIO ${d.gps_rx_pin} at ${d.gps_baud} baud, ~25 s per round, then 38400 and 115200) — run again in a minute` : `NO DATA on any pin at ${d.gps_baud} baud: module powered (meter: 3.3-5 V on its VCC, ~3.3 V idle on its TX)? TX wire on a header pin? The pin marked RX (GPIO44) works too`);
       if (d.gps_sentences > 0) {
-        h += info('GPS wiring', `module TX on GPIO ${d.gps_rx_pin}${d.gps_swapped ? ' <span class="badge warn">found by swapping the two UART pins: the config has them crossed</span>' : ''} · ${d.gps_sentences} sentences${d.gps_bad ? ', ' + d.gps_bad + ' bad checksums' : ''}${d.gps_data_age_s > 5 ? ' · last ' + d.gps_data_age_s + ' s ago' : ''}`);
+        h += info('GPS wiring', `module TX on GPIO ${d.gps_rx_pin}${d.gps_rx_pin === 44 ? ' (the header pin marked RX, shared with the USB serial: works, but unplug USB before trusting a fix)' : ''}${d.gps_swapped && d.gps_rx_pin !== 44 ? ' <span class="badge warn">found by the pin scan, not the configured pin: note it in config.h</span>' : ''} · ${d.gps_baud} baud · ${d.gps_sentences} sentences${d.gps_bad ? ', ' + d.gps_bad + ' bad checksums' : ''}${d.gps_data_age_s > 5 ? ' · last ' + d.gps_data_age_s + ' s ago' : ''}`);
         h += ok(d.gps_fix, 'GPS fix', d.gps_sats ? `NO FIX YET: ${d.gps_sats} satellites (needs sky, 1-15 min from cold)` : 'NO FIX YET: 0 satellites (antenna / sky view)');
         if (d.gps_fix) h += info('Position', `${d.gps_lat.toFixed(5)}, ${d.gps_lon.toFixed(5)} · ${d.gps_sats} sats · HDOP ${d.gps_hdop}`);
         h += info('Map origin', d.gps_origin ? 'set (OLED: Settings → Pin holes → Chalet here)' : 'not set: OLED Settings → Pin holes (GPS) → "Chalet here" with a fix');

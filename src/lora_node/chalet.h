@@ -181,6 +181,7 @@ struct DeviceSettings {
   bool hideWeak;              // v2 OLED: do not draw the weakest echoes
   bool nearBaitBeep;          // v2 (D43): short beep when a fish comes near a bait (off by default)
   uint8_t beamDeg;            // v2 (D52): transducer beam angle, degrees (full cone, -3 dB). Frank's 200 kHz unit: 14 ± 1
+  char webPin[9];             // D74: PIN the page must send on every change (4-8 digits); empty = off (default)
 };
 
 
@@ -357,9 +358,11 @@ void holeTripClear();                 // D64: serial HOLE CLEAR (= button press 
 uint16_t holeTurns();                 // D69: quarter turns of the own hole since armed / cleared
 void holeSelfTest(SelfTestResult& r, bool toSerial);   // D70: wiring check of the own hole
 // D73: GPS (chalet)
-struct GpsStatus { bool fix, swapped, origin_set; uint8_t sats, hh, mm; uint16_t hdop_x10; int32_t lat_e7, lon_e7, lat0_e7, lon0_e7; uint32_t sentences, bad, data_age_s; };
+struct GpsStatus { bool fix, swapped, scanning, origin_set; int8_t rx_pin; uint8_t sats, hh, mm; uint16_t hdop_x10; int32_t lat_e7, lon_e7, lat0_e7, lon0_e7; uint32_t sentences, bad, data_age_s, baud; const char* levels; };
 void gpsSetup();
 void gpsLoop();
+void gpsScanStart();            // listen on each free header pin in turn for the module's TX (serial GPS SCAN, wiring check)
+void gpsFeedSerialLine(const char* line);   // NMEA that came in on the USB serial (module TX on the RX header pin)
 bool gpsStatus(GpsStatus& s);   // false = no GPS in this build
 bool gpsSetOrigin();            // "Chalet here" = map (0, 0); false without a fix
 bool gpsPinHole(uint8_t hole);  // store the current fix as that hole's map position; false without fix / origin
@@ -461,6 +464,23 @@ int8_t armPendingFor(uint8_t hole);          // D68: -1 none, else the value bei
 void handleWebApiNodeArm();
 void handleWebApiNodeSelfTest();   // D70
 void handleWebApiSelfTest();       // D70
+// D74: offline map pack on LittleFS + optional write PIN (mappack.cpp)
+bool mapPackSetup();
+size_t mapPackBytes();
+size_t mapPackMax();               // bytes a pack may have (0 = no storage)
+bool mapPackClear();
+bool webPinOk();                   // sends 401 and returns false when a PIN is set and the request lacks it
+void handleWebApiMapPack();
+void handleWebApiMapPackUpload();
+void handleWebApiMapPackPost();
+void handleWebApiMapClear();
+size_t mapFree();                  // D75: bytes left for tiles / pack
+void handleWebApiTile();
+void handleWebApiTileUpload();
+void handleWebApiTilePost();
+void handleWebApiTiles();
+void handleWebApiTilesClear();
+void handleWebApiGpsPost();        // D76
 void baitLoad();
 void baitToSource(icemesh::sonar::SonarSource* src, uint8_t id);   // hub: this hole's bait depth into its fake sonar
 void baitSet(uint8_t hole, uint8_t v5);      // chalet: save + send (CMD_SET_BAIT) + demo
