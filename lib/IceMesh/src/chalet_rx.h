@@ -64,6 +64,9 @@ inline void consumeSections(uint8_t hub, const uint8_t* body, size_t len, uint16
       case SEC_SONAR:
         if (sink != nullptr && n >= 2) { sink->onSonarBlock(hub, v, n, frame); out.n_sonar++; }
         break;
+      case SEC_SELFTEST:   // D70
+        if (sink != nullptr && n >= SELFTEST_SECTION_LEN) sink->onSelfTest(hub, v[0], v + 1, frame);
+        break;
       case SEC_TEST:
         out.test_bytes = static_cast<uint16_t>(out.test_bytes + n);
         break;

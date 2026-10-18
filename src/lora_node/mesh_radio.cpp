@@ -68,7 +68,18 @@ static volatile bool g_cfg_reset_stats = false;
 static volatile uint8_t g_cfg_focus = 0;
 static volatile bool g_cfg_reset_all = false;
 static volatile bool g_cfg_sonar_sim = false;
-static sonar::SonarStore<16, 128>* g_sonar = nullptr;   // chalet only (~16 KB)
+// D70: the chalet keeps the last wiring-check result of each hole (SEC_SELFTEST), on top of the sonar store
+struct ChaletSink : public sonar::SonarStore<16, 128> {
+  struct R { uint8_t node; uint8_t r[12]; uint32_t at_ms; };
+  R st[16]; uint8_t st_n = 0;
+  void onSelfTest(uint8_t, uint8_t node, const uint8_t* r12, uint16_t) override {
+    R* p = nullptr;
+    for (uint8_t i = 0; i < st_n && p == nullptr; i++) if (st[i].node == node) p = &st[i];
+    if (p == nullptr) { if (st_n < 16) p = &st[st_n++]; else p = &st[0]; }
+    p->node = node; memcpy(p->r, r12, 12); p->at_ms = millis() ? millis() : 1;
+  }
+};
+static ChaletSink* g_sonar = nullptr;   // chalet only (~16 KB)
 static uint8_t g_cmd_seq = 0;
 static uint32_t g_silence_until_ms = 0;
 static uint8_t g_self = 0;
@@ -84,6 +95,8 @@ static const uint32_t BOOT_SCAN_US = 250000;    // chalet: per channel at boot (
 static const uint32_t HUB_HOP_MS = 2500;        // hub without beacon: next channel every 2.5 s...
 static const uint32_t HUB_HOP_QUIET_MS = 10000; // ...unless this network was heard in the last 10 s
 static const uint8_t CMD_BEACONS = 6;           // each beacon command is repeated in 6 beacons (SET_CHANNEL: target 5..0)
+static const uint8_t CMD_BEACONS_KNOB = 3;      // D68: sonar knobs (22 of them on every new hub) take 3: a hub out of a beacon
+                                                // or two still gets them, and the queue drains in a minute instead of two
 static const bool EB_LR = ESPNOW_LONG_RANGE_MODE;   // backbone rate follows the ice side (LR on hubs and tip-ups)
 
 static volatile uint8_t g_lora_ch = 0;          // network channel
@@ -105,7 +118,7 @@ static volatile uint16_t g_ch_moves = 0;
 static uint8_t g_ch_switch_after = 0xFF;        // chalet: retune at the end of this frame
 static volatile uint32_t g_eb_beacon_until_ms = 0;
 struct QueuedCmd { uint8_t cmd, target, value; };
-static QueuedCmd g_cmdq[16];                    // chalet, under lock
+static QueuedCmd g_cmdq[40];                    // chalet, under lock (D68: 22 knobs + bait depths + user commands)
 static uint8_t g_cmdq_n = 0;
 static uint8_t g_cmd_beacons_left = 0;
 // backbone
@@ -344,11 +357,36 @@ static void cmdQueue(uint8_t cmd, uint8_t target, uint8_t value) {   // under lo
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == CMD_SET_CHANNEL) { g_cmdq[i].value = value; return; }   // newest choice wins
   }
-  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT || cmd == CMD_SET_ARM) {   // same target: newest value wins
+  if (cmd == CMD_SET_SIM || cmd == CMD_SET_RELAY || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT || cmd == CMD_SET_ARM || cmd == CMD_SELFTEST) {   // same target: newest value wins
     for (uint8_t i = 0; i < g_cmdq_n; i++)
       if (g_cmdq[i].cmd == cmd && g_cmdq[i].target == target) { g_cmdq[i].value = value; return; }
   }
-  if (g_cmdq_n < sizeof(g_cmdq) / sizeof(g_cmdq[0])) { g_cmdq[g_cmdq_n].cmd = cmd; g_cmdq[g_cmdq_n].target = target; g_cmdq[g_cmdq_n].value = value; g_cmdq_n++; }
+  const uint8_t cap = sizeof(g_cmdq) / sizeof(g_cmdq[0]);
+  if (g_cmdq_n >= cap) return;
+  // D68: a command a person just gave (arm, bait) goes ahead of the knob resends; a knob being beaconed right now is
+  // pushed back behind it (with its beacons restarted) so the user command goes out in the next beacon.
+  const bool user = cmd == CMD_SET_ARM || cmd == CMD_SET_BAIT || cmd == CMD_SELFTEST;
+  uint8_t at = g_cmdq_n;
+  if (user) {
+    at = 0;
+    while (at < g_cmdq_n && (g_cmdq[at].cmd == CMD_SET_ARM || g_cmdq[at].cmd == CMD_SET_BAIT || g_cmdq[at].cmd == CMD_SELFTEST || g_cmdq[at].cmd == CMD_RESET_ALL || g_cmdq[at].cmd == CMD_SET_CHANNEL)) at++;
+    if (g_ch->cmd == CMD_SONAR_PARAM && g_cmd_beacons_left > 0 && g_cmdq_n + 1 < cap) {
+      for (uint8_t i = g_cmdq_n; i > at; i--) g_cmdq[i] = g_cmdq[i - 1];
+      g_cmdq[at].cmd = g_ch->cmd; g_cmdq[at].target = g_ch->cmd_target; g_cmdq[at].value = g_ch->cmd_value; g_cmdq_n++;
+      g_cmd_beacons_left = 0;   // chaletApplyConfig ends it and takes the head of the queue
+    }
+  }
+  for (uint8_t i = g_cmdq_n; i > at; i--) g_cmdq[i] = g_cmdq[i - 1];
+  g_cmdq[at].cmd = cmd; g_cmdq[at].target = target; g_cmdq[at].value = value; g_cmdq_n++;
+}
+
+// D68: is this command still on its way (queued or being beaconed)? For the page: "sent, waiting for the hole".
+bool meshCmdPending(uint8_t cmd, uint8_t target, uint8_t& value) {
+  if (!g_chalet || g_ch == nullptr) return false;
+  Lock l;
+  if (g_ch->cmd == cmd && g_ch->cmd_target == target && g_cmd_beacons_left > 0) { value = g_ch->cmd_value; return true; }
+  for (uint8_t i = 0; i < g_cmdq_n; i++) if (g_cmdq[i].cmd == cmd && g_cmdq[i].target == target) { value = g_cmdq[i].value; return true; }
+  return false;
 }
 
 static void chaletApplyConfig() {   // under lock
@@ -367,7 +405,7 @@ static void chaletApplyConfig() {   // under lock
     g_cmd_seq++;
     if (g_cmd_seq == 0) g_cmd_seq = 1;   // a hub starts with last seq 0
     g_ch->cmd = q.cmd; g_ch->cmd_seq = g_cmd_seq; g_ch->cmd_target = q.target; g_ch->cmd_value = q.value;
-    g_cmd_beacons_left = CMD_BEACONS;
+    g_cmd_beacons_left = q.cmd == CMD_SONAR_PARAM ? CMD_BEACONS_KNOB : CMD_BEACONS;   // D68
   }
   if (g_ch->cmd == CMD_SET_CHANNEL) g_ch->cmd_target = static_cast<uint8_t>(g_cmd_beacons_left - 1);   // beacons left before the switch
   const bool silenced = g_silence_state && static_cast<int32_t>(g_silence_until_ms - millis()) > 0;
@@ -552,7 +590,7 @@ static void hubBeaconPost(uint8_t cmd) {   // under lock: events for loop
     g_rtc_cmd_magic = 0xC0DE5EED; g_rtc_cmd_seq = g_hub->last_cmd_seq;
   }
   if (cmd == CMD_SET_CHANNEL) g_pending_since_ms = millis();
-  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT || cmd == CMD_SET_ARM) && g_devq_n < 4) {
+  if ((cmd == CMD_SET_RELAY || cmd == CMD_SET_SIM || cmd == CMD_SONAR_PARAM || cmd == CMD_SET_BAIT || cmd == CMD_SET_ARM || cmd == CMD_SELFTEST) && g_devq_n < 4) {
     g_devq[g_devq_n].cmd = cmd; g_devq[g_devq_n].target = g_hub->last_cmd_target; g_devq[g_devq_n].value = g_hub->last_cmd_value;
     g_devq_n = static_cast<uint8_t>(g_devq_n + 1);
   }
@@ -785,7 +823,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
   g_nodeq = xQueueCreate(32, sizeof(MeshNodeUpdate));
   if (chalet) {
     g_ch = new ChaletRole<10, 48>();
-    g_sonar = new sonar::SonarStore<16, 128>();
+    g_sonar = new ChaletSink();
     g_ch->sonar_sink = g_sonar;
     PlannerConfig& c = g_ch->planner.cfg;
     c.network_id = network_id; c.self_id = self_id; c.frame_ms = 1000;
@@ -804,7 +842,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
   return g_radio_ok;
 }
 
-void meshHubObserveNode(uint8_t node, uint8_t state, uint8_t turns, uint8_t flags, uint8_t battery_pct) {
+void meshHubObserveNode(uint8_t node, uint8_t state, uint16_t turns, uint8_t flags, uint8_t battery_pct) {
   if (g_hub == nullptr) return;
   Lock l;
   if (g_hub->table.observe(node, state, turns, flags, battery_pct, millis())) g_eb_kick = true;
@@ -916,7 +954,7 @@ void meshSetFocusNode(uint8_t node) { g_cfg_focus = node; }
 void meshSetStartChannel(uint8_t ch) { if (ch < LORA_CHANNELS) g_lora_ch = ch; }
 
 void meshSetTransport(uint8_t tr) {
-  if (tr > TR_ESPNOW) return;
+  if (tr > TR_PREFER_EB) return;
   if (tr != g_cfg_transport) g_eb_beacon_until_ms = millis() + 120000UL;   // hubs on the backbone hear the change
   g_cfg_transport = tr;
 }
@@ -978,6 +1016,27 @@ void meshSetBait(uint8_t hole, uint8_t v5) {   // chalet: bait depth of one hole
   if (!g_chalet || g_ch == nullptr) return;
   Lock l;
   cmdQueue(CMD_SET_BAIT, hole, v5);
+}
+
+// D70: wiring check
+void meshSetSelfTest(uint8_t hole) {   // chalet: ask one hole (beacon command, user priority)
+  if (!g_chalet || g_ch == nullptr || hole == 0) return;
+  Lock l;
+  if (g_sonar != nullptr)   // the old result goes: the page shows "waiting" until the fresh one lands
+    for (uint8_t i = 0; i < g_sonar->st_n; i++) if (g_sonar->st[i].node == hole) { g_sonar->st[i] = g_sonar->st[--g_sonar->st_n]; break; }
+  cmdQueue(CMD_SELFTEST, hole, 0);
+}
+void meshHubSelfTestReport(uint8_t node, const uint8_t* r12) {   // hub: result in the next 3 packets
+  if (g_hub == nullptr) return;
+  uint8_t b[SELFTEST_SECTION_LEN]; b[0] = node; memcpy(b + 1, r12, 12);
+  Lock l;
+  g_hub->setSelfTest(b);
+}
+bool meshSelfTestResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms) {   // chalet: last result of a hole
+  if (g_sonar == nullptr) return false;
+  Lock l;
+  for (uint8_t i = 0; i < g_sonar->st_n; i++) if (g_sonar->st[i].node == node) { memcpy(out12, g_sonar->st[i].r, 12); age_ms = millis() - g_sonar->st[i].at_ms; return true; }
+  return false;
 }
 
 void meshSetArm(uint8_t hole, bool armed) {   // chalet: arm / disarm one hole (255 = all), D61
@@ -1086,9 +1145,9 @@ String meshRadioJson() {
   s += ",\"test_mode\":\""; s += meshTestModeName(meshTestMode()); s += "\"";
   s += ",\"adaptive\":"; s += g_cfg_adaptive ? "true" : "false";
   // network config + backbone
-  static const char* const TR_NAMES[] = {"auto", "lora", "espnow"};
+  static const char* const TR_NAMES[] = {"auto", "lora", "espnow", "ebfirst"};
   const uint8_t tr = meshTransport();
-  s += ",\"transport\":\""; s += TR_NAMES[tr <= TR_ESPNOW ? tr : 0]; s += "\"";
+  s += ",\"transport\":\""; s += TR_NAMES[tr <= TR_PREFER_EB ? tr : 0]; s += "\"";
   {
     uint32_t arm_s;
     if (g_chalet) arm_s = chaletArmInS();
@@ -1247,7 +1306,7 @@ void meshPrintStatus(Print& out) {
     }
   }
   out.printf("[mesh] late TX skipped: %lu\n", (unsigned long)g_tx_late_skips);
-  static const char* const TR_NAMES[] = {"Auto", "LoRa only", "ESP-NOW only"};
+  static const char* const TR_NAMES[] = {"Auto", "LoRa only", "ESP-NOW only", "ESP-NOW first"};
   const uint8_t tr = meshTransport();
   {
     uint32_t arm_s;
@@ -1257,7 +1316,7 @@ void meshPrintStatus(Print& out) {
     else out.println(F("[net] running: automatic fallbacks armed"));
   }
   out.printf("[net] transport %s | LoRa ch %u (%.1f MHz)%s | backbone rx %lu tx %lu relayed %lu dup %lu | relay %s\n",
-             TR_NAMES[tr <= TR_ESPNOW ? tr : 0], g_lora_ch, loraChannelMHz(g_lora_ch),
+             TR_NAMES[tr <= TR_PREFER_EB ? tr : 0], g_lora_ch, loraChannelMHz(g_lora_ch),
              g_chalet ? (g_cfg_channel == MESH_CH_AUTO ? " auto" : " fixed") : "",
              (unsigned long)g_eb_rx, (unsigned long)g_eb_tx, (unsigned long)g_eb_relayed, (unsigned long)g_eb_dup,
              g_eb_relay ? "ON" : "off");

@@ -62,6 +62,7 @@ struct ScreenModel {
   // hub only
   bool master_heard; int8_t beacon_rssi; bool via_echo, on_backup;
   bool hotspot; uint32_t hotspot_min;
+  bool own_disarmed;         // D68: hub / LoRa tip-up: its own hole is disarmed (inverse bar on the home page)
   // connect
   char ssid[28]; char pass[20]; char url[32]; bool sta;   // sta = on the cabin Wi-Fi
   char sta_ssid[33]; char sta_state[20];                  // cabin Wi-Fi name ("" = none set), "not found", ...

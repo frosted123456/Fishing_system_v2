@@ -185,6 +185,7 @@ details.adv{margin-top:6px}details.adv>summary{cursor:pointer;color:var(--muted)
 table.rt{border-collapse:collapse;width:100%;font-size:.92rem;min-width:720px}
 table.rt th,table.rt td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right;white-space:nowrap}
 table.rt th:first-child,table.rt td:first-child{text-align:left}
+table.tbl{border-collapse:collapse;width:100%;font-size:.92rem}table.tbl th,table.tbl td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top}
 table.rt th{color:var(--muted);font-weight:600}
 .form{display:grid;gap:10px}
 .form label.f{display:grid;gap:4px;font-weight:600}
@@ -370,6 +371,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <form class="form" id="setForm">
         <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
         <span class="tog"><span id="lblNb">Short beep when a fish comes near a bait (sonar)</span><button type="button" class="switch" role="switch" id="fNear" aria-labelledby="lblNb" aria-checked="false"></button></span>
+        <label class="f">Line per spool turn (cm)<input type="number" id="fTurn" min="0" max="60" value="12"><small>For the "line out" estimate next to the turn count on the Holes tab. A 5 cm spool pays out 10-15 cm per turn when full, less as the bait goes deeper: 12 is a fair average. 0 = show turns only.</small></label>
         <label class="f">Sonar beam angle (°)<input type="number" id="fBeam" min="5" max="60" value="14"><small>Full cone angle from the transducer's spec sheet (typical 10-25° at 200 kHz). Sets the beam-width readouts on the Sonar tab.</small></label>
         <label class="f">FISH ON alarm<select id="fAlarm"><option value="0">Until silenced</option><option value="1">1 min after the trip</option><option value="5">5 min after the trip</option><option value="15">15 min after the trip</option><option value="30">30 min after the trip</option></select><small>Screen, buzzer and phone keep ringing after the flag is reset, until silenced (or this time). A new trip always rings again.</small></label>
         <label class="f">Alert hold time (s)<input type="number" id="fHold" min="5" max="300"><small>Minimum time an alert stays on (5-300)</small></label>
@@ -379,12 +381,18 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       </form>
     </section>
     <section class="card">
+      <h2>Wiring check</h2>
+      <p class="sm" style="margin:0 0 6px">Asks a hole to test itself: sensor pin, arming button, battery, sonar shield (SPI, VDRV, a test ping) and radio. The result comes back over the mesh: a hub answers in a few seconds, a sleeping tip-up at its next heartbeat (up to 1 min).</p>
+      <div class="acts" style="margin:0 0 6px"><select id="stHole"></select> <button class="btn small primary" type="button" id="stRun">Run</button> <span class="msg" id="stMsg"></span></div>
+      <div id="stOut"></div>
+    </section>
+    <section class="card">
       <h2>Network</h2>
       <p id="nStatus" style="margin:0 0 4px;font-weight:600"></p>
       <p class="hint" id="nStatus2" style="margin:0"></p>
       <details class="adv" id="nAdv"><summary>Advanced (normally nothing to change)</summary>
       <div class="form">
-        <div><span class="hint">Hub ↔ chalet link</span><br><span class="seg" role="group" aria-label="Transport" id="nTr"><button type="button" data-tr="0" aria-pressed="true">Auto</button><button type="button" data-tr="1" aria-pressed="false">LoRa</button><button type="button" data-tr="2" aria-pressed="false">ESP-NOW</button></span>
+        <div><span class="hint">Hub ↔ chalet link</span><br><span class="seg" role="group" aria-label="Transport" id="nTr"><button type="button" data-tr="0" aria-pressed="true">Auto</button><button type="button" data-tr="1" aria-pressed="false">LoRa</button><button type="button" data-tr="2" aria-pressed="false">ESP-NOW</button><button type="button" data-tr="3" aria-pressed="false">ESP-NOW first</button></span>
           <p class="hint" id="nTrHint" style="margin:6px 0 0"></p></div>
         <label class="f">LoRa channel<select id="nCh"><option value="auto">Auto (moves when busy)</option><option value="1">1 · 915.0 MHz</option><option value="2">2 · 904.0 MHz</option><option value="3">3 · 907.0 MHz</option><option value="4">4 · 910.0 MHz</option><option value="5">5 · 913.0 MHz</option><option value="6">6 · 918.0 MHz</option><option value="7">7 · 921.0 MHz</option><option value="8">8 · 924.0 MHz</option></select><small id="nChInfo"></small></label>
         <div><span class="hint">Activity heard by the chalet per channel (other LoRa users, %)</span><div class="busy" id="nBusy"></div></div>
@@ -949,8 +957,23 @@ document.addEventListener('pointerdown', () => { if (soundOn) { audio(); setTime
 /* ---------- Status + alerts (every tab) ---------- */
 const fmtUp = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; };
 const nodeName = n => n.name || ('Hole ' + n.id);
+// D68: arm / disarm feedback. The hole confirms with its next report (hub's own hole: 1-2 s; a sleeping WROOM
+// tip-up: at its next heartbeat, up to 60 s), so the row keeps saying "sent" until the chalet shows the new state
+// or 90 s pass. arm_pending in the status = the command is still being beaconed.
+const armPending = {};
+function armButton(n) {
+  const p = armPending[n.id];
+  if (p && (Date.now() - p.at > 90000 || n.disarmed === !p.want)) delete armPending[n.id];
+  const q = armPending[n.id];
+  if (q) {
+    const beaconing = n.arm_pending != null;
+    const txt = (q.want ? 'Arm' : 'Disarm') + (beaconing ? ': sending…' : ': sent, waiting for the hole…');
+    return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" disabled title="the hole reports the new state with its next message (tip-up asleep: up to 1 min)">${txt}</button>`;
+  }
+  return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="D61: same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>`;
+}
 function loadStatus() {
-  return api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') renderNetwork(); }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+  return api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') { renderNetwork(); stFillHoles(); } }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
 }
 function onStatus() {
   const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
@@ -1002,6 +1025,8 @@ function renderNodes() {
     const badge = (n.sim ? '<span class="badge sim">SIM</span>' : '') + (n.disarmed ? '<span class="badge" title="the button on the hole or this page disarmed it: spool movement is ignored">DISARMED</span>' : '') + state;
     const via = n.via_lora ? 'LoRa' : (n.via_espnow ? 'ESP-NOW' : '');
     const seen = n.last_seen_sec == null ? '' : (n.last_seen_sec < 60 ? n.last_seen_sec + ' s ago' : Math.round(n.last_seen_sec / 60) + ' min ago');
+    const q = n.turns || 0, cmt = st.cm_per_turn || 0;   // D69: quarter turns since armed / cleared
+    const run = q ? `<span class="badge${n.fish ? ' al' : ''}" title="spool turns since the hole was armed or its trip cleared${cmt ? ' · ≈ ' + cmt + ' cm per turn (Settings)' : ''}">${(q / 4).toFixed(q % 4 ? 2 : 0)} turn${q > 4 ? 's' : ''}${cmt ? ' ≈ ' + (q / 4 * cmt / 100).toFixed(1) + ' m out' : ''}</span>` : '';
     const meta = ['#' + n.id, via, seen].filter(Boolean).join(' · ');
     // sonar flags as chips: only facts the hole reported (bsnr 0 = not reported yet)
     const bs = s ? (s.bsnr || 0) : 0;
@@ -1014,11 +1039,11 @@ function renderNodes() {
       (chips ? `<div class="flags">${chips}</div>` : '') : '';
     const acts = `<div class="acts">` + ((s || g) ? `<button class="btn small primary" type="button" data-watch="${n.id}">Watch</button>` +
       `<button class="btn small" type="button" data-bait="${n.id}">${n.bait ? 'Bait ' + fmt(n.bait / 100) : 'Set bait'}</button>` : '') +
-      `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="D61: same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>` +
+      armButton(n) +
       `<button class="btn small" type="button" data-rename="${n.id}">Rename</button></div>`;
     h += `<div class="node${n.fish && !off ? ' fish' : ''}${off ? ' off' : ''}${low ? ' low' : ''}">` +
       `<div class="hd"><span class="nm">${esc(nodeName(n))}</span><span class="bd">${badge}</span></div>` +
-      `<div class="sm">${meta}</div>` +
+      `<div class="sm">${meta}${run ? ' ' + run : ''}</div>` +
       `<div class="bat"><span class="bar"><i style="width:${pct}%"></i></span>${pct}%</div>` +
       sonarPart + acts + `</div>`;
   });
@@ -1201,8 +1226,10 @@ $('ngrid').addEventListener('click', e => {
   const ab = e.target.closest('[data-arm]');
   if (ab) {   // v2 (D61): arm / disarm this hole (the hole confirms with its next report)
     const id = +ab.dataset.arm, armed = ab.dataset.armed !== '1';
+    if (armPending[id]) return;   // D68: one click is enough; the row says "sent" until the hole answers
+    armPending[id] = { want: armed, at: Date.now() };
     ab.disabled = true; ab.textContent = armed ? 'Arming…' : 'Disarming…';
-    api('/api/node/arm', { nodeId: id, armed }).then(() => setTimeout(loadStatus, 1500)).catch(() => loadStatus());
+    api('/api/node/arm', { nodeId: id, armed }).then(() => setTimeout(loadStatus, 1200)).catch(() => { delete armPending[id]; loadStatus(); });
     return;
   }
   const r = e.target.closest('[data-rename]'); if (!r) return;
@@ -1243,17 +1270,18 @@ function renderRadio() {
   $('lkTable').innerHTML = k;
   renderNetwork();
 }
-const TRL = { auto: 'Auto', lora: 'LoRa only', espnow: 'ESP-NOW only' };
+const TRL = { auto: 'Auto', lora: 'LoRa only', espnow: 'ESP-NOW only', ebfirst: 'ESP-NOW first' };
 const ago = s => s === undefined || s === null || s < 0 ? '–' : (s < 60 ? s + ' s' : Math.round(s / 60) + ' min') + ' ago';
 $('rTest').addEventListener('change', e => postRadio({ test: +e.target.value }));
 $('rAdapt').addEventListener('click', () => postRadio({ adaptive: !(radio && radio.adaptive) }));
 $('rReset').addEventListener('click', () => postRadio({ resetStats: true }));
 
 /* ---------- Settings → Network ---------- */
-const TRN = { auto: 0, lora: 1, espnow: 2 };
+const TRN = { auto: 0, lora: 1, espnow: 2, ebfirst: 3 };
 const TR_HINT = ['LoRa first. A hub that loses the LoRa beacon for 10 s also sends over ESP-NOW (through relays) until LoRa is back.',
   'LoRa only. Safety net: a hub without beacon for 60 s still tries ESP-NOW.',
-  'ESP-NOW only, for when LoRa is too busy. Hubs out of Wi-Fi reach need relays. Safety net: a hub without ESP-NOW beacon for 60 s tries LoRa again.'];
+  'ESP-NOW only, for when LoRa is too busy. Hubs out of Wi-Fi reach need relays. Safety net: a hub without ESP-NOW beacon for 60 s tries LoRa again.',
+  'Each hub decides by itself: ESP-NOW alone while it hears the chalet on it (5 beacons in a row, and 30 s after a drop so it does not flap at the edge of range), LoRa alone 5 s after the ESP-NOW beacons stop. Near the chalet = more sonar data and no LoRa airtime; far = LoRa as in Auto. For tests or an intermittent link, pick LoRa to force it.'];
 function renderNetwork() {
   const d = radio; if (!d || !$('nTr')) return;
   const tr = TRN[d.transport] || 0;
@@ -1263,7 +1291,7 @@ function renderNetwork() {
     $('nStatus').textContent = 'Setup phase: everything stays in basic mode';
     $('nStatus2').textContent = `Switch the holes on in any order. The automatic fallbacks (channel change, ESP-NOW backup) arm once the network has run complete for 5 min — in about ${Math.ceil((d.arm_in_s || 0) / 60)} min.`;
   } else {
-    $('nStatus').textContent = viaEb.length ? `Running · ${viaEb.join(', ')} on ESP-NOW backup` : 'Running · all hubs on LoRa';
+    $('nStatus').textContent = viaEb.length ? `Running · ${viaEb.join(', ')} on ESP-NOW${tr === 3 ? '' : ' backup'}` : 'Running · all hubs on LoRa';
     $('nStatus2').textContent = `LoRa channel ${d.channel + 1} (${f1(d.channel_mhz, 1)} MHz${d.channel_setting === 'auto' ? ', automatic' : ', fixed'})` +
       (d.channel_moves ? ` · moved ${d.channel_moves}× because of other LoRa users` : '') + ` · link ${TRL[d.transport] || 'Auto'}`;
   }
@@ -1307,6 +1335,7 @@ function loadSettings() {
     if (d.alarmHoldMin !== undefined) $('fAlarm').value = String(d.alarmHoldMin);
     $('fNear').setAttribute('aria-checked', String(!!d.nearBaitBeep));
     if (d.beamDeg) { $('fBeam').value = d.beamDeg; if (SON()) SON().setBeam(+d.beamDeg); }
+    if (d.cmPerTurn !== undefined) $('fTurn').value = d.cmPerTurn;
   }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
   loadSim();
 }
@@ -1316,9 +1345,64 @@ $('setForm').addEventListener('submit', e => {
   const body = { buzzerEnabled: $('fBuzzer').getAttribute('aria-checked') === 'true', alertHoldSec: parseInt($('fHold').value, 10) || 30,
     alarmHoldMin: parseInt($('fAlarm').value, 10) || 0, nearBaitBeep: $('fNear').getAttribute('aria-checked') === 'true',
     beamDeg: Math.min(60, Math.max(5, parseInt($('fBeam').value, 10) || 14)),
+    cmPerTurn: Math.min(60, Math.max(0, parseInt($('fTurn').value, 10) || 0)),
     heartbeatSec: parseInt($('fHeart').value, 10) || 60, reedActiveHigh: $('fReed').getAttribute('aria-checked') === 'true' };
   api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
   setTimeout(() => { $('setMsg').textContent = ''; }, 4000);
+});
+/* ---------- D70 wiring check ---------- */
+let stWatch = null, stRun = 0;
+function stFillHoles() {
+  const sel = $('stHole'), cur = sel.value, nodes = (st.nodes || []).filter(n => n.id > 0 && n.id < 128);
+  sel.innerHTML = nodes.map(n => `<option value="${n.id}">${esc(nodeName(n))} (#${n.id})</option>`).join('') || '<option value="">no hole heard yet</option>';
+  if (cur) sel.value = cur;
+}
+function stRender(d) {
+  const ok = (c, t, bad) => `<tr><td>${t}</td><td>${c ? '<span class="badge on">OK</span>' : '<span class="badge al">' + (bad || 'CHECK') + '</span>'}</td></tr>`;
+  const info = (t, v) => `<tr><td>${t}</td><td>${v}</td></tr>`;
+  let h = '<table class="tbl"><tr><th>Check</th><th>Result</th></tr>';
+  h += info('Sensor pin', `level ${d.sensor_level ? 1 : 0}, ${d.flips} edge${d.flips === 1 ? '' : 's'} since boot (${d.sensor_hall ? 'Hall latch' : 'reed'})`);
+  h += ok(d.sensor_flips, 'Sensor seen moving', 'NO EDGE YET');
+  if (d.btn_none) h += info('Button', 'none on this head');
+  else { h += info('Button pin', `${d.btn_released ? 'released' : 'PRESSED / stuck low'}, ${d.presses} press${d.presses === 1 ? '' : 'es'} since boot`); h += ok(d.btn_released && d.btn_pressed, 'Button works', d.btn_released ? 'NOT PRESSED YET' : 'STUCK LOW'); }
+  const bv = d.battery_mv / 1000;
+  h += ok(d.battery_mv > 3400 && d.battery_mv < 5600, 'Battery', d.battery_mv ? bv.toFixed(2) + ' V' : 'NO READING') + (d.battery_mv ? info('', bv.toFixed(2) + ' V') : '');
+  if (!d.shield_built) h += info('Sonar shield', 'not in this firmware (no SONAR_REAL)');
+  else {
+    h += ok(d.spi_ok, 'Shield answers on SPI', 'NO ANSWER: 3.3 V, GND, SCLK/MISO/MOSI/NCS');
+    if (d.pins_swapped) h += info('MISO / MOSI', '<span class="badge warn">CROSSED</span> works for now, swap the two wires');
+    if (d.spi_ok) {
+      h += ok(d.vdrv_ready, 'VDRV (21.5 V side)', 'NOT READY: MT3608 / J4 / 1N4001');
+      h += ok(!d.ee_fault, 'Chip EEPROM', 'CRC FAULT');
+      if (!d.pinged) h += info('Test ping', '<span class="badge warn">DID NOT RUN</span> (driver not started: shield found after boot? reboot the hole and run again)');
+      else {
+        h += ok(!d.pulse_fault && !d.drv_fault, 'Burst driver', d.pulse_fault ? 'PULSE COUNT FAULT (IO2?)' : 'DRIVER FAULT');
+        h += ok(d.leakage, 'Burst reaches the receiver (time zero)', 'NO LEAKAGE SEEN');
+        h += info('Transducer (heuristic)', d.ring_bins >= 8 ? `likely connected: ring-down ${d.ring_bins} bins` : `likely NOT connected: ring-down ${d.ring_bins} bins`);
+        h += info('ADC', `raw max ${d.raw_max}${d.raw_max >= 4080 ? ' (CLIPPED)' : ''}, noise floor code ${d.noise_code}`);
+      }
+    }
+  }
+  h += info('Radio', d.rssi ? `${d.rssi} dBm beacon at the hub` : 'tip-up: the hub reports its side on the Radio tab');
+  h += info('Result age', `${d.age_s} s`);
+  return h + '</table>';
+}
+function stPoll(id, t0, run) {   // the chalet drops the old result when it sends the request: have:true = the fresh one
+  api('/api/selftest?id=' + id).then(d => {
+    if (run !== stRun) return;   // a newer Run took over
+    if (d.have) { $('stOut').innerHTML = stRender(d); $('stMsg').textContent = ''; stWatch = null; $('stRun').disabled = false; return; }
+    if (Date.now() - t0 > 95000) { $('stMsg').textContent = 'No answer in 90 s: hole asleep, out of reach, or on old firmware.'; stWatch = null; $('stRun').disabled = false; return; }
+    $('stMsg').textContent = `sent, waiting for the hole… ${Math.round((Date.now() - t0) / 1000)} s`;
+    stWatch = setTimeout(() => stPoll(id, t0, run), 2000);
+  }).catch(() => { if (run === stRun) stWatch = setTimeout(() => stPoll(id, t0, run), 3000); });
+}
+$('stRun').addEventListener('click', () => {
+  const id = +$('stHole').value; if (!id) return;
+  if (stWatch) clearTimeout(stWatch);
+  const run = ++stRun;
+  $('stOut').innerHTML = ''; $('stMsg').textContent = 'sending…'; $('stRun').disabled = true;
+  const t0 = Date.now();
+  api('/api/node/selftest', { nodeId: id }).then(() => stPoll(id, t0, run)).catch(() => { $('stMsg').textContent = 'Chalet not reachable.'; $('stRun').disabled = false; });
 });
 /* ---------- Test & simulation ---------- */
 let sim = null;

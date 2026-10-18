@@ -44,7 +44,7 @@ enum BeaconFlags : uint8_t { BF_TEST = 0x01, BF_ADAPTIVE = 0x02, BF_SILENCED = 0
 //   CMD_SET_ARM       target = hole ID (255 = every hole), value = 1 armed / 0 disarmed (D61; the hole's button can
 //                     change it again: last action wins, the LINE flag LF_DISARMED reports what the hole runs with)
 enum BeaconCmd : uint8_t { CMD_NONE = 0, CMD_RESET_ALL = 1, CMD_SET_CHANNEL = 2, CMD_SET_RELAY = 3, CMD_SET_SIM = 4,
-                           CMD_SONAR_PARAM = 5, CMD_SET_BAIT = 6, CMD_SET_ARM = 7 };
+                           CMD_SONAR_PARAM = 5, CMD_SET_BAIT = 6, CMD_SET_ARM = 7, CMD_SELFTEST = 8 };   // D70: target = hole, value unused
 // Simulation of one hole: bit0 fake sonar, bit1 fake Hall-sensor trips, bits 2-7 trips per hour (0 = 6)
 enum : uint8_t { SIM_SONAR = 0x01, SIM_HALL = 0x02 };
 inline uint8_t simValue(bool sonar, bool hall, uint8_t trips_per_hour) {
@@ -58,11 +58,11 @@ enum : uint8_t { LF_LOWBAT = 0x01, LF_SIM = 0x02, LF_DISARMED = 0x04 };
 
 // Network configuration byte, in every beacon (LoRa and ESP-NOW backbone):
 //   bits 0-1 transport (TR_*), bit 2 ESP-NOW long-range rate, bits 4-7 current LoRa channel index
-enum Transport : uint8_t { TR_AUTO = 0, TR_LORA = 1, TR_ESPNOW = 2 };
+enum Transport : uint8_t { TR_AUTO = 0, TR_LORA = 1, TR_ESPNOW = 2, TR_PREFER_EB = 3 };   // D71: ESP-NOW while the chalet is heard on it, LoRa otherwise
 inline uint8_t makeNetCfg(uint8_t transport, bool lr, uint8_t channel) {
   return static_cast<uint8_t>((transport & 3u) | (lr ? 4u : 0u) | ((channel & 15u) << 4));
 }
-inline uint8_t netTransport(uint8_t c) { const uint8_t t = static_cast<uint8_t>(c & 3u); return t > static_cast<uint8_t>(TR_ESPNOW) ? static_cast<uint8_t>(TR_AUTO) : t; }
+inline uint8_t netTransport(uint8_t c) { return static_cast<uint8_t>(c & 3u); }   // 2 bits, all four values used (D71)
 inline bool netLr(uint8_t c) { return (c & 4u) != 0; }
 inline uint8_t netChannel(uint8_t c) { return static_cast<uint8_t>(c >> 4); }
 enum TestMode : uint8_t { TEST_OFF = 0, TEST_ROTATE = 1, TEST_FIX_SF9 = 2, TEST_FIX_SF8 = 3, TEST_FIX_SF7 = 4, TEST_MODE_COUNT = 5 };
@@ -79,7 +79,10 @@ enum SectionType : uint8_t {
   SEC_RELAY = 5,     // a remote hub's packet body, re-packed by its relay hub
   SEC_TEST = 6,      // radio test filler
   SEC_SONAR = 7,     // one sonar block (sonar_codec.h) per section, never truncated
+  SEC_SELFTEST = 8,  // D70: [node] + 12 B wiring-check result (messages.h SelfTestResult), repeated 3 frames
 };
+static const uint8_t SELFTEST_SECTION_LEN = 13;   // D70: [node] + SelfTestResult (12 B)
+
 
 enum LineState : uint8_t { LS_IDLE = 0, LS_TRIPPED = 1, LS_RUNNING = 2, LS_FAULT = 3, LS_OFFLINE = 4 };
 enum RecordFlags : uint8_t { RF_LOWBAT = 0x01 };
@@ -165,22 +168,26 @@ inline bool decodeBeacon(const uint8_t* b, size_t len, uint8_t net, Beacon& bc, 
   return true;
 }
 
-// ---- line-state record (3 B) ----------------------------------------------------------
-struct LineRecord { uint8_t node; uint8_t state; uint8_t seq; bool pending; uint8_t turns; uint8_t flags; };
-static const uint8_t LINE_RECORD_LEN = 3;
+// ---- line-state record (4 B) ----------------------------------------------------------
+// D69: `turns` = quarter turns of the spool since the hole was armed / its trip cleared (13 bits, 0..8191 =
+// 2047 turns; saturates). Was a 5-bit field nobody filled (3 B record).
+struct LineRecord { uint8_t node; uint8_t state; uint8_t seq; bool pending; uint16_t turns; uint8_t flags; };
+static const uint8_t LINE_RECORD_LEN = 4;
+static const uint16_t LINE_TURNS_MAX = 8191;
 
 inline void encodeLine(const LineRecord& r, uint8_t* b) {
   b[0] = r.node;
   b[1] = static_cast<uint8_t>(((r.state & 0x07) << 5) | ((r.seq & 0x0F) << 1) | (r.pending ? 1 : 0));
-  const uint8_t turns = r.turns > 31 ? 31 : r.turns;
-  b[2] = static_cast<uint8_t>((turns << 3) | (r.flags & 0x07));
+  const uint16_t turns = r.turns > LINE_TURNS_MAX ? LINE_TURNS_MAX : r.turns;
+  b[2] = static_cast<uint8_t>(((turns >> 8) << 3) | (r.flags & 0x07));
+  b[3] = static_cast<uint8_t>(turns & 0xFF);
 }
 inline void decodeLine(const uint8_t* b, LineRecord& r) {
   r.node = b[0];
   r.state = static_cast<uint8_t>(b[1] >> 5);
   r.seq = static_cast<uint8_t>((b[1] >> 1) & 0x0F);
   r.pending = (b[1] & 1) != 0;
-  r.turns = static_cast<uint8_t>(b[2] >> 3);
+  r.turns = static_cast<uint16_t>((static_cast<uint16_t>(b[2] >> 3) << 8) | b[3]);
   r.flags = static_cast<uint8_t>(b[2] & 0x07);
 }
 

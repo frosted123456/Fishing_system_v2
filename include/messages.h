@@ -69,6 +69,7 @@ enum MessageType : uint8_t {
   MSG_SONAR           = 0x60,   // v2: node -> hub, [net][node][type] + one sonar block (sonar_codec.h)
   MSG_SONAR_CTRL      = 0x61,   // v2: hub -> nodes, SonarCtrlMessage (sim switch + FOCUS node)
   MSG_DEV_CMD         = 0x62,   // v2: hub -> one node, DevCmdMessage (backbone relay on/off)
+  MSG_SELFTEST        = 0x63,   // D70: node -> hub, SelfTestMessage (wiring check result)
   MSG_EB_BEACON       = 0x70,   // v2: ESP-NOW backbone, chalet beacon (lib/IceMesh/src/eb_link.h)
   MSG_EB_HUB          = 0x71,   // v2: ESP-NOW backbone, hub packet (eb_link.h)
   MSG_PING            = 0x80,
@@ -89,7 +90,9 @@ typedef struct __attribute__((packed)) {
   uint16_t battery_mv;
   uint16_t sequence;        // Monotonic counter for deduplication
   uint32_t uptime_sec;      // Monotonic uptime
+  uint16_t turns;           // D69: quarter turns of the spool since armed / trip cleared (0 on reed heads)
 } SensorMessage;
+#define SENSOR_MSG_MIN_LEN 12   // D69: frames from a head without `turns` are still accepted (turns = 0)
 
 // Alert message (16 bytes)
 typedef struct __attribute__((packed)) {
@@ -101,7 +104,9 @@ typedef struct __attribute__((packed)) {
   uint16_t sequence;
   uint32_t uptime_sec;
   uint32_t alert_time;
+  uint16_t turns;           // D69: as SensorMessage
 } AlertMessage;
+#define ALERT_MSG_MIN_LEN 16
 
 // Silence sync message (12 bytes)
 typedef struct __attribute__((packed)) {
@@ -236,7 +241,7 @@ typedef struct __attribute__((packed)) {
 
 // v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
 // (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
-enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3, DEVCMD_ARM = 4 };   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)   // DEVCMD_ARM value: 1 armed, 0 disarmed (D61)
+enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3, DEVCMD_ARM = 4, DEVCMD_SELFTEST = 5 };   // DEVCMD_SELFTEST: run the wiring check, answer with MSG_SELFTEST (D70)   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)   // DEVCMD_ARM value: 1 armed, 0 disarmed (D61)
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
   uint8_t  sender_id;
@@ -245,6 +250,35 @@ typedef struct __attribute__((packed)) {
   uint8_t  cmd;             // DEVCMD_*
   uint8_t  value;           // relay: 1 on, 0 off; sim: see DEVCMD_SIM
 } DevCmdMessage;
+
+// D70 wiring self-test result (12 bytes), the same bytes on ESP-NOW (SelfTestMessage) and in the LoRa SEC_SELFTEST
+// section ([node] + these 12). Built by the hole (WROOM / C3 head, or the Heltec's own hole), decoded by the chalet page.
+enum : uint8_t {   // SelfTestResult.sensor
+  ST_SENS_LEVEL = 0x01, ST_SENS_FLIPS = 0x02, ST_SENS_HALL = 0x04, ST_SENS_PINGED = 0x08 };   // PINGED: the shield test ping ran (the shield byte is full)
+enum : uint8_t {   // SelfTestResult.button
+  ST_BTN_RELEASED = 0x01, ST_BTN_PRESSED_SINCE_BOOT = 0x02, ST_BTN_NONE = 0x80 };
+enum : uint8_t {   // SelfTestResult.shield
+  ST_SH_SPI_OK = 0x01, ST_SH_PINS_SWAPPED = 0x02, ST_SH_VDRV_READY = 0x04, ST_SH_PULSE_FLT = 0x08,
+  ST_SH_DRV_FLT = 0x10, ST_SH_EE_FLT = 0x20, ST_SH_LEAKAGE = 0x40, ST_SH_NOT_BUILT = 0x80 };
+typedef struct __attribute__((packed)) {
+  uint8_t  ver;             // 1
+  uint8_t  sensor;          // ST_SENS_*: bit0 pin level now, bit1 flips / edges seen since boot, bit2 Hall latch logic (else reed)
+  uint8_t  button;          // ST_BTN_*
+  uint16_t battery_mv;      // 0 = no reading
+  uint8_t  shield;          // ST_SH_*
+  uint8_t  raw_max_16;      // largest raw ADC sample of the test ping / 16 (255 = clipped)
+  uint8_t  ring_bins;       // bins (2.5 cm) above the noise floor after time zero: transducer ring-down (heuristic)
+  uint8_t  noise_code;      // noise floor, 8-bit log code (prototype scale)
+  uint8_t  flips;           // sensor edges since boot, saturates at 255
+  uint8_t  presses;         // button presses since boot, saturates at 255
+  uint8_t  rssi_abs;        // |RSSI| dBm of the last hub / chalet message heard, 0 = none
+} SelfTestResult;
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  node_id;
+  uint8_t  msg_type;        // MSG_SELFTEST
+  SelfTestResult r;
+} SelfTestMessage;
 
 // Reset command message (8 bytes) - broadcast to all nodes
 typedef struct __attribute__((packed)) {
@@ -280,6 +314,7 @@ typedef struct {
   bool     via_lora;          // Currently being received via LoRa
   bool     received_direct;   // Has EVER been received via ESP-NOW (for timeout logic)
   uint8_t  clear_confirm_count;  // Consecutive FISH_ON clear confirmations
+  uint16_t turns;             // D69: quarter turns since armed / trip cleared, as the hole reported
   char     name[16];
   uint8_t  grid_row;
   uint8_t  grid_col;

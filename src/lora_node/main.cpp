@@ -17,6 +17,7 @@
 #include <arm_button.h>   // v2 (D61): arming button + armed / disarmed state (lib/IceMesh, host-tested)
 #include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
 #include <esp_system.h>   // D65: esp_reset_reason()
+static bool isMyVirtualHole(uint8_t node);   // D70: used by the beacon command handler above its definition
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBALS (declared in chalet.h)
@@ -65,6 +66,7 @@ DeviceSettings settings = {
   .lastLoraCh = 0,
   .buzzerPassive = false,
   .alarmHoldMin = 0,
+  .cmPerTurn = 12,
   .unitsMetric = false,
   .sonDepthIdx = 0,
   .focusDepthIdx = 0,
@@ -499,13 +501,8 @@ void wakeDisplay() {
 
   DEBUG_PRINTLN(F("Waking display..."));
 
-  // Re-enable VEXT power (active LOW on Heltec V3)
-  digitalWrite(VEXT_PIN, LOW);
-  delay(50);  // Let power stabilize
-
-  // Reinitialize display
-  display.begin();
-  display.setFont(u8g2_font_6x10_tr);
+  // D67: the OLED's own power-save, Vext stays on (see sleepDisplay)
+  display.setPowerSave(0);
 
   displaySleeping = false;
   lastActivityTime = millis();
@@ -518,13 +515,12 @@ void sleepDisplay() {
 
   DEBUG_PRINTLN(F("Display entering sleep..."));
 
-  // Clear display first
+  // D67: OLED power-save (SSD1306 sleep, ~10 uA) instead of cutting Vext. Vext also feeds the Ve pins, so cutting
+  // it took down a CardKB (or anything else) wired there: no key could ever wake the screen, which looked like the
+  // whole chalet asleep. Wake is instant too (no display.begin() over I2C).
   display.clearBuffer();
   display.sendBuffer();
-  delay(10);
-
-  // Turn off VEXT power (HIGH = off on Heltec V3)
-  digitalWrite(VEXT_PIN, HIGH);
+  display.setPowerSave(1);
 
   displaySleeping = true;
   DEBUG_PRINTLN(F("Display sleeping"));
@@ -1716,13 +1712,14 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
 
     case MSG_STATUS:
     case MSG_HEARTBEAT: {
-      if (len < (int)sizeof(SensorMessage)) {
+      if (len < SENSOR_MSG_MIN_LEN) {
         DEBUG_PRINTF("ESP-NOW %s too short: %d < %d\n",
-                     getMessageTypeName(msgType), len, (int)sizeof(SensorMessage));
+                     getMessageTypeName(msgType), len, SENSOR_MSG_MIN_LEN);
         break;
       }
 
       SensorMessage* msg = (SensorMessage*)data;
+      const uint16_t turns = len >= (int)sizeof(SensorMessage) ? msg->turns : 0;   // D69 (older head: no field)
 
       DEBUG_PRINTF("ESP-NOW [%s] Node %d: seq=%d flags=0x%02X batt=%dmV\n",
                    getMessageTypeName(msgType), msg->node_id, msg->sequence,
@@ -1736,7 +1733,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
       // DEDUP: Check if we should accept this message
       if (shouldAcceptMessage(msg->node_id, msg->sequence, msg->uptime_sec, msg->flags)) {
         updateNodeState(msg->node_id, msg->flags, msg->battery_mv,
-                        msg->sequence, msg->uptime_sec, rssi);
+                        msg->sequence, msg->uptime_sec, rssi, turns);
 
         // Track that this message came via ESP-NOW
         NodeState* node = findOrCreateNode(msg->node_id);
@@ -1775,19 +1772,20 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
     }
     
     case MSG_ALERT: {
-      if (len < (int)sizeof(AlertMessage)) {
-        DEBUG_PRINTF("ESP-NOW ALERT too short: %d < %d\n", len, (int)sizeof(AlertMessage));
+      if (len < ALERT_MSG_MIN_LEN) {
+        DEBUG_PRINTF("ESP-NOW ALERT too short: %d < %d\n", len, ALERT_MSG_MIN_LEN);
         break;
       }
 
       AlertMessage* msg = (AlertMessage*)data;
+      const uint16_t turns = len >= (int)sizeof(AlertMessage) ? msg->turns : 0;   // D69
 
       DEBUG_PRINTF("ESP-NOW ALERT! Node %d seq=%d\n", msg->node_id, msg->sequence);
 
       // DEDUP: Check if we should accept (FISH_ON always accepted)
       if (shouldAcceptMessage(msg->node_id, msg->sequence, msg->uptime_sec, msg->flags)) {
         updateNodeState(msg->node_id, msg->flags, msg->battery_mv,
-                        msg->sequence, msg->uptime_sec, rssi);
+                        msg->sequence, msg->uptime_sec, rssi, turns);
         // Track that this message came via ESP-NOW
         NodeState* node = findOrCreateNode(msg->node_id);
         if (node) {
@@ -1815,6 +1813,14 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
 
       // v2: forwarded to the chalet as a line-state event in this hub's next TDMA slot
       meshSyncNodesNow();
+      break;
+    }
+
+    case MSG_SELFTEST: {   // D70: a tip-up's wiring-check result -> the chalet (3 packets)
+      if (len < (int)sizeof(SelfTestMessage)) break;
+      const SelfTestMessage* m = (const SelfTestMessage*)data;
+      meshHubSelfTestReport(m->node_id, (const uint8_t*)&m->r);
+      Serial.printf("SELFTEST from hole %u: sensor=0x%02X button=0x%02X batt=%u shield=0x%02X ring=%u\n", m->node_id, m->r.sensor, m->r.button, m->r.battery_mv, m->r.shield, m->r.ring_bins);
       break;
     }
 
@@ -2096,9 +2102,10 @@ bool canClearFishOn(uint8_t nodeId) {
 
 
 // Update node state (called only after shouldAcceptMessage returns true)
-void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t seq, uint32_t uptime, int8_t rssi) {
+void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t seq, uint32_t uptime, int8_t rssi, uint16_t turns) {
   NodeState* node = findOrCreateNode(nodeId);
   if (!node) return;
+  node->turns = turns;   // D69
 
   bool wasFishOn = HAS_FLAG(node->flags, FLAG_FISH_ON);
   bool nowFishOn = HAS_FLAG(flags, FLAG_FISH_ON);
@@ -2224,8 +2231,36 @@ void loopNodeTimeout() {
 // BATTERY MONITORING
 // ═══════════════════════════════════════════════════════════════════════════
 
+#if VBAT_ONBOARD
+// D66: Heltec onboard LiPo monitor. Calibrated millivolts (analogReadMilliVolts), 8 samples, ADC_Ctrl polarity found
+// by trying HIGH then LOW (a LiPo reads 2.5-4.3 V; the wrong polarity leaves the divider open: ~0).
+static uint16_t readOnboardVbat() {
+  static int8_t ctrlLevel = -1;   // -1 = not known yet
+  pinMode(VBAT_ONBOARD_CTRL, OUTPUT);
+  analogSetPinAttenuation(VBAT_ONBOARD_PIN, ADC_11db);
+  for (int attempt = 0; attempt < 2; attempt++) {
+    const int lvl = ctrlLevel >= 0 ? ctrlLevel : (attempt == 0 ? HIGH : LOW);
+    digitalWrite(VBAT_ONBOARD_CTRL, lvl);
+    delay(10);
+    uint32_t sum = 0;
+    for (int i = 0; i < 8; i++) { sum += analogReadMilliVolts(VBAT_ONBOARD_PIN); delay(1); }
+    const uint32_t mv = (uint32_t)((sum / 8) * VBAT_ONBOARD_RATIO);
+    if (mv > 2500 && mv < 4400) { ctrlLevel = (int8_t)lvl; digitalWrite(VBAT_ONBOARD_CTRL, lvl == HIGH ? LOW : HIGH); return (uint16_t)mv; }   // divider back off
+    if (ctrlLevel >= 0) break;
+  }
+  return 0;
+}
+#endif
+
 void readBattery() {
-  #if VBAT_PIN >= 0
+  #if VBAT_ONBOARD
+    localBatteryMv = readOnboardVbat();
+    network.nodes[0].battery_mv = localBatteryMv;
+    if (localBatteryMv > 0 && localBatteryMv < BATTERY_LOW_MV) SET_FLAG(network.nodes[0].flags, FLAG_LOW_BATTERY);
+    else CLEAR_FLAG(network.nodes[0].flags, FLAG_LOW_BATTERY);
+    static uint32_t lastPrint = 0;
+    if (millis() - lastPrint > 60000UL) { lastPrint = millis(); Serial.printf("Battery (LiPo, onboard): %u mV%s\n", localBatteryMv, localBatteryMv && localBatteryMv < BATTERY_LOW_MV ? "  LOW" : (localBatteryMv ? "" : "  (no reading: no LiPo on the JST?)")); }
+  #elif VBAT_PIN >= 0
     // Configure ADC attenuation for ESP32-S3 (11dB for 0-3.3V range)
     analogSetPinAttenuation(VBAT_PIN, ADC_11db);
     delay(5);  // Let ADC settle after config
@@ -2300,6 +2335,15 @@ static void hallPoll() {
 #endif
 static uint8_t holeRawLast = 2;                 // 2 = not read yet
 static uint32_t holeRawChanges = 0;
+static uint32_t holeTurnsBase = 0;              // D69: hall.total at arm / clear
+uint16_t holeTurns() {
+  #if HOLE_HALL_LATCH
+  const uint32_t n = hall.total - holeTurnsBase;
+  return n > 65535 ? 65535 : (uint16_t)n;
+  #else
+  return 0;
+  #endif
+}
 
 void holePrintStatus(Stream& out) {
   const uint8_t raw = (uint8_t)digitalRead(REED_PIN);
@@ -2514,6 +2558,7 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   }
   if (u.flags & MESH_LF_LOWBAT) SET_FLAG(n->flags, FLAG_LOW_BATTERY); else CLEAR_FLAG(n->flags, FLAG_LOW_BATTERY);
   if (u.flags & MESH_LF_SIM) SET_FLAG(n->flags, FLAG_SIM); else CLEAR_FLAG(n->flags, FLAG_SIM);
+  n->turns = u.turns;   // D69
   if (disarmed) { if (!HAS_FLAG(n->flags, FLAG_DISARMED)) n->alarm.clear(); SET_FLAG(n->flags, FLAG_DISARMED); }   // D64: disarmed at the hole = acknowledged
   else CLEAR_FLAG(n->flags, FLAG_DISARMED);
   if (u.new_state == MESH_LS_FAULT) SET_FLAG(n->flags, FLAG_SENSOR_ERROR); else CLEAR_FLAG(n->flags, FLAG_SENSOR_ERROR);
@@ -2573,7 +2618,7 @@ void meshLoop() {
         if (HAS_FLAG(n.flags, FLAG_DISARMED)) fl |= MESH_LF_DISARMED;   // D61 (own hole: armSetLocal keeps the flag)
         if (self) { if (own_sim) fl |= MESH_LF_SIM; if (hubSimTripped(NODE_ID) && localArmed()) st = MESH_LS_TRIPPED; }
         else if (HAS_FLAG(n.flags, FLAG_SIM)) fl |= MESH_LF_SIM;
-        meshHubObserveNode(n.node_id, st, 0, fl, batteryMvToPercent(mv));
+        meshHubObserveNode(n.node_id, st, self ? holeTurns() : n.turns, fl, batteryMvToPercent(mv));   // D69
       }
     }
     if (meshPollReset()) networkResetFromChalet();
@@ -2597,6 +2642,9 @@ void meshLoop() {
         baitApply(dev, val);        // own / test hole here, tip-up after its next message
       } else if (cmd == MESH_CMD_SET_ARM) {
         armApply(dev, val != 0);    // D61: own hole here, tip-ups after their next message
+      } else if (cmd == MESH_CMD_SELFTEST) {   // D70
+        if (dev == NODE_ID) { SelfTestResult r; holeSelfTest(r, true); meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r); }
+        else if (!isMyVirtualHole(dev)) devCmdQueue(dev, DEVCMD_SELFTEST, 0);
       }
     }
   } else {
@@ -2632,6 +2680,7 @@ void meshLoop() {
         NodeState& n = network.nodes[idx];
         n.last_seen = millis();      // keeps loopNodeTimeout quiet while the mesh reports the node
         n.online = true;
+        n.turns = snap[i].turns;     // D69: changes without a state change (the line running)
         if (snap[i].battery != 255) n.battery_mv = batteryPercentToMv(snap[i].battery);
       }
     }
@@ -2790,6 +2839,7 @@ bool hubSimTripped(uint8_t node) {
 static icemesh::ArmState armState;              // zero = armed
 static icemesh::ArmButton armBtn;
 static bool armBtnOn = false;
+static uint16_t btnPresses = 0;                 // D70
 bool localReedMasked = false;                   // trip cleared by the button: reed ignored until the flag is down
 static struct { uint8_t left; uint16_t on_ms; uint32_t at; bool on; } armLed;   // non-blocking blink pattern
 
@@ -2812,6 +2862,7 @@ static void localTripClear() {
   { HoleSim* hs = hubSimSlot(NODE_ID, false); if (hs) { hs->tripped = false; hs->next_ms = 0; } }
   #if HOLE_HALL_LATCH
   hall.on = false; hall.run = 0;   // D64: the latch trip ends now; the next quarter turn starts a new count
+  holeTurnsBase = hall.total;      // D69
   #endif
   if (!HAS_FLAG(network.nodes[0].flags, FLAG_FISH_ON) && !localReedState) return;
   if (localReedState) localReedMasked = true;
@@ -2827,9 +2878,13 @@ static void localTripClear() {
 
 void holeTripClear() { localTripClear(); Serial.println(F("Own hole: trip cleared (serial)")); }
 
+
 void armSetLocal(bool armed, bool remote) {
   if (armed == armState.armed()) return;
   armState.set(armed);
+  #if HOLE_HALL_LATCH
+  holeTurnsBase = hall.total;      // D69: the run is counted from the arm
+  #endif
   if (armed) CLEAR_FLAG(network.nodes[0].flags, FLAG_DISARMED); else SET_FLAG(network.nodes[0].flags, FLAG_DISARMED);
   if (!armed) localTripClear();
   Preferences p; p.begin("node", false); p.putBool("armed", armed); p.end();
@@ -2860,6 +2915,11 @@ void armSet(uint8_t hole, bool armed) {
   meshSetArm(hole, armed);
   Serial.printf("Arm command: hole %u -> %s\n", hole, armed ? "armed" : "disarmed");
 }
+int8_t armPendingFor(uint8_t hole) {   // D68: -1 none, else the value (1 armed / 0 disarmed) still on its way in the beacon
+  uint8_t v;
+  if (meshCmdPending(MESH_CMD_SET_ARM, hole, v) || meshCmdPending(MESH_CMD_SET_ARM, 255, v)) return (int8_t)v;
+  return -1;
+}
 
 void setupArmButton() {
   { Preferences p; p.begin("node", true); armState.set(p.getBool("armed", true)); p.end(); }
@@ -2884,16 +2944,19 @@ void loopArmButton() {
   { static bool wasDown = false; if (down != wasDown) { wasDown = down; Serial.printf("BTN: GPIO%d %s\n", BTN_PIN, down ? "pressed" : "released"); } }
   switch (armState.apply(armBtn.feed(down, millis()), tripped)) {
     case icemesh::ARM_TOGGLE_ARM: {
+      btnPresses++;
       const bool want = armState.armed();   // apply() toggled it; armSetLocal does the change (NVS, flag, feedback)
       armState.set(!want); armSetLocal(want, false);
       break;
     }
     case icemesh::ARM_CLEAR_TRIP:
+      btnPresses++;
       localTripClear();
       armLedStart(1, 80);
       Serial.println(F("Own hole: trip cleared by the button"));
       break;
     case icemesh::ARM_REPORT:
+      btnPresses++;
       readBattery();
       meshSyncNodesNow();
       armLedStart(3, 80);
@@ -3176,5 +3239,40 @@ void sonarHubLoop() {
   }
 }
 
-
-
+// D70: wiring self-test of the own hole (hub / LoRa tip-up): same 12 bytes as the WROOM head sends
+void holeSelfTest(SelfTestResult& r, bool toSerial) {
+  memset(&r, 0, sizeof(r));
+  r.ver = 1;
+  if (HAS_LOCAL_SENSOR) {
+    const uint8_t lvl = (uint8_t)digitalRead(REED_PIN);
+    r.sensor = lvl ? ST_SENS_LEVEL : 0;
+    #if HOLE_HALL_LATCH
+    r.sensor |= ST_SENS_HALL; if (hall.total) r.sensor |= ST_SENS_FLIPS;
+    r.flips = hall.total > 255 ? 255 : (uint8_t)hall.total;
+    #else
+    if (holeRawChanges) r.sensor |= ST_SENS_FLIPS;
+    r.flips = holeRawChanges > 255 ? 255 : (uint8_t)holeRawChanges;
+    #endif
+  }
+  #if BTN_PIN >= 0
+  r.button = (digitalRead(BTN_PIN) ? ST_BTN_RELEASED : 0) | (btnPresses ? ST_BTN_PRESSED_SINCE_BOOT : 0);
+  r.presses = btnPresses > 255 ? 255 : (uint8_t)btnPresses;
+  #else
+  r.button = ST_BTN_NONE;
+  #endif
+  readBattery();
+  r.battery_mv = localBatteryMv;
+  if (SONAR_REAL && !g_sonarHwOk) setupSonarReal();   // review: a shield wired since boot gets its begin() now
+  tuss::ShieldTest t; tuss::shieldTest(t);
+  if (t.pinged) r.sensor |= ST_SENS_PINGED;
+  if (t.not_built) r.shield = ST_SH_NOT_BUILT;
+  else {
+    r.shield = (t.spi_ok ? ST_SH_SPI_OK : 0) | (t.swapped ? ST_SH_PINS_SWAPPED : 0) | (t.vdrv_ready ? ST_SH_VDRV_READY : 0) |
+               (t.pulse_fault ? ST_SH_PULSE_FLT : 0) | (t.drv_fault ? ST_SH_DRV_FLT : 0) | (t.ee_fault ? ST_SH_EE_FLT : 0) | (t.leakage ? ST_SH_LEAKAGE : 0);
+    r.raw_max_16 = (uint8_t)(t.raw_max / 16); r.ring_bins = t.ring_bins; r.noise_code = t.noise_code;
+  }
+  { MeshHubView v; meshHubView(v); r.rssi_abs = v.synced && v.beacon_rssi < 0 ? (uint8_t)(-v.beacon_rssi) : 0; }
+  if (toSerial)
+    Serial.printf("SELFTEST own hole: sensor=0x%02X (level %u, %u edges) button=0x%02X (%u presses) batt=%u mV shield=0x%02X raw_max=%u ring=%u bins noise=%u beacon -%u dBm\n",
+                  r.sensor, r.sensor & 1, r.flips, r.button, r.presses, r.battery_mv, r.shield, r.raw_max_16 * 16, r.ring_bins, r.noise_code, r.rssi_abs);
+}

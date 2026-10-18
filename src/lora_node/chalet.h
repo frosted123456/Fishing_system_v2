@@ -174,6 +174,7 @@ struct DeviceSettings {
   uint8_t lastLoraCh;         // v2: LoRa channel last used (start point after a reboot)
   bool buzzerPassive;         // v2: passive buzzer (needs a tone) instead of an active one (sounds on DC)
   uint8_t alarmHoldMin;       // v2: FISH ON alarm after the line resets: 0 = until silenced, else minutes
+  uint8_t cmPerTurn;          // D69: line paid out per spool turn, cm (estimate shown on the page; 0 = turns only)
   bool unitsMetric;           // v2 OLED: metres instead of feet
   uint8_t sonDepthIdx;        // v2 OLED Sonar page depth scale: 0 = auto, 1-8 = fixed (DEPTH_STEPS)
   uint8_t focusDepthIdx;      // v2 OLED Focus page depth scale: 0 = auto, 1-8 = fixed
@@ -353,6 +354,8 @@ void setupLocalSensor();
 void holePrintStatus(Stream& out);   // D64: serial HOLE
 void holeScreenLine(char* out, size_t n);   // D64: hub home footer
 void holeTripClear();                 // D64: serial HOLE CLEAR (= button press while tripped)
+uint16_t holeTurns();                 // D69: quarter turns of the own hole since armed / cleared
+void holeSelfTest(SelfTestResult& r, bool toSerial);   // D70: wiring check of the own hole
 void readBattery();
 
 // Display sleep/wake functions
@@ -411,7 +414,7 @@ bool shouldAcceptMessage(uint8_t nodeId, uint16_t seq, uint32_t uptime, uint8_t 
 bool canClearFishOn(uint8_t nodeId);
 NodeState* findOrCreateNode(uint8_t nodeId);
 
-void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t seq, uint32_t uptime, int8_t rssi);
+void updateNodeState(uint8_t nodeId, uint8_t flags, uint16_t batteryMv, uint16_t seq, uint32_t uptime, int8_t rssi, uint16_t turns = 0);   // D69: turns
 
 void updateDisplay();
 void triggerBuzzer(uint8_t pattern);
@@ -447,7 +450,10 @@ void armSetLocal(bool armed, bool remote);   // own hole: apply + save + report 
 void armApply(uint8_t hole, bool armed);
 void armAllOnNodeHeard(uint8_t node);     // hub: CMD_SET_ARM from the chalet (own hole here, tip-ups via DEVCMD_ARM)
 void armSet(uint8_t hole, bool armed);       // chalet: CMD_SET_ARM in the beacon (hole ID or 255 = all)
+int8_t armPendingFor(uint8_t hole);          // D68: -1 none, else the value being beaconed (page: "sending")
 void handleWebApiNodeArm();
+void handleWebApiNodeSelfTest();   // D70
+void handleWebApiSelfTest();       // D70
 void baitLoad();
 void baitToSource(icemesh::sonar::SonarSource* src, uint8_t id);   // hub: this hole's bait depth into its fake sonar
 void baitSet(uint8_t hole, uint8_t v5);      // chalet: save + send (CMD_SET_BAIT) + demo

@@ -44,6 +44,8 @@ class HubRole {
   uint8_t last_cmd_seq = 0;
   uint8_t last_cmd_target = 0, last_cmd_value = 0;   // arguments of the last command returned by onBeacon/onEbBeacon
   sonar::SonarOutbox sonar;   // blocks waiting for this hub's slot
+  uint8_t selftest[SELFTEST_SECTION_LEN]; uint8_t selftest_frames = 0;   // D70: result to repeat in the next 3 packets
+  void setSelfTest(const uint8_t* b13) { memcpy(selftest, b13, SELFTEST_SECTION_LEN); selftest_frames = 3; }
 
   // Chalet state from the latest beacon, LoRa or ESP-NOW backbone (whichever came last)
   bool have_info = false;
@@ -184,7 +186,9 @@ class HubRole {
     in.line_rot = line_rot_;
     in.test = test; in.test_counter = test_counter; in.test_mode_seen = plan.test_mode;
     in.sonar = &sonar;
+    in.selftest = selftest_frames ? selftest : nullptr;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
+    if (r.selftest_sent && selftest_frames) selftest_frames--;
     nodeinfo_idx_ = r.nodeinfo_next;
     line_rot_ = r.line_rot_next;
     if (r.len > 0) n_joins_ = 0;   // joins reported (repeated by the joiner if lost)
@@ -212,7 +216,9 @@ class HubRole {
     in.nodeinfo_start = nodeinfo_idx_;
     in.line_rot = line_rot_;
     in.sonar = &sonar;
+    in.selftest = selftest_frames ? selftest : nullptr;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
+    if (r.selftest_sent && selftest_frames) selftest_frames--;
     nodeinfo_idx_ = r.nodeinfo_next;
     line_rot_ = r.line_rot_next;
     return r.len;

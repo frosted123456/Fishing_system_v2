@@ -121,7 +121,20 @@ struct PingInfo {
   uint8_t nolimit;        // 1 = this capture ran with the conversion limit cleared (continuous sampling). S3: always 1
 };
 
-bool begin();                                             // false = TUSS4470 not answering (SPI)
+// D70 wiring check (serial SELFTEST / the chalet page): see shieldTest() in the .cpp
+struct ShieldTest {
+  bool not_built;         // SONAR_REAL = 0 build
+  bool spi_ok, swapped;   // TUSS4470 answered on SPI; MISO / MOSI were found crossed (bus re-opened that way)
+  bool vdrv_ready, ee_fault, pinged, pulse_fault, drv_fault, leakage;
+  uint16_t raw_max;       // largest raw ADC sample of the test ping (4095 = clipped)
+  uint8_t noise_code;     // noise floor, 8-bit log code
+  uint8_t ring_bins;      // bins above the floor after time zero (transducer loading the driver: tens; open: a few)
+};
+void shieldTest(ShieldTest& t);
+bool pinsSwapped();
+
+bool begin();                                             // false = TUSS4470 not answering (SPI). D70: a crossed
+                                                          // MISO / MOSI is detected and worked around (pinsSwapped())
 uint32_t clockHz();                                       // D58: ADC sample rate from the I2S clock registers (ESP32) or the
                                                           // digital controller interval formula (S3), crystal-locked
                                                           // (+-20 ppm): the depth scale. 0 before begin()

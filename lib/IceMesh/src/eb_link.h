@@ -78,6 +78,10 @@ class Dedup {
 //   TR_ESPNOW : backbone only; safety net: LoRa too after SAFETY_MS without any backbone beacon.
 //   TR_AUTO   : LoRa, plus the backbone after FALLBACK_MS without a LoRa beacon, until RETURN_BEACONS
 //               LoRa beacons in a row came back.
+//   TR_PREFER_EB (D71): the backbone alone while the chalet's backbone beacons are heard (EB_UP_BEACONS in a
+//               row, and EB_HOLD_MS after the last drop so an edge-of-range hub does not flap), LoRa alone
+//               EB_DROP_MS after the last backbone beacon; plus the TR_AUTO rules. Near the chalet = more
+//               sonar bandwidth and no LoRa airtime; far = LoRa as before. Nothing to set on the hub.
 // Sending on both is safe: the chalet keeps one state per node and drops repeated sonar pings.
 //
 // SETUP PHASE: after power-on the automatic fallbacks (Auto -> backbone, LoRa-only safety net) are not
@@ -89,9 +93,11 @@ class Dedup {
 // reach, still gets it); that stops at the first LoRa beacon and is not a fallback.
 class TransportPolicy {
  public:
-  enum { FALLBACK_MS = 10000, SAFETY_MS = 60000, RETURN_BEACONS = 5, STREAK_GAP_MS = 3500, ARM_MS = 300000 };
+  enum { FALLBACK_MS = 10000, SAFETY_MS = 60000, RETURN_BEACONS = 5, STREAK_GAP_MS = 3500, ARM_MS = 300000,
+         EB_DROP_MS = 5000, EB_UP_BEACONS = 5, EB_HOLD_MS = 30000 };
 
-  void begin(uint32_t now_ms) { last_lora_ = last_eb_ = now_ms; streak_ = 0; eb_active_ = false; started_ = true; stable_ = false; armed_ = false; heard_lora_ = false; }
+  void begin(uint32_t now_ms) { last_lora_ = last_eb_ = now_ms; streak_ = 0; eb_active_ = false; started_ = true; stable_ = false; armed_ = false; heard_lora_ = false;
+                                eb_streak_ = 0; eb_pref_ = false; eb_lost_at_ = now_ms; heard_eb_ = false; }
   void onLoraBeacon(uint32_t now_ms) {
     if (!started_) begin(now_ms);
     heard_lora_ = true;
@@ -101,21 +107,30 @@ class TransportPolicy {
     if (!armed_ && now_ms - stable_since_ >= ARM_MS) armed_ = true;
     if (eb_active_ && streak_ >= RETURN_BEACONS) eb_active_ = false;
   }
-  void onEbBeacon(uint32_t now_ms) { if (!started_) begin(now_ms); last_eb_ = now_ms; }
+  void onEbBeacon(uint32_t now_ms) {
+    if (!started_) begin(now_ms);
+    eb_streak_ = (now_ms - last_eb_ <= STREAK_GAP_MS) ? static_cast<uint16_t>(eb_streak_ + 1) : 1;
+    last_eb_ = now_ms; heard_eb_ = true;
+    if (!eb_pref_ && eb_streak_ >= EB_UP_BEACONS && now_ms - eb_lost_at_ >= EB_HOLD_MS) eb_pref_ = true;   // D71
+  }
   void tick(uint32_t now_ms) {
     if (!started_) begin(now_ms);
     if (armed_ && now_ms - last_lora_ > FALLBACK_MS) { eb_active_ = true; streak_ = 0; }
+    if (eb_pref_ && now_ms - last_eb_ > EB_DROP_MS) { eb_pref_ = false; eb_streak_ = 0; eb_lost_at_ = now_ms; }   // D71: back to LoRa
   }
   void arm() { armed_ = true; }   // user: "setup done" (and tests)
   bool useLora(uint8_t mode, uint32_t now_ms) const {
     if (mode == tdma::TR_ESPNOW) return now_ms - last_eb_ > SAFETY_MS;
+    if (mode == tdma::TR_PREFER_EB) return !eb_pref_;
     return true;
   }
   bool useEb(uint8_t mode, uint32_t now_ms) const {
     if (mode == tdma::TR_ESPNOW) return true;
     if (mode == tdma::TR_LORA) return armed_ && now_ms - last_lora_ > SAFETY_MS;
+    if (mode == tdma::TR_PREFER_EB) return eb_pref_ || (heard_eb_ && now_ms - last_eb_ <= EB_DROP_MS) || eb_active_ || !heard_lora_;
     return eb_active_ || !heard_lora_;
   }
+  bool ebPreferred() const { return eb_pref_; }   // D71: on the backbone by preference (LoRa idle)
   bool armed() const { return armed_; }
   // seconds until the fallbacks arm (0 = armed; ARM_MS/1000 while no beacon run is going)
   uint32_t armInS(uint32_t now_ms) const {
@@ -130,9 +145,10 @@ class TransportPolicy {
   uint32_t msSinceEb(uint32_t now_ms) const { return now_ms - last_eb_; }
 
  private:
-  uint32_t last_lora_ = 0, last_eb_ = 0, stable_since_ = 0;
-  uint16_t streak_ = 0;
+  uint32_t last_lora_ = 0, last_eb_ = 0, stable_since_ = 0, eb_lost_at_ = 0;
+  uint16_t streak_ = 0, eb_streak_ = 0;
   bool eb_active_ = false, started_ = false, stable_ = false, armed_ = false, heard_lora_ = false;
+  bool eb_pref_ = false, heard_eb_ = false;
 };
 
 }  // namespace eb

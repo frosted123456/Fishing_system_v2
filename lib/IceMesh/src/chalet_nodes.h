@@ -13,11 +13,11 @@ namespace tdma {
 
 struct NodeView {
   bool used;
-  uint8_t node, owner, state, turns, flags, battery;   // battery 0-100, 255 = unknown
+  uint8_t node, owner, state; uint16_t turns; uint8_t flags, battery;   // battery 0-100, 255 = unknown
   uint16_t owner_frame;                                // last frame the owner reported it
 };
 
-struct NodeChange { uint8_t node, owner, old_state, new_state, turns, flags; };
+struct NodeChange { uint8_t node, owner, old_state, new_state; uint16_t turns; uint8_t flags; };
 static const uint8_t STATE_UNKNOWN = 0xFF;
 
 template <uint8_t MAX_NODES = 32>

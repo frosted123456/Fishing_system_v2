@@ -107,6 +107,9 @@ volatile int16_t devCmdBait = -1;            // v2 (D43): bait depth from the ch
 // across deep sleep and in NVS ("node" / "armed") across reboots; button and DEVCMD_ARM both set it: last wins.
 RTC_DATA_ATTR icemesh::ArmState armState;    // plain struct, zero = armed (like HallLatch)
 volatile int8_t devCmdArm = -1;              // -1 none, 0 disarm, 1 arm
+volatile bool devCmdSelfTest = false;        // D70: the chalet asked for the wiring check
+RTC_DATA_ATTR uint16_t btnPresses = 0;       // D70: button events since power-on
+void selfTestRun(bool toSerial);             // D70: run + send MSG_SELFTEST to the hub (and print)
 #if BTN_PIN >= 0
 static icemesh::ArmButton armBtn;
 #endif
@@ -157,6 +160,7 @@ RTC_DATA_ATTR uint16_t messageSeq = 0;      // Monotonic sequence for dedup
 RTC_DATA_ATTR bool lastReedState = false;
 #if HALL_LATCH
 RTC_DATA_ATTR icemesh::HallLatch hall;            // v2 (D46): plain struct, zero at power-on, kept in deep sleep
+RTC_DATA_ATTR uint32_t hallTurnsBase = 0;         // D69: hall.total when armed / trip cleared: the run is counted from here
 static volatile uint32_t hallEdges = 0;           // counted by the pin interrupt while awake
 static void IRAM_ATTR hallIsr() { hallEdges++; }
 static uint64_t hallNowMs() {                     // system time keeps running through deep sleep (RTC timer)
@@ -249,6 +253,7 @@ void readBattery();
 bool readReedSwitch();
 void sendStatus(uint8_t msgType);
 void sendAlert();
+static uint16_t turnsSinceArm();   // D69
 void enterDeepSleep();
 void enterDeepSleepFast();
 bool espNowSendReliable(const uint8_t* data, size_t len, int maxRetries = 3);
@@ -913,6 +918,7 @@ void sendStatus(uint8_t msgType) {
   // M3 FIX: uptime_sec is CUMULATIVE active time across all wake cycles
   // totalUptimeSec accumulates time from previous wakes, millis()/1000 adds current wake period
   msg.uptime_sec = totalUptimeSec + (millis() / 1000);
+  msg.turns = turnsSinceArm();   // D69
 
   #if DEBUG_ESPNOW
   DEBUG_PRINTF("TX [%s] ID:%d Seq:%d Flags:0x%02X Batt:%dmV\n",
@@ -956,6 +962,7 @@ void sendAlert() {
   msg.sequence = messageSeq;
   msg.uptime_sec = totalUptimeSec + (millis() / 1000);
   msg.alert_time = millis() / 1000;
+  msg.turns = turnsSinceArm();   // D69
   
   #if DEBUG_ESPNOW
   DEBUG_PRINTF("TX [ALERT!] ID:%d Seq:%d Flags:0x%02X\n", msg.node_id, msg.sequence, msg.flags);
@@ -1059,6 +1066,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     if (c->target == NODE_ID && c->cmd == DEVCMD_SIM) devCmdSim = c->value;
     if (c->target == NODE_ID && c->cmd == DEVCMD_BAIT) devCmdBait = c->value;
     if (c->target == NODE_ID && c->cmd == DEVCMD_ARM) devCmdArm = c->value ? 1 : 0;   // D61
+    if (c->target == NODE_ID && c->cmd == DEVCMD_SELFTEST) devCmdSelfTest = true;      // D70
     return;
   }
 
@@ -1402,9 +1410,18 @@ static void armSave() {
 }
 
 // the trip of this hole ends now (same as the line going still): latch, simulation, flag
+static uint16_t turnsSinceArm() {   // D69: quarter turns reported to the hub (0 on reed heads)
+#if HALL_LATCH
+  const uint32_t n = hall.total - hallTurnsBase;
+  return n > 65535 ? 65535 : (uint16_t)n;
+#else
+  return 0;
+#endif
+}
 static void armDropTrip() {
 #if HALL_LATCH
   hall.on = false; hall.run = 0;
+  hallTurnsBase = hall.total;   // D69: arm / disarm / clear restart the run count
 #endif
   simTripEnd = 0; simNextTrip = 0;
   CLEAR_FLAG(currentFlags, FLAG_FISH_ON);
@@ -1431,6 +1448,7 @@ static void armChanged(bool remote) {
 }
 
 static void armAct(icemesh::ArmAction a) {
+  if (a != icemesh::ARM_NONE) btnPresses++;   // D70
   switch (a) {
     case icemesh::ARM_TOGGLE_ARM: armChanged(false); break;
     case icemesh::ARM_CLEAR_TRIP:
@@ -1449,6 +1467,7 @@ static void armAct(icemesh::ArmAction a) {
 }
 
 void armApplyCmd() {
+  if (devCmdSelfTest) { devCmdSelfTest = false; selfTestRun(true); }   // D70: answered right away, the hub is listening
   const int8_t c = devCmdArm;
   if (c < 0) return;
   devCmdArm = -1;
@@ -1696,7 +1715,10 @@ String sonarCommand(const String& in, bool fromWeb) {
   String rest = sp0 > 0 ? l.substring(sp0 + 1) : String(""); rest.trim();
   String U = l; U.toUpperCase();
   String r;
-  if (U == "REC ON" || U == "REC OFF") {
+  if (U == "SELFTEST") {   // D70
+    selfTestRun(true);
+    r = "SELFTEST done (printed above)";
+  } else if (U == "REC ON" || U == "REC OFF") {
     sonarRec = (U == "REC ON");
     if (sonarRec) { if (sonarKnobsPtr) recKnobs(*sonarKnobsPtr); recInfo(); }
     r = String("Serial recording ") + (sonarRec ? "ON" : "off");
@@ -1933,4 +1955,50 @@ void sonarLoop() {
       nowSend(gatewayMacKnown ? gatewayMac : ESPNOW_BROADCAST, frame, 3 + out[i].len);
     }
   }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// v2 (D70) WIRING SELF-TEST: sensor pin, button, battery, shield (lib/SonarTuss shieldTest), radio. Asked by the
+// chalet page (CMD_SELFTEST -> hub -> DEVCMD_SELFTEST) or typed on serial (SELFTEST). The 12-byte result goes to the
+// hub (MSG_SELFTEST) which repeats it to the chalet in a SEC_SELFTEST section; the page turns the bits into words.
+// ═══════════════════════════════════════════════════════════════════════════
+static void selfTestFill(SelfTestResult& r) {
+  memset(&r, 0, sizeof(r));
+  r.ver = 1;
+  const uint8_t lvl = (uint8_t)digitalRead(REED_PIN);
+  r.sensor = (lvl ? ST_SENS_LEVEL : 0);
+  #if HALL_LATCH
+  r.sensor |= ST_SENS_HALL; if (hall.total) r.sensor |= ST_SENS_FLIPS;
+  r.flips = hall.total > 255 ? 255 : (uint8_t)hall.total;
+  #endif
+  #if BTN_PIN >= 0
+  r.button = (digitalRead(BTN_PIN) ? ST_BTN_RELEASED : 0) | (btnPresses ? ST_BTN_PRESSED_SINCE_BOOT : 0);
+  r.presses = btnPresses > 255 ? 255 : (uint8_t)btnPresses;
+  #else
+  r.button = ST_BTN_NONE;
+  #endif
+  readBattery();
+  r.battery_mv = batteryMv;
+  if (SONAR_REAL) sonarHwBegin();   // review: the head begins the shield lazily; the check must not probe a bus never opened
+  tuss::ShieldTest t; tuss::shieldTest(t);
+  if (t.pinged) r.sensor |= ST_SENS_PINGED;
+  if (t.not_built) r.shield = ST_SH_NOT_BUILT;
+  else {
+    r.shield = (t.spi_ok ? ST_SH_SPI_OK : 0) | (t.swapped ? ST_SH_PINS_SWAPPED : 0) | (t.vdrv_ready ? ST_SH_VDRV_READY : 0) |
+               (t.pulse_fault ? ST_SH_PULSE_FLT : 0) | (t.drv_fault ? ST_SH_DRV_FLT : 0) | (t.ee_fault ? ST_SH_EE_FLT : 0) | (t.leakage ? ST_SH_LEAKAGE : 0);
+    r.raw_max_16 = (uint8_t)(t.raw_max / 16); r.ring_bins = t.ring_bins; r.noise_code = t.noise_code;
+  }
+  r.rssi_abs = 0;   // the head does not keep the hub's RSSI (the hub reports its side)
+}
+
+void selfTestRun(bool toSerial) {
+  SelfTestMessage m;
+  m.network_id = NETWORK_ID; m.node_id = NODE_ID; m.msg_type = MSG_SELFTEST;
+  selfTestFill(m.r);
+  if (toSerial) {
+    Serial.printf("SELFTEST sensor=0x%02X (level %u, %u edges) button=0x%02X (%u presses) batt=%u mV shield=0x%02X raw_max=%u ring=%u bins noise=%u\n",
+                  m.r.sensor, m.r.sensor & 1, m.r.flips, m.r.button, m.r.presses, m.r.battery_mv, m.r.shield, m.r.raw_max_16 * 16, m.r.ring_bins, m.r.noise_code);
+  }
+  if (espNowReady) espNowSendReliable((uint8_t*)&m, sizeof(m), 3);
 }

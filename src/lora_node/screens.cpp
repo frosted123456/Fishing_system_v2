@@ -504,7 +504,10 @@ void screenDraw(u8g2_t* u, const ScreenModel& m, uint8_t page, uint8_t sub, bool
     case PG_OPTIONS: optionsPage(u, m, blink, PG_OPTIONS); break;
     default:
       if (m.chalet) homeChalet(u, m, blink); else homeHub(u, m, blink);
-      if (homeRows(m) <= 4) footer(u, m, PG_HOME); else pageDots(u, PG_HOME);   // 5 pocket rows: no room for the footer
+      if (!m.chalet && m.own_disarmed) {   // D68: unmistakable: inverse bar instead of the footer
+        u8g2_SetDrawColor(u, 1); u8g2_DrawBox(u, 0, 54, 128, 10);
+        u8g2_SetDrawColor(u, 0); u8g2_SetFont(u, F_SMALL); center(u, 62, "DISARMED  button: arm"); u8g2_SetDrawColor(u, 1);
+      } else if (homeRows(m) <= 4) footer(u, m, PG_HOME); else pageDots(u, PG_HOME);   // 5 pocket rows: no room for the footer
       break;
   }
 }

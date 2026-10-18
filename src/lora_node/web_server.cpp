@@ -14,6 +14,8 @@ void setupWebServer() {
   server.on("/api/node/name", HTTP_POST, handleWebApiNodeName);
   server.on("/api/node/bait", HTTP_POST, handleWebApiNodeBait);    // v2 (D43): bait depth per hole
   server.on("/api/node/arm", HTTP_POST, handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
+  server.on("/api/node/selftest", HTTP_POST, handleWebApiNodeSelfTest);   // D70: ask a hole for its wiring check
+  server.on("/api/selftest", HTTP_GET, handleWebApiSelfTest);               // D70: last result of ?id=
   server.on("/api/node/pos", HTTP_POST, handleWebApiNodePos);      // v2 (D51): position on the pocket map
   server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
@@ -58,7 +60,7 @@ void handleWebRoot() {
 
 void handleWebApi() {
   // BUG FIX #10 / v2: sized for the node count (up to MAX_NODES = 48, ~240 B each incl. copied strings)
-  DynamicJsonDocument doc(1536 + 240 * (size_t)network.node_count);
+  DynamicJsonDocument doc(1536 + 352 * (size_t)network.node_count);   // D70 review: 16-19 members per node now
   doc["network_id"] = network.network_id;
   doc["node_count"] = network.node_count;
   doc["uptime"] = millis() / 1000;
@@ -73,6 +75,7 @@ void handleWebApi() {
   doc["radio_test"] = meshTestModeName(meshTestMode());
   // v2 network one-liner: setup phase countdown (0 = running), link, LoRa channel (1-8), master
   doc["setup_arm_s"] = meshSetupArmInS();
+  doc["cm_per_turn"] = settings.cmPerTurn;   // D69: for the "line out" estimate
   { static const char* const TRN[] = {"auto", "lora", "espnow"}; const uint8_t t = meshTransport(); doc["transport"] = TRN[t <= 2 ? t : 0]; }
   doc["lora_ch"] = meshLoraChannel() + 1;
   doc["master"] = "chalet";
@@ -110,6 +113,8 @@ void handleWebApi() {
     n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
     n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
     n["disarmed"] = HAS_FLAG(network.nodes[i].flags, FLAG_DISARMED) != 0;   // v2 (D61): spool movement ignored
+    { const int8_t ap = armPendingFor(network.nodes[i].node_id); if (ap >= 0) n["arm_pending"] = ap; }   // D68: still in the beacon
+    n["turns"] = network.nodes[i].turns;   // D69: quarter turns since armed / cleared
     n["battery"] = network.nodes[i].battery_mv;
     n["rssi"] = network.nodes[i].rssi;
     // IMPROVEMENT 2: Include via tracking
@@ -158,6 +163,41 @@ void handleWebApiNodeArm() {
   if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id > 255 || !doc.containsKey("armed")) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
   armSet((uint8_t)id, doc["armed"].as<bool>());
   server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static SelfTestResult g_ownSelfTest; static uint32_t g_ownSelfTestAt = 0;   // D70: hub page: last own-hole result
+// D70 POST {"nodeId":n}: the chalet beacons CMD_SELFTEST (user priority); the hub runs it on its own hole or hands
+// DEVCMD_SELFTEST to the tip-up when it next talks; the result comes back in SEC_SELFTEST (GET /api/selftest?id=n)
+void handleWebApiNodeSelfTest() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetSelfTest((uint8_t)id);
+  else if (id == NODE_ID) { holeSelfTest(g_ownSelfTest, true); g_ownSelfTestAt = millis() ? millis() : 1; meshHubSelfTestReport(NODE_ID, (const uint8_t*)&g_ownSelfTest); }
+  else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, 0);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handleWebApiSelfTest() {
+  const int id = server.hasArg("id") ? server.arg("id").toInt() : 0;
+  uint8_t b[12]; uint32_t age = 0;
+  bool have = false;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) have = id > 0 && meshSelfTestResult((uint8_t)id, b, age);
+  else if (id == NODE_ID && g_ownSelfTestAt) { memcpy(b, &g_ownSelfTest, 12); age = millis() - g_ownSelfTestAt; have = true; }   // hub hotspot page
+  if (!have) { server.send(200, "application/json", "{\"have\":false}"); return; }
+  const SelfTestResult* r = (const SelfTestResult*)b;
+  StaticJsonDocument<512> doc;
+  doc["have"] = true; doc["id"] = id; doc["age_s"] = age / 1000; doc["ver"] = r->ver;
+  doc["sensor_level"] = (r->sensor & ST_SENS_LEVEL) != 0; doc["sensor_flips"] = (r->sensor & ST_SENS_FLIPS) != 0; doc["sensor_hall"] = (r->sensor & ST_SENS_HALL) != 0; doc["flips"] = r->flips;
+  doc["pinged"] = (r->sensor & ST_SENS_PINGED) != 0;
+  doc["btn_none"] = (r->button & ST_BTN_NONE) != 0; doc["btn_released"] = (r->button & ST_BTN_RELEASED) != 0; doc["btn_pressed"] = (r->button & ST_BTN_PRESSED_SINCE_BOOT) != 0; doc["presses"] = r->presses;
+  doc["battery_mv"] = r->battery_mv;
+  doc["shield_built"] = (r->shield & ST_SH_NOT_BUILT) == 0; doc["spi_ok"] = (r->shield & ST_SH_SPI_OK) != 0; doc["pins_swapped"] = (r->shield & ST_SH_PINS_SWAPPED) != 0;
+  doc["vdrv_ready"] = (r->shield & ST_SH_VDRV_READY) != 0; doc["pulse_fault"] = (r->shield & ST_SH_PULSE_FLT) != 0; doc["drv_fault"] = (r->shield & ST_SH_DRV_FLT) != 0;
+  doc["ee_fault"] = (r->shield & ST_SH_EE_FLT) != 0; doc["leakage"] = (r->shield & ST_SH_LEAKAGE) != 0;
+  doc["raw_max"] = r->raw_max_16 * 16; doc["ring_bins"] = r->ring_bins; doc["noise_code"] = r->noise_code; doc["rssi"] = r->rssi_abs ? -(int)r->rssi_abs : 0;
+  String out; serializeJson(doc, out);
+  server.send(200, "application/json", out);
 }
 
 // v2 (D51) POST {"nodeId":n,"x":m,"y":m} metres from the chalet (x east, y north); {"nodeId":n} alone removes it
@@ -249,6 +289,7 @@ void handleWebApiSettingsGet() {
   doc["buzzerEnabled"] = settings.buzzerEnabled;
   doc["alertHoldSec"] = settings.alertHoldSec;
   doc["alarmHoldMin"] = settings.alarmHoldMin;
+  doc["cmPerTurn"] = settings.cmPerTurn;   // D69
   doc["nearBaitBeep"] = settings.nearBaitBeep;
   doc["beamDeg"] = settings.beamDeg;   // v2 (D52)
   doc["heartbeatSec"] = settings.heartbeatSec;
@@ -291,6 +332,7 @@ void handleWebApiSettingsPost() {
   }
   if (doc.containsKey("beamDeg")) { settings.beamDeg = (uint8_t)constrain(doc["beamDeg"].as<int>(), 5, 60); changed = true; }
   if (doc.containsKey("nearBaitBeep")) { settings.nearBaitBeep = doc["nearBaitBeep"].as<bool>(); changed = true; }
+  if (doc.containsKey("cmPerTurn")) { settings.cmPerTurn = (uint8_t)constrain(doc["cmPerTurn"].as<int>(), 0, 60); changed = true; }   // D69
   if (doc.containsKey("alarmHoldMin")) {   // v2: 0 = until silenced
     settings.alarmHoldMin = (uint8_t)constrain(doc["alarmHoldMin"].as<int>(), 0, 120);
     changed = true;
@@ -659,7 +701,7 @@ void handleWebApiRadioPost() {
   // v2 network: transport, LoRa channel, relays, backbone receiver mode
   if (doc.containsKey("transport")) {
     const int t = doc["transport"].as<int>();
-    if (t >= 0 && t <= 2) { settings.transportMode = (uint8_t)t; meshSetTransport((uint8_t)t); }
+    if (t >= 0 && t <= 3) { settings.transportMode = (uint8_t)t; meshSetTransport((uint8_t)t); }   // D71: 3 = ESP-NOW first
   }
   if (doc.containsKey("channel")) {   // "auto" or 1-8
     if (doc["channel"].is<const char*>()) { settings.loraChannel = MESH_CH_AUTO; meshSetLoraChannel(MESH_CH_AUTO); }

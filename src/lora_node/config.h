@@ -150,6 +150,15 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Measures raw battery voltage BEFORE buck converter
 // Divider ratio: 100k/(100k+100k) = 0.5, so multiply ADC reading by 2.0
 #define VBAT_PIN            2           // GPIO2 for external divider (not GPIO1!)
+// D66: a Heltec on its own LiPo (JST) has the onboard monitor: GPIO1 behind a 390k/100k divider (x4.9), switched
+// by ADC_Ctrl GPIO37 (HIGH on V3.2, LOW on V3 / V3.1: both are tried). Default on for the chalet (LiPo), off for the
+// hubs / LoRa tip-ups fed on the 3V3 pin from a pack (their divider is on VBAT_PIN). -D VBAT_ONBOARD=0/1 overrides.
+#ifndef VBAT_ONBOARD
+#define VBAT_ONBOARD        (NODE_ROLE == ROLE_GATEWAY_OFFSHORE)
+#endif
+#define VBAT_ONBOARD_PIN    1
+#define VBAT_ONBOARD_CTRL   37
+#define VBAT_ONBOARD_RATIO  4.9f
 #define VBAT_DIVIDER        2.0         // External 100k+100k divider
 #define VBAT_REF_MV         3300        // ESP32-S3 ADC reference with 11dB atten
 

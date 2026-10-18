@@ -76,6 +76,8 @@ static void buildScreenModel() {
     if (ix >= 0 && network.nodes[ix].name[0]) snprintf(m.note, sizeof(m.note), "Near bait: %s", network.nodes[ix].name);
     else snprintf(m.note, sizeof(m.note), "Near bait: hole %u", nearBaitNode);
   }
+  if (!m.note[0] && localBatteryMv && localBatteryMv < BATTERY_LOW_MV)   // D66: own supply low (chalet LiPo / hub pack)
+    snprintf(m.note, sizeof(m.note), "BATTERY LOW %u.%02u V", localBatteryMv / 1000, (localBatteryMv % 1000) / 10);
   // holes, grouped by pocket (owner hub), the hub's own hole first
   static MeshNodeSnapshot snap[48];
   const uint8_t ns = chalet ? meshNodeSnapshot(snap, 48) : 0;
@@ -138,6 +140,7 @@ static void buildScreenModel() {
     m.master_heard = v.synced; m.beacon_rssi = v.beacon_rssi; m.via_echo = v.from_echo; m.on_backup = v.eb_on;
     m.hotspot = wifiApActive; m.hotspot_min = hubHotspotUntil ? (hubHotspotUntil - now) / 60000UL + 1 : 0;
     if (!m.note[0]) holeScreenLine(m.note, sizeof(m.note));   // D64: own hole line in the home footer (replaces "Hold 3s: hotspot")
+    m.own_disarmed = HAS_LOCAL_SENSOR && !localArmed();   // D68
   }
   // focus (chalet)
   m.focus_node = meshFocusNode(); m.n_cols = 0; m.bait_cm = 0;
@@ -263,7 +266,7 @@ void optBuild(ScrOptions* o) {
     optRow(o, OI_HOLD, 0, "Alarm", v);
     if (chalet) {
       const uint8_t t = settings.transportMode;
-      optRow(o, OI_LINK, 0, "Link", t == 1 ? "LoRa only" : t == 2 ? "ESP-NOW" : "Auto");
+      optRow(o, OI_LINK, 0, "Link", t == 1 ? "LoRa only" : t == 2 ? "ESP-NOW" : t == 3 ? "ESP-NOW first" : "Auto");
       if (settings.loraChannel == MESH_CH_AUTO) snprintf(v, sizeof(v), "Auto (%u)", meshLoraChannel() + 1);
       else snprintf(v, sizeof(v), "%u fixed", settings.loraChannel + 1);
       optRow(o, OI_LORACH, 0, "LoRa channel", v);
@@ -453,7 +456,7 @@ static void optActivate(const OptRow& row) {
       settings.alarmHoldMin = (uint8_t)HOLD_STEPS[(k + 1) % 5]; saveSettings(); break;
     }
     case OI_LINK: {
-      const uint8_t t = (uint8_t)((settings.transportMode + 1) % 3);
+      const uint8_t t = (uint8_t)((settings.transportMode + 1) % 4);   // D71
       settings.transportMode = t; saveSettings(); meshSetTransport(t); break;
     }
     case OI_LORACH: {

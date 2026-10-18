@@ -17,7 +17,7 @@ class LineTable {
   void clear() { for (uint8_t i = 0; i < MAX_NODES; i++) e_[i].used = false; }
 
   // Latest observation of a node. Returns true when it created a new event.
-  bool observe(uint8_t node, uint8_t state, uint8_t turns, uint8_t flags, uint8_t battery_pct, uint32_t now_ms) {
+  bool observe(uint8_t node, uint8_t state, uint16_t turns, uint8_t flags, uint8_t battery_pct, uint32_t now_ms) {
     if (node == ID_NONE) return false;
     E* e = find(node);
     bool created = false;
@@ -97,7 +97,7 @@ class LineTable {
   }
 
  private:
-  struct E { bool used; bool pending; uint8_t node, state, seq, turns, flags, battery; uint32_t last_seen; };
+  struct E { bool used; bool pending; uint8_t node, state, seq; uint16_t turns; uint8_t flags, battery; uint32_t last_seen; };
   static void put(LineRecord& r, const E& e) {
     r.node = e.node; r.state = e.state; r.seq = e.seq; r.pending = e.pending; r.turns = e.turns; r.flags = e.flags;
   }

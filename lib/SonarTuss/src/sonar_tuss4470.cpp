@@ -1,5 +1,6 @@
 // TUSS4470 sonar driver - see sonar_tuss4470.h. WRITTEN BLIND, to verify in the bucket (docs/SONAR_DRIVER.md).
 #include "sonar_tuss4470.h"
+#include <string.h>
 #if SONAR_REAL
 #include <SPI.h>
 #include <Preferences.h>
@@ -119,6 +120,7 @@ static volatile uint32_t g_cap_burst = 0, g_cap_edge = 0;
 static volatile bool g_edge_seen = false;
 static volatile uint32_t g_blind_ticks = 0;
 static bool g_asleep = false, g_spi_up = false;
+static bool g_swapped = false;   // D70: MISO / MOSI found swapped at begin() and the bus re-opened that way
 static uint8_t g_stat = 0;   // status bits of the last SPI reply (high byte bits 5:0)
 // TOF_CONFIG (reg 0x1B, datasheet): bit 7 SLEEP_MODE_EN, bit 6 STDBY_MODE_EN, bit 1 VDRV_TRIGGER, bit 0 CMD_TRIGGER
 static const uint8_t TOF_SLEEP = 0x80, TOF_TRIGGER = 0x01;
@@ -141,9 +143,11 @@ uint8_t readReg(uint8_t addr) { return (uint8_t)(xfer((uint8_t)(0x80 | ((addr & 
 static void spiUp() {
   if (g_spi_up) return;
   pinMode(SONAR_PIN_CS, OUTPUT); digitalWrite(SONAR_PIN_CS, HIGH);
-  g_spi.begin(SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS);
+  if (g_swapped) g_spi.begin(SONAR_PIN_SCK, SONAR_PIN_MOSI, SONAR_PIN_MISO, SONAR_PIN_CS);
+  else g_spi.begin(SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS);
   g_spi_up = true;
 }
+static bool probeId() { readReg(0x1D); return readReg(0x1D) == 0xB9; }   // first frame after a wake can be stale
 // out of sleep mode; first releases the NCS hold that sleep() set, or no frame could reach the chip
 static void wake() {
   if (SONAR_PIN_BOOST >= 0) {   // pod board v0.3: boost back on, let VPWR reach 24 V before the first burst
@@ -195,8 +199,14 @@ bool begin() {
   spiUp();
   wake();                                                              // out of sleep (if a deep sleep left it there)
   // presence check: DEVICE_ID (0x1D) reads 0xB9 (datasheet 7.6.1.12); a floating or stuck MISO gives 0x00 / 0xFF
-  readReg(0x1D);                                  // first frame after a wake can be stale
-  g_ok = readReg(0x1D) == 0xB9;
+  g_ok = probeId();
+  if (!g_ok) { delay(10); g_ok = probeId(); }   // a slow wake is not a wiring fault
+  if (!g_ok && !g_swapped) {   // D70: the one wiring slip the firmware can live with: MISO and MOSI crossed
+    g_spi.end(); g_spi_up = false; g_swapped = true;
+    spiUp(); wake();
+    g_ok = probeId();
+    if (!g_ok) { g_spi.end(); g_spi_up = false; g_swapped = false; spiUp(); }   // back to the documented pins
+  }
   writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
   writeReg(0x14, 0x00);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2)
   writeReg(0x16, 0x0F);   // VDRV 20 V, regulator always on, not Hi-Z: the reference firmware init (vmode 0); ping() sets the knob
@@ -473,6 +483,43 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   return true;
 }
 
+bool pinsSwapped() { return g_swapped; }
+
+// D70 wiring check of the shield: SPI answer, status bits, VDRV, one ping with the default knobs, and a look at
+// the echo trace: time-zero leakage seen = the burst reaches the receiver (driver + IO2 alive), ring-down length
+// = the transducer is loading the output (open header: a few bins; transducer: tens). Heuristic, says so on the page.
+void shieldTest(ShieldTest& t) {
+  memset(&t, 0, sizeof(t));
+  t.spi_ok = g_ok || (g_spi_up && probeId());   // begin() may have failed on a shield wired since: say so, no promotion
+  t.swapped = g_swapped;
+  if (!g_ok) return;                             // the ping needs the drivers begin() installs
+  const bool was_asleep = g_asleep;              // an idle shield goes back to sleep after the test
+  wake();
+  writeReg(0x16, 0x0F);   // VDRV 20 V regulator on (vmode 0), as begin()
+  delay(30);              // VDRV charges C12 (est.)
+  readReg(0x1C);
+  const uint8_t st = lastStatus();
+  t.vdrv_ready = (st & 0x20) != 0;
+  t.ee_fault = (st & 0x04) != 0;
+  icemesh::sonar::Params p;   // defaults
+  uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
+  PingInfo pi;
+  if (!ping(p, false, codes, pi)) { if (was_asleep) sleep(); return; }
+  t.pinged = true;
+  t.pulse_fault = (pi.fault & 0x04) != 0; t.drv_fault = (pi.fault & 0x02) != 0;
+  t.leakage = pi.t0_ok != 0;
+  t.raw_max = pi.raw_max;
+  // noise floor: median-ish of the last quarter of the bins; ring: bins after time zero above floor + 20 codes
+  const uint8_t* c = codes[0];
+  uint32_t sum = 0; uint16_t n = 0;
+  for (uint16_t i = icemesh::sonar::BINS * 3 / 4; i < icemesh::sonar::BINS; i++) { sum += c[i]; n++; }
+  t.noise_code = n ? (uint8_t)(sum / n) : 0;
+  uint16_t ring = 0;
+  for (uint16_t i = 0; i < icemesh::sonar::BINS; i++) { if (c[i] > (uint16_t)t.noise_code + 20) ring = i + 1; else if (i > ring + 4) break; }
+  t.ring_bins = ring > 255 ? 255 : (uint8_t)ring;
+  if (was_asleep) sleep();
+}
+
 }  // namespace tuss
 
 #else   // SONAR_REAL == 0: nothing (the fake sonar runs instead)
@@ -486,6 +533,8 @@ bool ping(const icemesh::sonar::Params&, bool, uint8_t[icemesh::sonar::sp::NFREQ
 uint8_t readReg(uint8_t) { return 0; }
 uint8_t lastStatus() { return 0; }
 void writeReg(uint8_t, uint8_t) {}
+bool pinsSwapped() { return false; }
+void shieldTest(ShieldTest& t) { memset(&t, 0, sizeof(t)); t.not_built = true; }
 void lastRaw(const uint16_t*& samples, size_t& n, uint32_t& burst_hz) { samples = nullptr; n = 0; burst_hz = 0; }
 void setCalibration(const uint16_t[17]) {}
 void getCalibration(uint16_t pts[17]) { for (int i = 0; i < 17; i++) pts[i] = (uint16_t)(i * 256); }

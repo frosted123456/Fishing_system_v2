@@ -150,11 +150,12 @@ void checkSerialWifiConfig() {
     String a = line.substring(9); a.trim(); a.toUpperCase();
     int t = -1;
     if (a == "AUTO") t = MESH_TR_AUTO; else if (a == "LORA") t = MESH_TR_LORA; else if (a == "ESPNOW" || a == "ESP-NOW") t = MESH_TR_ESPNOW;
+    else if (a == "EBFIRST" || a == "ESPNOW-FIRST" || a == "PREFER") t = MESH_TR_PREFER_EB;   // D71
     if (currentRole == ROLE_GATEWAY_OFFSHORE && t >= 0) {
       settings.transportMode = (uint8_t)t; saveSettings(); meshSetTransport((uint8_t)t);
       Serial.printf("Transport: %s\n", a.c_str());
     } else {
-      Serial.println(F("Usage (chalet only): TRANSPORT AUTO|LORA|ESPNOW   (hubs follow the beacon)"));
+      Serial.println(F("Usage (chalet only): TRANSPORT AUTO|LORA|ESPNOW|EBFIRST   (hubs follow the beacon; EBFIRST = ESP-NOW while heard, LoRa otherwise)"));
     }
   } else if (line.startsWith("CHANNEL")) {
     // v2: LoRa channel 1-8 (1 = 915.0 MHz), AUTO, or SCAN (re-evaluate now). Chalet only.
@@ -273,8 +274,9 @@ void checkSerialWifiConfig() {
     if (a == "ARM") armSetLocal(true, false);
     else if (a == "DISARM") armSetLocal(false, false);
     else if (a == "CLEAR") holeTripClear();
+    else if (a == "TEST") { SelfTestResult r; holeSelfTest(r, true); meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r); }   // D70
     holePrintStatus(Serial);
-    if (!a.length()) Serial.println(F("Usage: HOLE | HOLE ARM | HOLE DISARM | HOLE CLEAR (= button press while tripped)"));
+    if (!a.length()) Serial.println(F("Usage: HOLE | HOLE ARM | HOLE DISARM | HOLE CLEAR (= button press while tripped) | HOLE TEST (wiring check)"));
   } else if (line == "PERF") {
     perfPrint();   // v2: loop timing since the last PERF
   } else if (line == "RADIO") {

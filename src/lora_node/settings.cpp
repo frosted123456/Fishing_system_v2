@@ -177,12 +177,13 @@ void loadSettings() {
   settings.sonarVirtualNodes = preferences.getUChar("simNodes", 2);
   if (settings.sonarVirtualNodes > 4) settings.sonarVirtualNodes = 4;
   settings.transportMode = preferences.getUChar("transport", 0);
-  if (settings.transportMode > 2) settings.transportMode = 0;
+  if (settings.transportMode > 3) settings.transportMode = 0;   // D71: 3 = ESP-NOW first
   settings.loraChannel = preferences.getUChar("loraCh", 255);
   if (settings.loraChannel > 7) settings.loraChannel = 255;
   settings.ebRelay = preferences.getBool("ebRelay", currentRole != ROLE_GATEWAY_OFFSHORE);   // v2: every hub relays by default
   settings.buzzerPassive = preferences.getBool("buzPas", false);
   settings.alarmHoldMin = preferences.getUChar("alarmHold", 0);
+  settings.cmPerTurn = preferences.getUChar("cmTurn", 12);   // D69
   settings.unitsMetric = preferences.getBool("metric", false);
   settings.sonDepthIdx = preferences.getUChar("sonDepth", 0); if (settings.sonDepthIdx > 8) settings.sonDepthIdx = 0;
   settings.focusDepthIdx = preferences.getUChar("focDepth", 0); if (settings.focusDepthIdx > 8) settings.focusDepthIdx = 0;
@@ -219,6 +220,7 @@ void saveSettings() {
   preferences.putBool("ebRelay", settings.ebRelay);
   preferences.putBool("buzPas", settings.buzzerPassive);
   preferences.putUChar("alarmHold", settings.alarmHoldMin);
+  preferences.putUChar("cmTurn", settings.cmPerTurn);
   preferences.putBool("metric", settings.unitsMetric);
   preferences.putUChar("sonDepth", settings.sonDepthIdx);
   preferences.putUChar("focDepth", settings.focusDepthIdx);

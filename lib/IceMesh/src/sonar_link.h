@@ -117,6 +117,7 @@ class SonarSink {
  public:
   virtual ~SonarSink() {}
   virtual void onSonarBlock(uint8_t hub, const uint8_t* blk, uint8_t len, uint16_t frame) = 0;
+  virtual void onSelfTest(uint8_t hub, uint8_t node, const uint8_t* r12, uint16_t frame) { (void)hub; (void)node; (void)r12; (void)frame; }   // D70
 };
 
 struct NodeSonar {

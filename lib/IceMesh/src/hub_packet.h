@@ -40,9 +40,11 @@ struct HubBuild {
   uint16_t test_counter;
   uint8_t test_mode_seen;     // echoed in the TEST section
   sonar::SonarOutbox* sonar;  // nullptr = no sonar blocks
+  const uint8_t* selftest;    // D70: nullptr or 13 B ([node] + SelfTestResult) for a SEC_SELFTEST section
 };
 
-struct HubBuildResult { size_t len; uint8_t line_records; uint8_t line_total; uint8_t relayed_full; uint8_t relayed_partial; uint8_t nodeinfo_next; uint8_t line_rot_next; uint16_t sonar_bytes; };
+struct HubBuildResult { size_t len; uint8_t line_records; uint8_t line_total; uint8_t relayed_full; uint8_t relayed_partial; uint8_t nodeinfo_next; uint8_t line_rot_next; uint16_t sonar_bytes; bool selftest_sent; };
+
 
 // Re-packs a remote hub packet into a RELAY section value: [orig hub][orig frame lo][orig flags][orig sections...]
 // If the whole body does not fit in `max_value`: LINE keeps as many whole records as fit, the other
@@ -122,6 +124,8 @@ inline HubBuildResult buildHubPacket(const HubBuild& in, const LineTable<MAXN>& 
     w.add(SEC_JOINS, in.joins, n);
   }
   // 5. sonar blocks
+  // 4b. D70 wiring-check result (one per packet, whole or not at all; before the sonar blocks, which fill greedily)
+  if (in.selftest != nullptr && w.freeForValue() >= SELFTEST_SECTION_LEN) { w.add(SEC_SELFTEST, in.selftest, SELFTEST_SECTION_LEN); r.selftest_sent = true; }
   if (in.sonar != nullptr) r.sonar_bytes = in.sonar->fill(w, in.frame);
   // 6. node info, rotating: 3 B per node {node, battery %, flags}
   r.nodeinfo_next = in.nodeinfo_start;

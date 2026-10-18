@@ -9,11 +9,11 @@
 enum : uint8_t { MESH_LS_IDLE = 0, MESH_LS_TRIPPED = 1, MESH_LS_RUNNING = 2, MESH_LS_FAULT = 3, MESH_LS_OFFLINE = 4 };
 
 struct MeshNodeUpdate {        // chalet: owner-resolved node state change
-  uint8_t node, owner, old_state, new_state, turns, flags;
+  uint8_t node, owner, old_state, new_state; uint16_t turns; uint8_t flags;
 };
 
 struct MeshNodeSnapshot {      // chalet: current node view
-  uint8_t node, owner, state, turns, flags, battery;
+  uint8_t node, owner, state; uint16_t turns; uint8_t flags, battery;
 };
 
 struct MeshCounters {
@@ -47,7 +47,7 @@ struct MeshHubView {           // hub: for OLED / serial during range tests
 bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id);
 
 // ---- hub side (call from loop) ----
-void meshHubObserveNode(uint8_t node, uint8_t state, uint8_t turns, uint8_t flags, uint8_t battery_pct);
+void meshHubObserveNode(uint8_t node, uint8_t state, uint16_t turns, uint8_t flags, uint8_t battery_pct);
 void meshHubSetBattery(uint16_t mv);
 void meshHubView(MeshHubView& v);
 // D62: for the sonar capture: true when no LoRa transmit is on the air, the last one ended more than guard_us
@@ -83,7 +83,7 @@ struct MeshHubSummary { uint8_t id, via, mode; int8_t rssi; float snr; uint32_t 
 uint8_t meshHubSummaries(MeshHubSummary* out, uint8_t max);
 
 // ---- v2 network config: LoRa channel, transport, ESP-NOW backbone (docs/protocol_v2.md §6c) ----
-enum : uint8_t { MESH_TR_AUTO = 0, MESH_TR_LORA = 1, MESH_TR_ESPNOW = 2 };   // = icemesh::tdma::Transport
+enum : uint8_t { MESH_TR_AUTO = 0, MESH_TR_LORA = 1, MESH_TR_ESPNOW = 2, MESH_TR_PREFER_EB = 3 };   // = icemesh::tdma::Transport (D71: ESP-NOW first)
 static const uint8_t MESH_CH_AUTO = 255;
 void meshSetStartChannel(uint8_t ch);        // both, before meshBegin: last channel used (NVS); hub starts searching there
 void meshSetTransport(uint8_t tr);           // chalet: MESH_TR_*
@@ -104,10 +104,14 @@ bool meshEbRelay();
 void meshSetDeviceRelay(uint8_t dev, bool on);           // chalet: CMD_SET_RELAY in the beacon (hub or tip-up ID)
 bool meshPollDevCmd(uint8_t& cmd, uint8_t& target, uint8_t& value);   // hub: SET_RELAY / SET_SIM received (MESH_CMD_*)
 void meshSetHoleSim(uint8_t hole, uint8_t value);       // chalet: CMD_SET_SIM in the beacon (hole ID or 255 = all)
-enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5, MESH_CMD_SET_BAIT = 6, MESH_CMD_SET_ARM = 7 };   // = icemesh::tdma::BeaconCmd
+enum : uint8_t { MESH_CMD_SET_RELAY = 3, MESH_CMD_SET_SIM = 4, MESH_CMD_SONAR_PARAM = 5, MESH_CMD_SET_BAIT = 6, MESH_CMD_SET_ARM = 7, MESH_CMD_SELFTEST = 8 };   // = icemesh::tdma::BeaconCmd
 void meshSetSonarParam(uint8_t id, uint8_t value);   // chalet: knob for every sonar hole (CMD_SONAR_PARAM)
 void meshSetBait(uint8_t hole, uint8_t v5);          // chalet: bait depth of one hole, 5 cm steps (CMD_SET_BAIT)
 void meshSetArm(uint8_t hole, bool armed);           // chalet: arm / disarm one hole or 255 = all (CMD_SET_ARM, D61)
+bool meshCmdPending(uint8_t cmd, uint8_t target, uint8_t& value);   // D68: queued or being beaconed (page feedback)
+void meshSetSelfTest(uint8_t hole);                                   // D70: chalet asks a hole for its wiring check
+void meshHubSelfTestReport(uint8_t node, const uint8_t* r12);         // D70: hub: a hole's result, to the chalet
+bool meshSelfTestResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms);   // D70: chalet: last result
 enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02, MESH_LF_DISARMED = 0x04 };
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)
