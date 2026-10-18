@@ -208,7 +208,11 @@ bool begin() {
     if (!g_ok) { g_spi.end(); g_spi_up = false; g_swapped = false; spiUp(); }   // back to the documented pins
   }
   writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
-  writeReg(0x14, 0x00);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2)
+  writeReg(0x14, 0x1C);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2);
+                          // DRV_PLS_FLT_DT = 7 (check disabled, D72): with the deglitch at its 64 us default the
+                          // DRV_PULSE_FLT bit is set on EVERY ping, because CMD_TRIGGER stays on for the ~20 ms capture
+                          // after the 80 us burst and IO2 is quiet (datasheet 7.6.1.5). First bench, 2026-10-18.
+                          // PULSE_NUM_FLT (pulses received != BURST_PULSE) stays the meaningful driver check.
   writeReg(0x16, 0x0F);   // VDRV 20 V, regulator always on, not Hi-Z: the reference firmware init (vmode 0); ping() sets the knob
 
   // edge timing: MCPWM capture (IDF 4.4 legacy API). IO2 is BOTH the RMT burst output and the CAP0

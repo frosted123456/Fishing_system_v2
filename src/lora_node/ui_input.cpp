@@ -173,7 +173,7 @@ static void buildScreenModel() {
 // network reset, reboot and "forget Wi-Fi". Without a CardKB the page only shows the values.
 // docs/SCREENS.md
 // =============================================================================================
-enum OptMenu : uint8_t { OM_MAIN = 0, OM_WIFI, OM_SCAN, OM_SIM, OM_DISPLAY, OM_SONAR };
+enum OptMenu : uint8_t { OM_MAIN = 0, OM_WIFI, OM_SCAN, OM_SIM, OM_DISPLAY, OM_SONAR, OM_GPS };
 enum OptItem : uint8_t {
   OI_NONE = 0, OI_WIFI, OI_BUZZER, OI_HOLD, OI_LINK, OI_LORACH, OI_SIM, OI_HOTSPOT, OI_RELAY, OI_REED,
   OI_NETRESET, OI_REBOOT, OI_BUILT,
@@ -181,13 +181,15 @@ enum OptItem : uint8_t {
   OI_SC_NET, OI_SC_AGAIN,
   OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES, OI_BUZZTEST, OI_BUZZTYPE,
   OI_DISPLAY, OI_D_UNITS, OI_D_SONDEPTH, OI_D_FOCDEPTH, OI_D_WEAK,
-  OI_SONAR, OI_K_FILTER, OI_K_SNR, OI_K_CONFIRM, OI_K_DEAD, OI_K_GATE, OI_K_RESEND, OI_K_DEFAULTS, OI_NEARBEEP
+  OI_SONAR, OI_K_FILTER, OI_K_SNR, OI_K_CONFIRM, OI_K_DEAD, OI_K_GATE, OI_K_RESEND, OI_K_DEFAULTS, OI_NEARBEEP,
+  OI_GPS, OI_G_STATUS, OI_G_ORIGIN, OI_G_HOLE   // D73: Pin holes (GPS)
 };
 struct OptRow { uint8_t item, idx; };
 static const uint8_t OPT_MAX = 56;
 static OptRow optRows[OPT_MAX];
 static uint8_t optN = 0, optMenu = OM_MAIN, optSel = 0, optMainSel = 0, optWifiSel = 0;
 static uint8_t optMode = SO_LIST, optConfirm = OI_NONE, optTextStep = 0;   // text step: 0 Wi-Fi name, 1 password
+static uint8_t optConfirmIdx = 0;   // D73: the hole of a "clear position?" confirm
 static char optSsid[33] = "", optText[65] = "";
 static const uint8_t SCAN_MAX = 12;
 static int8_t optScanN = -1;                 // -1 not yet, -2 scanning, -3 failed, >= 0 networks found
@@ -229,7 +231,9 @@ static const char* optHint(uint8_t item) {
     case OI_W_TYPE: return "OK: type the name";
     case OI_W_RETRY: return "OK: try now";
     case OI_BUZZTEST: return "OK: 2 beeps";
-    case OI_DISPLAY: case OI_SONAR: return "OK: open";
+    case OI_DISPLAY: case OI_SONAR: case OI_GPS: return "OK: open";
+    case OI_G_ORIGIN: return "OK: here = map 0,0";
+    case OI_G_HOLE: return "OK: pin here / clear";
     case OI_K_RESEND: return "OK: send now";
     case OI_K_DEFAULTS: return "OK: ask to confirm";
     case OI_K_FILTER: return "OK: next filter";
@@ -274,6 +278,7 @@ void optBuild(ScrOptions* o) {
       static const char* const FN[] = {"low", "normal", "high", "custom"};
       optRow(o, OI_SONAR, 0, "Sonar", FN[icemesh::sonar::presetOf(sonarPrm)], true);
       optRow(o, OI_DISPLAY, 0, "Display", settings.unitsMetric ? "m" : "ft", true);
+      { GpsStatus g; if (gpsStatus(g)) { if (g.fix) snprintf(v, sizeof(v), "%u sats", g.sats); else snprintf(v, sizeof(v), g.sentences ? "no fix" : "no data"); optRow(o, OI_GPS, 0, "Pin holes (GPS)", v, true); } }
     } else {
       optRow(o, OI_RELAY, 0, "ESP-NOW relay", settings.ebRelay ? "ON" : "OFF");
       optRow(o, OI_REED, 0, "Reed polarity", settings.reedActiveHigh ? "HIGH" : "LOW");
@@ -325,6 +330,21 @@ void optBuild(ScrOptions* o) {
     snprintf(v, sizeof(v), "%u cm", sonarPrm[P_GATE_CM]); optRow(o, OI_K_GATE, 0, "Max fish move", v);
     optRow(o, OI_K_RESEND, 0, "Send to holes again", "");
     optRow(o, OI_K_DEFAULTS, 0, "Defaults", "");
+  } else if (optMenu == OM_GPS) {   // D73
+    GpsStatus g; gpsStatus(g);
+    if (!g.sentences) snprintf(v, sizeof(v), g.swapped ? "no data (pins?)" : "waiting...");
+    else if (!g.fix) snprintf(v, sizeof(v), "%u sats, no fix", g.sats);
+    else snprintf(v, sizeof(v), "%u sats %u.%u", g.sats, g.hdop_x10 / 10, g.hdop_x10 % 10);
+    optRow(o, OI_G_STATUS, 0, "GPS", v);
+    optRow(o, OI_G_ORIGIN, 0, "Chalet here", g.origin_set ? "set" : "-");
+    for (int i = 0; i < network.node_count && optN < OPT_MAX - 1; i++) {
+      const NodeState& n = network.nodes[i];
+      if (n.node_id == 0 || n.node_id == NODE_ID || n.node_id >= 101) continue;   // holes and hubs, not the chalet / demo
+      char nm[20]; if (n.name[0]) snprintf(nm, sizeof(nm), "%s", n.name); else snprintf(nm, sizeof(nm), "Hole %u", n.node_id);
+      if (holePosDm[n.node_id][0] != POS_UNSET) snprintf(v, sizeof(v), "%ldE %ldN", (long)(holePosDm[n.node_id][0] / 10), (long)(holePosDm[n.node_id][1] / 10));
+      else snprintf(v, sizeof(v), "-");
+      optRow(o, OI_G_HOLE, (uint8_t)i, nm, v);
+    }
   } else if (optMenu == OM_SIM) {
     if (meshDemoHubs()) snprintf(v, sizeof(v), "%u hubs", meshDemoHubs()); else snprintf(v, sizeof(v), "off");
     optRow(o, OI_S_DEMO, 0, "Demo network", v);
@@ -347,8 +367,8 @@ void optBuild(ScrOptions* o) {
   if (optSel >= optN) optSel = optN ? optN - 1 : 0;
   if (!o) return;
   o->mode = optMode; o->n = optN; o->sel = optSel;
-  static const char* const TITLES[] = {"Settings", "Wi-Fi", "Choose Wi-Fi", "Simulation", "Display", "Sonar (all holes)"};
-  snprintf(o->title, sizeof(o->title), "%s", optMenu < 6 ? TITLES[optMenu] : "");
+  static const char* const TITLES[] = {"Settings", "Wi-Fi", "Choose Wi-Fi", "Simulation", "Display", "Sonar (all holes)", "Pin holes (GPS)"};
+  snprintf(o->title, sizeof(o->title), "%s", optMenu < 7 ? TITLES[optMenu] : "");
   snprintf(o->hint, sizeof(o->hint), "%s", !cardKbAvailable ? "CardKB or web page" : optN ? optHint(optRows[optSel].item) : "Esc: back");
   o->line[0] = 0; o->text[0] = 0;
   if (optMode == SO_TEXT) {
@@ -361,6 +381,7 @@ void optBuild(ScrOptions* o) {
     if (optConfirm == OI_NETRESET) { snprintf(o->title, sizeof(o->title), "Reset network?"); snprintf(o->line, sizeof(o->line), "Link + channel to Auto"); }
     else if (optConfirm == OI_REBOOT) { snprintf(o->title, sizeof(o->title), "Reboot?"); snprintf(o->line, sizeof(o->line), "Back in about 10 s"); }
     else if (optConfirm == OI_K_DEFAULTS) { snprintf(o->title, sizeof(o->title), "Sonar defaults?"); snprintf(o->line, sizeof(o->line), "for every sonar hole"); }
+    else if (optConfirm == OI_G_HOLE) { snprintf(o->title, sizeof(o->title), "Clear position?"); const NodeState& n = network.nodes[optConfirmIdx]; snprintf(o->line, sizeof(o->line), "%s", n.name[0] ? n.name : "this hole"); }
     else { snprintf(o->title, sizeof(o->title), "Forget Wi-Fi?"); snprintf(o->line, sizeof(o->line), "%s", storedSsid); }
   }
 }
@@ -439,6 +460,7 @@ static void optDo(uint8_t item) {
     case OI_REBOOT: display.clearBuffer(); display.setFont(u8g2_font_6x10_tr); display.drawStr(30, 36, "Rebooting..."); display.sendBuffer(); delay(500); ESP.restart(); break;
     case OI_W_FORGET: wifiForget(); break;
     case OI_K_DEFAULTS: for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) sonarKnobSet(i, icemesh::sonar::paramInfo(i).def); break;
+    case OI_G_HOLE: posSet(network.nodes[optConfirmIdx].node_id, POS_UNSET, POS_UNSET); break;   // D73: clear
     default: break;
   }
 }
@@ -480,6 +502,15 @@ static void optActivate(const OptRow& row) {
     case OI_S_ALL: simAll(!simAnyOn()); break;
     case OI_DISPLAY: optOpen(OM_DISPLAY); break;
     case OI_SONAR: optOpen(OM_SONAR); break;
+    case OI_GPS: optOpen(OM_GPS); break;   // D73
+    case OI_G_ORIGIN: showOverlayMessage(gpsSetOrigin() ? "Origin set here" : "No GPS fix", 1000); break;
+    case OI_G_HOLE: {
+      const NodeState& n = network.nodes[row.idx];
+      if (holePosDm[n.node_id][0] != POS_UNSET) { optConfirm = OI_G_HOLE; optConfirmIdx = row.idx; optMode = SO_CONFIRM; break; }
+      GpsStatus g; gpsStatus(g);
+      showOverlayMessage(!g.fix ? "No GPS fix" : !g.origin_set ? "Set 'Chalet here' first" : gpsPinHole(n.node_id) ? "Pinned" : "Too far (3 km+)", 1200);
+      break;
+    }
     case OI_D_UNITS: settings.unitsMetric = !settings.unitsMetric; saveSettings(); break;
     case OI_D_SONDEPTH: settings.sonDepthIdx = (uint8_t)((settings.sonDepthIdx + 1) % 9); saveSettings(); break;
     case OI_D_FOCDEPTH: settings.focusDepthIdx = (uint8_t)((settings.focusDepthIdx + 1) % 9); saveSettings(); break;

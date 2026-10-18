@@ -289,6 +289,7 @@ void setup() {
   pinMode(USER_BUTTON, INPUT_PULLUP);
   DEBUG_PRINTLN(F("User button (GPIO0) enabled for silencing"));
   if (currentRole != ROLE_GATEWAY_OFFSHORE) setupArmButton();   // v2 (D61): arming button of the hub's own hole
+  gpsSetup();   // D73: chalet GPS (UART1)
 
   // Startup display
   display.clearBuffer();
@@ -408,6 +409,7 @@ void loop() {
       nearBaitWatch();       // v2 (D43)
       if (settings.webServerEnabled) { PerfScope p(PF_WEB); loopWebServer(); }
       checkWiFiStatus();
+      gpsLoop();   // D73
       checkSerialWifiConfig();
 
       // Update our own state periodically (heartbeat)

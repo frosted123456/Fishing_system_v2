@@ -979,7 +979,8 @@ function onStatus() {
   const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
   const lora = st.lora || {}, wifi = st.wifi || {};
   const net = st.setup_arm_s ? `setup phase (${Math.ceil(st.setup_arm_s / 60)} min)` : 'network OK';
-  $('sysline').textContent = `${online}/${nodes.length} holes online · ${net} · LoRa ${lora.ready ? 'ch ' + (st.lora_ch || 1) : 'FAIL'} · Wi-Fi ${wifi.sta_connected ? 'STA' : (wifi.ap_active ? 'AP' : '–')} · up ${fmtUp(st.uptime || 0)}`;
+  const gpsTxt = st.gps ? ` · GPS ${st.gps.fix ? st.gps.sats + ' sats' : (st.gps.data ? 'no fix' : 'no data')}` : '';
+  $('sysline').textContent = `${online}/${nodes.length} holes online · ${net} · LoRa ${lora.ready ? 'ch ' + (st.lora_ch || 1) : 'FAIL'} · Wi-Fi ${wifi.sta_connected ? 'STA' : (wifi.ap_active ? 'AP' : '–')}${gpsTxt} · up ${fmtUp(st.uptime || 0)}`;
   $('testb').hidden = !(st.sonar_sim || (st.radio_test && st.radio_test !== 'off'));
   $('testb').textContent = st.sonar_sim ? 'TEST MODE: FAKE SONAR' : 'RADIO TEST';
   const sil = !!st.silenced;
@@ -1353,20 +1354,41 @@ $('setForm').addEventListener('submit', e => {
 /* ---------- D70 wiring check ---------- */
 let stWatch = null, stRun = 0;
 function stFillHoles() {
-  const sel = $('stHole'), cur = sel.value, nodes = (st.nodes || []).filter(n => n.id > 0 && n.id < 128);
-  sel.innerHTML = nodes.map(n => `<option value="${n.id}">${esc(nodeName(n))} (#${n.id})</option>`).join('') || '<option value="">no hole heard yet</option>';
+  const sel = $('stHole'), cur = sel.value, nodes = (st.nodes || []).filter(n => n.id > 0 && n.id < 128 && n.id !== st.node_id);
+  const me = st.role === 'Chalet' ? `<option value="${st.node_id}">This chalet box (GPS, LiPo, radios)</option>` : '';
+  sel.innerHTML = me + (nodes.map(n => `<option value="${n.id}">${esc(nodeName(n))} (#${n.id})</option>`).join('') || (me ? '' : '<option value="">no hole heard yet</option>'));
   if (cur) sel.value = cur;
 }
 function stRender(d) {
   const ok = (c, t, bad) => `<tr><td>${t}</td><td>${c ? '<span class="badge on">OK</span>' : '<span class="badge al">' + (bad || 'CHECK') + '</span>'}</td></tr>`;
   const info = (t, v) => `<tr><td>${t}</td><td>${v}</td></tr>`;
   let h = '<table class="tbl"><tr><th>Check</th><th>Result</th></tr>';
+  if (d.chalet) {   // D73: the box itself
+    if (!d.gps_built) h += info('GPS', 'not in this firmware (GPS_RX_PIN = -1)');
+    else {
+      h += ok(d.gps_sentences > 0, 'GPS module talking (UART)', 'NO DATA: VCC / GND / TX wire, 9600 baud?');
+      if (d.gps_sentences > 0) {
+        h += info('GPS wiring', `module TX on GPIO ${d.gps_rx_pin}${d.gps_swapped ? ' <span class="badge warn">found by swapping the two UART pins: the config has them crossed</span>' : ''} · ${d.gps_sentences} sentences${d.gps_bad ? ', ' + d.gps_bad + ' bad checksums' : ''}${d.gps_data_age_s > 5 ? ' · last ' + d.gps_data_age_s + ' s ago' : ''}`);
+        h += ok(d.gps_fix, 'GPS fix', d.gps_sats ? `NO FIX YET: ${d.gps_sats} satellites (needs sky, 1-15 min from cold)` : 'NO FIX YET: 0 satellites (antenna / sky view)');
+        if (d.gps_fix) h += info('Position', `${d.gps_lat.toFixed(5)}, ${d.gps_lon.toFixed(5)} · ${d.gps_sats} sats · HDOP ${d.gps_hdop}`);
+        h += info('Map origin', d.gps_origin ? 'set (OLED: Settings → Pin holes → Chalet here)' : 'not set: OLED Settings → Pin holes (GPS) → "Chalet here" with a fix');
+      }
+    }
+    const bv = d.battery_mv / 1000;
+    h += ok(d.battery_mv > 3500, 'LiPo', d.battery_mv ? bv.toFixed(2) + ' V LOW' : 'NO READING') + info('', d.battery_mv ? bv.toFixed(2) + ' V' + (d.battery_mv > 3950 && d.battery_mv < 4100 ? ' (≈4.0 V with the cell off = USB only)' : '') : '');
+    h += ok(d.lora_ready, 'LoRa radio', 'NOT READY');
+    h += info('Wi-Fi', `${d.wifi_sta ? 'cabin network' : 'no cabin network'} · hotspot ${d.wifi_ap ? 'on' : 'off'}`);
+    h += info('CardKB', d.cardkb ? 'detected' : 'not detected');
+    h += info('Hubs heard (last 30 s)', d.hubs_heard);
+    h += info('Free heap', `${Math.round(d.heap / 1024)} kB`);
+    return h + '</table>';
+  }
   h += info('Sensor pin', `level ${d.sensor_level ? 1 : 0}, ${d.flips} edge${d.flips === 1 ? '' : 's'} since boot (${d.sensor_hall ? 'Hall latch' : 'reed'})`);
   h += ok(d.sensor_flips, 'Sensor seen moving', 'NO EDGE YET');
   if (d.btn_none) h += info('Button', 'none on this head');
   else { h += info('Button pin', `${d.btn_released ? 'released' : 'PRESSED / stuck low'}, ${d.presses} press${d.presses === 1 ? '' : 'es'} since boot`); h += ok(d.btn_released && d.btn_pressed, 'Button works', d.btn_released ? 'NOT PRESSED YET' : 'STUCK LOW'); }
   const bv = d.battery_mv / 1000;
-  h += ok(d.battery_mv > 3400 && d.battery_mv < 5600, 'Battery', d.battery_mv ? bv.toFixed(2) + ' V' : 'NO READING') + (d.battery_mv ? info('', bv.toFixed(2) + ' V') : '');
+  h += ok(d.battery_mv > 3400 && d.battery_mv < 5600, 'Battery', d.battery_mv ? bv.toFixed(2) + ' V' : 'NO READING') + info('', d.battery_mv ? bv.toFixed(2) + ' V' + (d.battery_mv <= 3400 ? ' · pack off / on USB, or no divider on the battery pin' : '') : 'battery pin not wired');
   if (!d.shield_built) h += info('Sonar shield', 'not in this firmware (no SONAR_REAL)');
   else {
     h += ok(d.spi_ok, 'Shield answers on SPI', 'NO ANSWER: 3.3 V, GND, SCLK/MISO/MOSI/NCS');
@@ -1376,9 +1398,9 @@ function stRender(d) {
       h += ok(!d.ee_fault, 'Chip EEPROM', 'CRC FAULT');
       if (!d.pinged) h += info('Test ping', '<span class="badge warn">DID NOT RUN</span> (driver not started: shield found after boot? reboot the hole and run again)');
       else {
-        h += ok(!d.pulse_fault && !d.drv_fault, 'Burst driver', d.pulse_fault ? 'PULSE COUNT FAULT (IO2?)' : 'DRIVER FAULT');
+        h += ok(!d.pulse_fault && !d.drv_fault, 'Burst driver', d.pulse_fault ? 'PULSE COUNT FAULT: fewer IO2 pulses than BURST_PULSE' : 'DRIVER STUCK (firmware before D72 reports this on every ping)');
         h += ok(d.leakage, 'Burst reaches the receiver (time zero)', 'NO LEAKAGE SEEN');
-        h += info('Transducer (heuristic)', d.ring_bins >= 8 ? `likely connected: ring-down ${d.ring_bins} bins` : `likely NOT connected: ring-down ${d.ring_bins} bins`);
+        h += info('Transducer (heuristic)', d.ring_bins >= 8 ? `likely connected: ring-down ${d.ring_bins} bins` : `likely NOT connected: ring-down ${d.ring_bins} bins (open header measured 5)`);
         h += info('ADC', `raw max ${d.raw_max}${d.raw_max >= 4080 ? ' (CLIPPED)' : ''}, noise floor code ${d.noise_code}`);
       }
     }

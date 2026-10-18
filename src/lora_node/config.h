@@ -159,6 +159,17 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define VBAT_ONBOARD_PIN    1
 #define VBAT_ONBOARD_CTRL   37
 #define VBAT_ONBOARD_RATIO  4.9f
+// D73: GPS on the chalet box (NEO-6M class, 9600 baud NMEA) on UART1. GPS_RX_PIN = the ESP32 pin the module's TX is
+// on. Frank's wiring (2023, "pretty sure 45/46"): if nothing arrives in GPS_SWAP_MS the firmware swaps the two once.
+// -D GPS_RX_PIN=-1 for a chalet without GPS.
+#ifndef GPS_RX_PIN
+#define GPS_RX_PIN          46
+#endif
+#ifndef GPS_TX_PIN
+#define GPS_TX_PIN          45
+#endif
+#define GPS_BAUD            9600
+#define GPS_SWAP_MS         4000
 #define VBAT_DIVIDER        2.0         // External 100k+100k divider
 #define VBAT_REF_MV         3300        // ESP32-S3 ADC reference with 11dB atten
 

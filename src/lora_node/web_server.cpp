@@ -76,7 +76,8 @@ void handleWebApi() {
   // v2 network one-liner: setup phase countdown (0 = running), link, LoRa channel (1-8), master
   doc["setup_arm_s"] = meshSetupArmInS();
   doc["cm_per_turn"] = settings.cmPerTurn;   // D69: for the "line out" estimate
-  { static const char* const TRN[] = {"auto", "lora", "espnow"}; const uint8_t t = meshTransport(); doc["transport"] = TRN[t <= 2 ? t : 0]; }
+  { static const char* const TRN[] = {"auto", "lora", "espnow", "ebfirst"}; const uint8_t t = meshTransport(); doc["transport"] = TRN[t <= 3 ? t : 0]; }
+  { GpsStatus g; if (gpsStatus(g)) { JsonObject gj = doc.createNestedObject("gps"); gj["fix"] = g.fix; gj["sats"] = g.sats; gj["hdop"] = g.hdop_x10 / 10.0; gj["data"] = g.sentences > 0; gj["origin"] = g.origin_set; if (g.fix) { gj["lat"] = g.lat_e7 / 1e7; gj["lon"] = g.lon_e7 / 1e7; } } }   // D73
   doc["lora_ch"] = meshLoraChannel() + 1;
   doc["master"] = "chalet";
 
@@ -166,6 +167,27 @@ void handleWebApiNodeArm() {
 }
 
 static SelfTestResult g_ownSelfTest; static uint32_t g_ownSelfTestAt = 0;   // D70: hub page: last own-hole result
+static String g_chaletSelfTest;   // D73: the chalet's own check, JSON, built on request
+static void chaletSelfTest() {
+  StaticJsonDocument<640> doc;
+  doc["have"] = true; doc["chalet"] = true; doc["id"] = NODE_ID; doc["age_s"] = 0;
+  GpsStatus g; const bool gps = gpsStatus(g);
+  doc["gps_built"] = gps;
+  if (gps) {
+    doc["gps_sentences"] = g.sentences; doc["gps_bad"] = g.bad; doc["gps_data_age_s"] = g.data_age_s == 0xFFFFFFFF ? -1 : (int)g.data_age_s;
+    doc["gps_swapped"] = g.swapped; doc["gps_fix"] = g.fix; doc["gps_sats"] = g.sats; doc["gps_hdop"] = g.hdop_x10 / 10.0; doc["gps_origin"] = g.origin_set;
+    doc["gps_rx_pin"] = g.swapped ? GPS_TX_PIN : GPS_RX_PIN;
+    if (g.fix) { doc["gps_lat"] = g.lat_e7 / 1e7; doc["gps_lon"] = g.lon_e7 / 1e7; }
+  }
+  readBattery();
+  doc["battery_mv"] = localBatteryMv;
+  doc["lora_ready"] = loraReady;
+  doc["wifi_sta"] = wifiStaConnected; doc["wifi_ap"] = wifiApActive;
+  doc["cardkb"] = cardKbAvailable;
+  { MeshHubLink hl[12]; const uint8_t n = meshHubLinks(hl, 12); uint8_t live = 0; for (uint8_t i = 0; i < n; i++) if ((hl[i].lora_age_s >= 0 && hl[i].lora_age_s < 30) || (hl[i].eb_age_s >= 0 && hl[i].eb_age_s < 30)) live++; doc["hubs_heard"] = live; }
+  doc["heap"] = ESP.getFreeHeap();
+  g_chaletSelfTest = ""; serializeJson(doc, g_chaletSelfTest);
+}
 // D70 POST {"nodeId":n}: the chalet beacons CMD_SELFTEST (user priority); the hub runs it on its own hole or hands
 // DEVCMD_SELFTEST to the tip-up when it next talks; the result comes back in SEC_SELFTEST (GET /api/selftest?id=n)
 void handleWebApiNodeSelfTest() {
@@ -173,7 +195,8 @@ void handleWebApiNodeSelfTest() {
   if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
   const int id = doc["nodeId"] | 0;
   if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
-  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetSelfTest((uint8_t)id);
+  if (currentRole == ROLE_GATEWAY_OFFSHORE && id == NODE_ID) chaletSelfTest();   // D73: the box itself, answered at once
+  else if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetSelfTest((uint8_t)id);
   else if (id == NODE_ID) { holeSelfTest(g_ownSelfTest, true); g_ownSelfTestAt = millis() ? millis() : 1; meshHubSelfTestReport(NODE_ID, (const uint8_t*)&g_ownSelfTest); }
   else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, 0);
   server.send(200, "application/json", "{\"ok\":true}");
@@ -182,6 +205,7 @@ void handleWebApiSelfTest() {
   const int id = server.hasArg("id") ? server.arg("id").toInt() : 0;
   uint8_t b[12]; uint32_t age = 0;
   bool have = false;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE && id == NODE_ID) { server.send(200, "application/json", g_chaletSelfTest.length() ? g_chaletSelfTest : String("{\"have\":false}")); return; }   // D73
   if (currentRole == ROLE_GATEWAY_OFFSHORE) have = id > 0 && meshSelfTestResult((uint8_t)id, b, age);
   else if (id == NODE_ID && g_ownSelfTestAt) { memcpy(b, &g_ownSelfTest, 12); age = millis() - g_ownSelfTestAt; have = true; }   // hub hotspot page
   if (!have) { server.send(200, "application/json", "{\"have\":false}"); return; }

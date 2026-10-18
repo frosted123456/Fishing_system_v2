@@ -356,6 +356,13 @@ void holeScreenLine(char* out, size_t n);   // D64: hub home footer
 void holeTripClear();                 // D64: serial HOLE CLEAR (= button press while tripped)
 uint16_t holeTurns();                 // D69: quarter turns of the own hole since armed / cleared
 void holeSelfTest(SelfTestResult& r, bool toSerial);   // D70: wiring check of the own hole
+// D73: GPS (chalet)
+struct GpsStatus { bool fix, swapped, origin_set; uint8_t sats, hh, mm; uint16_t hdop_x10; int32_t lat_e7, lon_e7, lat0_e7, lon0_e7; uint32_t sentences, bad, data_age_s; };
+void gpsSetup();
+void gpsLoop();
+bool gpsStatus(GpsStatus& s);   // false = no GPS in this build
+bool gpsSetOrigin();            // "Chalet here" = map (0, 0); false without a fix
+bool gpsPinHole(uint8_t hole);  // store the current fix as that hole's map position; false without fix / origin
 void readBattery();
 
 // Display sleep/wake functions

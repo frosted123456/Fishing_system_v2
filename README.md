@@ -76,8 +76,8 @@ On the Heltec V3 (hub / LoRa tip-up) the arming button is **GPIO5 -> button -> G
 ### Heltec V3 + shield 002 (hub, LoRa tip-up, relay with a hole; D62)
 
 Build env: `hub_sonar` / `sensor_lora_sonar` (`hub_sonar_bench` for the bucket test: `BENCH` line on the USB serial
-port every 2 s). Same driver, pins = the Heltec block of `lib/SonarTuss/src/sonar_tuss4470.h` (est., to verify on the
-board). The chalet keeps no sonar. See docs/SONAR_DRIVER.md, "Heltec V3 build".
+port every 2 s). Same driver, pins = the Heltec block of `lib/SonarTuss/src/sonar_tuss4470.h` (confirmed on the bench
+2026-10-18: SPI, VDRV, burst and ADC all answer). The chalet keeps no sonar. See docs/SONAR_DRIVER.md, "Heltec V3 build".
 
 ![Heltec V3 + shield 002 wiring](images/wiring_heltec_v3_shield002.png)
 
@@ -112,6 +112,14 @@ Shield set-up:
   Optional: remove R3 (power LED, ~4 mA on 3.3 V).
 - MT3608 at **21.5 V** for the default `vdrv` 20: the shield's 1N4001 drops ~0.7-0.9 V and the TUSS4470 needs
   VPWR > VDRV + 0.3 V. Rule: `vdrv` = MT3608 setting - 1.5 V. Keep the MT3608 at or below ~22 V (shield reference design).
+
+### Chalet box: GPS (D73)
+
+NEO-6M class module on the Heltec V3's UART1: module **TX -> GPIO46**, module **RX -> GPIO45**, VCC 3.3 V, GND
+(`GPS_RX_PIN` / `GPS_TX_PIN` in `src/lora_node/config.h`; `-D GPS_RX_PIN=-1` for a box without GPS). If no NMEA
+sentence arrives in 4 s the firmware tries the two pins swapped and the wiring check says so. Used to pin holes on
+the pocket map from the OLED: Settings -> Pin holes (GPS) -> "Chalet here" (map origin) once, then carry the box to
+each hole and OK on its row; OK on a pinned hole asks to clear it. Same store as the web map (`/api/node/pos`).
 
 ## Build and flash
 
