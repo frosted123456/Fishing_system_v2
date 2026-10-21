@@ -1,5 +1,6 @@
 // Chalet / hub web server: routes, JSON API, remote config (split out of main.cpp, D49).
 #include "chalet.h"
+#include <ESPmDNS.h>
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WEB SERVER
@@ -20,8 +21,11 @@ void setupWebServer() {
   server.on("/api/tile", HTTP_POST, handleWebApiTilePost, handleWebApiTileUpload);
   server.on("/api/tiles", HTTP_GET, handleWebApiTiles);
   POST_PIN("/api/tiles/clear", handleWebApiTilesClear);
-  POST_PIN("/api/gps", handleWebApiGpsPost);                                                  // D76: origin / pin / clear from the page
-  POST_PIN("/api/silence", handleWebApiSilence);
+  POST_PIN("/api/gps", handleWebApiGpsPost);
+  server.on("/api/rangetest", HTTP_GET, handleWebApiRange);         // D80 range test
+  POST_PIN("/api/rangetest", handleWebApiRangePost);
+  server.on("/api/rangetest/run", HTTP_GET, handleWebApiRangeRun);                                                  // D76: origin / pin / clear from the page
+  server.on("/api/silence", HTTP_POST, handleWebApiSilence);   // D78: no PIN: anyone at the chalet may silence the alarm
   POST_PIN("/api/node/name", handleWebApiNodeName);
   POST_PIN("/api/node/bait", handleWebApiNodeBait);    // v2 (D43): bait depth per hole
   POST_PIN("/api/node/arm", handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
@@ -40,7 +44,10 @@ void setupWebServer() {
   POST_PIN("/api/radio", handleWebApiRadioPost);
   server.on("/sonar", HTTP_GET, handleWebRoot);
   server.on("/api/sonar", HTTP_GET, handleWebApiSonar);
-  POST_PIN("/api/sonar", handleWebApiSonarPost);
+  server.on("/api/sonar", HTTP_POST, []() {   // D78: focus (Watch) needs no PIN; switching the test mode does
+    const bool simReq = server.hasArg("plain") && server.arg("plain").indexOf("\"sim\"") >= 0;
+    if (simReq && !webPinOk()) return;
+    handleWebApiSonarPost(); });
   server.on("/api/sonar/glance", HTTP_GET, []() {   // v2: every hole, ~3 min of sonar summaries (since = frame)
     const uint16_t since = (uint16_t)strtoul(server.arg("since").c_str(), nullptr, 10);
     server.send(200, "application/json", meshSonarGlanceJson(since));
@@ -55,6 +62,10 @@ void setupWebServer() {
 #undef POST_PIN
   server.begin();
   DEBUG_PRINTLN(F("Web server ready on port 80"));
+  // D79: http://icefish.local on the hotspot and on the cabin router alike (the hub answers as icefish-hub<N>.local).
+  // Phones: iPhone resolves .local natively; Android since 12 (older Androids need the IP).
+  { char host[24]; if (currentRole == ROLE_GATEWAY_OFFSHORE) strcpy(host, "icefish"); else snprintf(host, sizeof(host), "icefish-hub%u", (unsigned)NODE_ID);
+    if (MDNS.begin(host)) { MDNS.addService("http", "tcp", 80); Serial.printf("mDNS: http://%s.local\n", host); } }
 }
 
 void loopWebServer() {
@@ -72,7 +83,7 @@ void handleWebRoot() {
 
 void handleWebApi() {
   // BUG FIX #10 / v2: sized for the node count (up to MAX_NODES = 48, ~240 B each incl. copied strings)
-  DynamicJsonDocument doc(1536 + 352 * (size_t)network.node_count);   // D70 review: 16-19 members per node now
+  DynamicJsonDocument doc(1664 + 352 * (size_t)network.node_count);   // D80: +follow   // D70 review: 16-19 members per node now
   doc["network_id"] = network.network_id;
   doc["node_count"] = network.node_count;
   doc["uptime"] = millis() / 1000;
@@ -93,6 +104,12 @@ void handleWebApi() {
   doc["lora_ch"] = meshLoraChannel() + 1;
   doc["master"] = "chalet";
   doc["map_bytes"] = (uint32_t)mapPackBytes();   // D74: offline contour pack stored (0 = none)
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) {   // D80: which hole the sonar view follows (map marker, every tab)
+    char why[28]; uint32_t pin_s = 0, trip_s = 0; meshFollowState(why, sizeof(why), pin_s, trip_s);
+    JsonObject fo = doc.createNestedObject("follow");
+    fo["on"] = meshFollowOn(); fo["node"] = meshFocusNode(); fo["why"] = (char*)why; fo["pin_s"] = pin_s; fo["trip_s"] = trip_s;
+  }
+  if (rangeRunning()) { char l[40]; rangeOledLine(l, sizeof(l)); JsonObject rt = doc.createNestedObject("rt"); rt["hub"] = meshRangeHub(); rt["line"] = l; }   // D80
   doc["map_max"] = (uint32_t)mapPackMax();
   doc["pin"] = settings.webPin[0] != 0;          // D74: changes need the PIN
 
@@ -102,6 +119,7 @@ void handleWebApi() {
   wifi["ap_ip"] = apIpAddress;
   wifi["sta_connected"] = wifiStaConnected;
   wifi["sta_ip"] = staIpAddress;
+  { uint8_t pri = 0; wifi_second_chan_t sec; esp_wifi_get_channel(&pri, &sec); wifi["ch"] = pri; wifi["eb_ok"] = pri == ESPNOW_CHANNEL; }   // D78: router on another channel = hubs on LoRa only
 
   // IMPROVEMENT 1: Include LoRa diagnostic counters
   JsonObject lora = doc.createNestedObject("lora");
@@ -115,6 +133,7 @@ void handleWebApi() {
 
   JsonArray nodes = doc.createNestedArray("nodes");
   for (int i = 0; i < network.node_count; i++) {
+    if (i > 0 && !network.nodes[i].online && millis() - network.nodes[i].last_seen > 60UL * 60UL * 1000UL) continue;   // D79 (E6): off for an hour = not on the page (name / position stay saved)
     JsonObject n = nodes.createNestedObject();
     n["id"] = network.nodes[i].node_id;
     n["name"] = network.nodes[i].name;
@@ -863,6 +882,7 @@ void handleWebApiSonarPost() {
     return;
   }
   if (doc.containsKey("sim")) { settings.sonarSim = doc["sim"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
+  if (doc.containsKey("follow")) { settings.followAction = doc["follow"].as<bool>(); meshSetFollow(settings.followAction); saveSettings(); }   // D80
   if (doc.containsKey("focus")) {
     const int f = doc["focus"].as<int>();
     if (f >= 0 && f <= 255) meshSetFocusNode((uint8_t)f);

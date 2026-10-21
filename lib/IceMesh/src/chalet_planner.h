@@ -40,6 +40,10 @@ struct HubInfo {
   uint8_t miss_streak;
   uint16_t hold_until;
   int8_t win_rssi[8];
+  int8_t win_snr_q4[8];        // D79: SNR goes with RSSI into the step-up decision
+  uint8_t trial_left;          // D79: frames the new faster mode still has to pass (a miss = straight back)
+  uint8_t trial_prev;          // mode to fall back to during the trial
+  uint8_t trial_fails;         // D80: failed trials in a row (each one doubles the hold before the next try, x8 max)
   int8_t last_rssi, last_snr_q4;
   uint8_t relay_cand; int8_t relay_cand_rssi; uint16_t relay_cand_frame;
   bool has_health; uint16_t health_frame; Health health;
@@ -56,6 +60,7 @@ struct PlannerConfig {
   uint16_t frame_ms;         // shortest frame (normally 1000)
   uint16_t frame_ms_max;     // longest frame the planner may step up to when the hubs do not fit (2000)
   uint8_t focus_hub;        // hub reporting the FOCUS sonar node (ID_NONE = none)
+  uint8_t range_hub;        // D80 range test: this hub's slot cycles SF9 -> SF5 one mode per frame (ID_NONE = off)
   uint8_t focus_allowance;  // its slot allowance (est. 180 B = FOCUS stream + line state)
 };
 
@@ -78,6 +83,9 @@ class ChaletPlanner {
     FRAME_STEP_MS = 500,
     DOWN_FRAMES = 20,         // beacons in a row where the shorter frame fits before stepping down
     UP_MARGIN_DB = 12,        // est.: step to a faster mode when the weakest of 8 packets keeps this margin
+    UP_SNR_MARGIN_DB = 6,     // D79 est.: ... and the weakest SNR keeps this over the next mode's demodulation limit
+    TRIAL_FRAMES = 3,         // D79: a faster mode is on trial for its first frames: one miss = back where it was
+    FW_FAST_MODES = 2,        // D80: hub firmware (Health.fw) that knows SF6 / SF5; older hubs stop at SF7
     UP_HOLD_FRAMES = 20,
     DOWN_HOLD_FRAMES = 30,
   };
@@ -87,7 +95,7 @@ class ChaletPlanner {
   ChaletPlanner() {
     memset(&cfg, 0, sizeof(cfg));
     cfg.allowance = 96; cfg.test_allowance = 160; cfg.frame_ms = 1000;
-    cfg.focus_hub = ID_NONE; cfg.focus_allowance = 180; cfg.frame_ms_max = 2000;
+    cfg.focus_hub = ID_NONE; cfg.focus_allowance = 180; cfg.frame_ms_max = 2000; cfg.range_hub = ID_NONE;
     for (uint8_t i = 0; i < MAX_HUBS; i++) hubs_[i].used = false;
     n_acks_ = 0;
   }
@@ -107,11 +115,13 @@ class ChaletPlanner {
     if (rssi > s.rssi_max) s.rssi_max = rssi;
     if (snr_q4 < s.snr_min_q4) s.snr_min_q4 = snr_q4;
     if (snr_q4 > s.snr_max_q4) s.snr_max_q4 = snr_q4;
-    if (mode == h->mode) {
+    if (mode == h->mode && h->id != cfg.range_hub) {
       h->hist = static_cast<uint8_t>((h->hist << 1) | 1);
       h->win_rssi[h->hist_n % 8] = rssi;
+      h->win_snr_q4[h->hist_n % 8] = snr_q4;
       if (h->hist_n < 255) h->hist_n++;
       h->miss_streak = 0;
+      if (h->trial_left && --h->trial_left == 0) h->trial_fails = 0;   // D79: one more good frame; D80: trial passed
       adaptUp(*h, frame);
     }
   }
@@ -123,11 +133,16 @@ class ChaletPlanner {
     ModeStats& s = h->stats[mode];
     s.scheduled++;
     if (crc_error) s.crc_err++;
-    if (mode == h->mode) {
+    if (mode == h->mode && h->id != cfg.range_hub) {
       h->hist = static_cast<uint8_t>(h->hist << 1);
       if (h->hist_n < 255) h->hist_n++;
       h->miss_streak++;
-      if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->miss_streak >= 2 && h->mode != MODE_SF9_BW500) {
+      if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->trial_left && h->mode != MODE_SF9_BW500) {   // D79: trial failed
+        const uint8_t f = h->trial_fails < 3 ? h->trial_fails : 3;   // D80 back-off: hold x1, x2, x4, x8
+        const uint8_t fails = static_cast<uint8_t>(h->trial_fails < 255 ? h->trial_fails + 1 : 255);
+        setMode(*h, static_cast<RadioMode>(h->trial_prev), frame, static_cast<uint16_t>(DOWN_HOLD_FRAMES << f));
+        h->trial_fails = fails;
+      } else if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->miss_streak >= 2 && h->mode != MODE_SF9_BW500) {
         setMode(*h, slowerMode(static_cast<RadioMode>(h->mode)), frame, DOWN_HOLD_FRAMES);
       }
     }
@@ -230,9 +245,14 @@ class ChaletPlanner {
   }
 
   // The mode a direct hub slot uses in `frame` (also used by the receiver to set its radio).
+  // D80: fastest mode this hub's firmware knows (until its first health section arrives: the old set)
+  static RadioMode maxModeFor(const HubInfo& h) { return (h.has_health && h.health.fw >= FW_FAST_MODES) ? MODE_SF5_BW500 : MODE_SF7_BW500; }
+
   uint8_t directModeFor(const HubInfo& h, uint8_t index, uint16_t frame) const {
+    if (cfg.range_hub != ID_NONE && h.id == cfg.range_hub)   // D80 range test: one mode per frame, SF9 first
+      return static_cast<uint8_t>(frame % (static_cast<uint8_t>(maxModeFor(h)) + 1));
     switch (cfg.test_mode) {
-      case TEST_ROTATE: return static_cast<uint8_t>((frame + index) % MODE_COUNT);
+      case TEST_ROTATE: return static_cast<uint8_t>((frame + index) % (static_cast<uint8_t>(maxModeFor(h)) + 1));
       case TEST_FIX_SF9: return MODE_SF9_BW500;
       case TEST_FIX_SF8: return MODE_SF8_BW500;
       case TEST_FIX_SF7: return MODE_SF7_BW500;
@@ -292,7 +312,8 @@ class ChaletPlanner {
 
   void expire(uint16_t frame) {
     for (uint8_t i = 0; i < MAX_HUBS; i++)
-      if (hubs_[i].used && seqDiff(frame, hubs_[i].last_any) > static_cast<int16_t>(HUB_TIMEOUT_FRAMES))
+      if (hubs_[i].used && hubs_[i].id != cfg.range_hub &&   // D80: the range test hub stays (its misses are the data)
+          seqDiff(frame, hubs_[i].last_any) > static_cast<int16_t>(HUB_TIMEOUT_FRAMES))
         hubs_[i].used = false;
   }
 
@@ -300,6 +321,7 @@ class ChaletPlanner {
     for (uint8_t i = 0; i < MAX_HUBS; i++) {
       HubInfo& h = hubs_[i];
       if (!h.used) continue;
+      if (h.id == cfg.range_hub) { h.via = 0; continue; }   // D80 range test: always its own direct slot, even at the edge
       const bool direct_ok = directRecent(h, frame) &&
                              (h.via == 0 || h.direct_hits >= DIRECT_HITS_TO_RETURN);
       if (direct_ok) { h.via = 0; continue; }
@@ -408,18 +430,26 @@ class ChaletPlanner {
   }
 
   void setMode(HubInfo& h, RadioMode m, uint16_t frame, uint16_t hold) {
-    h.mode = m; h.hist = 0; h.hist_n = 0; h.miss_streak = 0;
+    h.mode = m; h.hist = 0; h.hist_n = 0; h.miss_streak = 0; h.trial_left = 0;
     h.hold_until = static_cast<uint16_t>(frame + hold);
   }
 
+  // D79: step up when the weakest of the last 8 packets keeps UP_MARGIN_DB over the next mode's sensitivity AND its SNR
+  // keeps UP_SNR_MARGIN_DB over that mode's demodulation limit; the new mode is then on trial for TRIAL_FRAMES frames.
   void adaptUp(HubInfo& h, uint16_t frame) {
-    if (!cfg.adaptive || cfg.test_mode != TEST_OFF || h.mode == MODE_SF7_BW500) return;
-    if (seqDiff(frame, h.hold_until) < 0 || h.hist_n < 8 || h.hist != 0xFF) return;
-    int8_t mn = h.win_rssi[0];
-    for (uint8_t i = 1; i < 8; i++) if (h.win_rssi[i] < mn) mn = h.win_rssi[i];
+    if (!cfg.adaptive || cfg.test_mode != TEST_OFF || h.id == cfg.range_hub || fasterMode(static_cast<RadioMode>(h.mode)) == h.mode) return;
+    if (static_cast<uint8_t>(fasterMode(static_cast<RadioMode>(h.mode))) > static_cast<uint8_t>(maxModeFor(h))) return;   // D80: old firmware
+    if (seqDiff(frame, h.hold_until) < 0 || h.hist_n < 8 || h.hist != 0xFF || h.trial_left) return;
+    int8_t mn = h.win_rssi[0], sn = h.win_snr_q4[0];
+    for (uint8_t i = 1; i < 8; i++) { if (h.win_rssi[i] < mn) mn = h.win_rssi[i]; if (h.win_snr_q4[i] < sn) sn = h.win_snr_q4[i]; }
     const RadioMode next = fasterMode(static_cast<RadioMode>(h.mode));
     const int16_t margin_x10 = static_cast<int16_t>(mn * 10 - modeInfo(next).sens_dbm_x10);
-    if (margin_x10 >= UP_MARGIN_DB * 10) setMode(h, next, frame, UP_HOLD_FRAMES);
+    const int16_t snr_margin_x10 = static_cast<int16_t>((sn * 10) / 4 - modeInfo(next).snr_limit_x10);
+    if (margin_x10 >= UP_MARGIN_DB * 10 && snr_margin_x10 >= UP_SNR_MARGIN_DB * 10) {
+      const uint8_t prev = h.mode;
+      setMode(h, next, frame, UP_HOLD_FRAMES);
+      h.trial_left = TRIAL_FRAMES; h.trial_prev = prev;
+    }
   }
 
   HubInfo hubs_[MAX_HUBS];

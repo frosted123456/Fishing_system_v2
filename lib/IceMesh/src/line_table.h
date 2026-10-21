@@ -29,6 +29,12 @@ class LineTable {
       if (e->pending) e->seq = 1;
       created = e->pending;
     } else if (state != e->state) {
+      // D79 (E5): a trip the chalet has not acked yet must not be overwritten by the line reset: it becomes
+      // TRIP_SEEN (still pending), held until the ack; the chalet rings it as a trip that already ended.
+      const bool was_trip = e->state == LS_TRIPPED || e->state == LS_RUNNING;
+      const bool ends = state == LS_IDLE || state == LS_OFFLINE;
+      if (e->pending && was_trip && ends) state = LS_TRIP_SEEN;
+      if (e->pending && e->state == LS_TRIP_SEEN && ends) { e->turns = turns; e->flags = flags; e->battery = battery_pct; e->last_seen = now_ms; return false; }
       e->state = state;
       e->seq = static_cast<uint8_t>((e->seq + 1) & 0x0F);
       e->pending = true;

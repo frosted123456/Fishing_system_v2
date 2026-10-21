@@ -8,6 +8,7 @@
 #include "chalet_planner.h"
 #include "chalet_nodes.h"
 #include "chalet_rx.h"
+#include "range_test.h"
 
 namespace icemesh {
 namespace tdma {
@@ -32,6 +33,7 @@ class ChaletRole {
   uint8_t cmd_target = 0, cmd_value = 0;
   uint8_t net_cfg = 0;                       // makeNetCfg(transport, ESP-NOW LR, LoRa channel)
   sonar::SonarSink* sonar_sink = nullptr;   // gets every SEC_SONAR block (direct or relayed)
+  RangeRing<64>* range_ring = nullptr;       // D80: slot results of planner.cfg.range_hub (range test), else unused
 
   // ESP-NOW backbone: hubs heard there (independent of the LoRa plan)
   struct EbHub { uint8_t id; uint16_t last_frame; uint32_t rx; uint8_t hops; };
@@ -68,6 +70,10 @@ class ChaletRole {
     if (h.type == PT_JOIN) { planner.onJoin(h.src, 0, rssi, frame); return false; }   // JOIN slot or random
     if (h.type != PT_HUB) return false;
     planner.onDirectPacket(h.src, frame, rssi, snr_q4, s.mode, s.kind == SLOT_HUB && s.owner == h.src);
+    if (range_ring != nullptr && s.kind == SLOT_HUB && s.via == 0 && s.owner == h.src && h.src == planner.cfg.range_hub) {
+      RangeSample rs; rs.frame = frame; rs.mode = s.mode; rs.ok = true; rs.crc = false; rs.rssi = rssi; rs.snr_q4 = snr_q4;
+      range_ring->push(rs);
+    }
     res = consumeHubPacket(p, len, planner.cfg.network_id, frame, planner, nodes, sonar_sink);
     test_bytes_rx += res.test_bytes;
     if (res.malformed) bad_packets++;
@@ -87,6 +93,10 @@ class ChaletRole {
     if (i >= beacon.n_slots) return;
     const Slot& s = beacon.slots[i];
     if (s.kind == SLOT_HUB && s.via == 0) planner.onSlotMissed(s.owner, frame, s.mode, crc_error);
+    if (range_ring != nullptr && s.kind == SLOT_HUB && s.via == 0 && s.owner != ID_NONE && s.owner == planner.cfg.range_hub) {
+      RangeSample rs; rs.frame = frame; rs.mode = s.mode; rs.ok = false; rs.crc = crc_error; rs.rssi = 0; rs.snr_q4 = 0;
+      range_ring->push(rs);
+    }
   }
 
   uint8_t expireNodes(NodeChange* out, uint8_t max) { return nodes.expire(frame, out, max); }

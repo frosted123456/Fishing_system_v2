@@ -141,8 +141,9 @@ void ebRelayLoop();
 #define SONAR_BENCH 0               // 1 = bucket test (with SONAR_REAL): real sonar from boot, no hub needed,
                                     //     stays awake, prints a BENCH line every 2 s (docs/SONAR_DRIVER.md)
 #endif
-#define SONAR_CTRL_WAIT_MS     120  // listen after each wake-up TX (est.: hub answers from its loop)
-#define SONAR_CTRL_TIMEOUT_MS  30000UL   // no control for this long: test mode off, back to sleep
+#define SONAR_CTRL_WAIT_MS     300  // listen after each wake-up TX (D79: was 120, a busy hub loop missed it)
+#define SONAR_CTRL_TIMEOUT_MS  150000UL  // no control for this long: sonar off, back to sleep (D79: 2.5 x the heartbeat; the hub
+                                         // also repeats the control every 10 s while it hears sonar from us)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBALS
@@ -238,6 +239,7 @@ static inline esp_err_t nowSend(const uint8_t* mac, const uint8_t* data, size_t 
   return r;
 }
 volatile bool sendSuccess = false;
+volatile uint8_t g_ucFails = 0;   // D79 (E7): unicast failures in a row (sonar frames to a hub that went away)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FORWARD DECLARATIONS
@@ -527,10 +529,13 @@ void loop() {
     if (currentReed) {
       DEBUG_PRINTLN(F("FISH ON! Flag triggered"));
       SET_FLAG(currentFlags, FLAG_FISH_ON);
+      CLEAR_FLAG(currentFlags, FLAG_ACKNOWLEDGED);   // D79 (E3): every trip is acked on its own; the retry loop below runs again
+      alertRetryCount = 0;
       sendAlert();
     } else {
       DEBUG_PRINTLN(F("Flag reset - FISH OFF"));
       CLEAR_FLAG(currentFlags, FLAG_FISH_ON);
+      CLEAR_FLAG(currentFlags, FLAG_ACKNOWLEDGED);
       // SEND IMMEDIATE STATUS UPDATE (not just wait for heartbeat)
       sendStatus(MSG_STATUS);
     }
@@ -768,7 +773,7 @@ bool espNowSendReliable(const uint8_t* data, size_t len, int maxRetries) {
     // If unicast failed completely, clear gateway MAC and fall back to broadcast
     if (!success) {
       DEBUG_PRINTLN("ESP-NOW: Unicast failed - clearing gateway MAC, using broadcast");
-      gatewayMacKnown = false;
+      gatewayMacKnown = false; g_ucFails = 0;
       memset(gatewayMac, 0, 6);
     }
   }
@@ -981,6 +986,7 @@ void sendAlert() {
 
 void onEspNowSent(const uint8_t* mac, esp_now_send_status_t status) {
   sendSuccess = (status == ESP_NOW_SEND_SUCCESS);
+  if (mac != nullptr && gatewayMacKnown && memcmp(mac, gatewayMac, 6) == 0) { if (sendSuccess) g_ucFails = 0; else if (g_ucFails < 255) g_ucFails++; }
   sendInProgress = false;
   g_txDone++; g_txDoneMs = millis();
 
@@ -1009,7 +1015,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
       // Learn gateway MAC address for future unicast (more reliable)
       if (!gatewayMacKnown) {
         memcpy(gatewayMac, mac, 6);
-        gatewayMacKnown = true;
+        gatewayMacKnown = true; g_ucFails = 0;   // D79: a fresh start for the unicast failure count
         DEBUG_PRINTF("Learned gateway MAC: %02X:%02X:%02X:%02X:%02X:%02X\n",
                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
@@ -1951,7 +1957,9 @@ void sonarLoop() {
       uint8_t frame[3 + icemesh::sonar::MAX_BLOCK];
       frame[0] = NETWORK_ID; frame[1] = NODE_ID; frame[2] = MSG_SONAR;
       memcpy(frame + 3, out[i].data, out[i].len);
-      // best effort, no retry: a lost block only leaves a gap on the waterfall
+      // best effort, no retry: a lost block only leaves a gap on the waterfall. D79 (E7): after 8 unicast failures in a
+      // row the hub is gone (or moved): broadcast, so any hub in range gets the stream; the next status frame relearns the MAC
+      if (gatewayMacKnown && g_ucFails >= 8) { gatewayMacKnown = false; memset(gatewayMac, 0, 6); g_ucFails = 0; DEBUG_PRINTLN(F("ESP-NOW: hub silent on unicast, sonar back to broadcast")); }
       nowSend(gatewayMacKnown ? gatewayMac : ESPNOW_BROADCAST, frame, 3 + out[i].len);
     }
   }

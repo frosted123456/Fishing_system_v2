@@ -211,7 +211,7 @@ void gpsPage(u8g2_t* u, const ScreenModel& m) {
   for (uint8_t r = 0; r < rows && first + r < total; r++) {
     const uint8_t i = (uint8_t)(first + r);
     char nm[24], v[14];
-    if (i == 0) { snprintf(nm, sizeof(nm), "Chalet here"); snprintf(v, sizeof(v), "%s", m.gps_origin ? "origin set" : "-"); }
+    if (i == 0) { snprintf(nm, sizeof(nm), "Chalet here"); snprintf(v, sizeof(v), "%s", m.gps_origin ? "set" : "-"); }   // "origin set" ran into the label
     else {
       const ScrHole& h = m.holes[i - 1];
       holeName(h, nm, sizeof(nm));
@@ -225,7 +225,7 @@ void gpsPage(u8g2_t* u, const ScreenModel& m) {
     if (sel) u8g2_SetDrawColor(u, 1);
     y += 10;
   }
-  if (total > rows) { snprintf(s, sizeof(s), "%u/%u", m.gps_sel + 1, total); u8g2_SetFont(u, F_SMALL); right(u, 63, s); }
+  // no "n/N" counter: it sat on top of the footer page dots
 }
 
 // ---- holes list, 4 per page ----
@@ -367,7 +367,7 @@ void networkPage(u8g2_t* u, const ScreenModel& m) {
   else snprintf(s, sizeof(s), "Link: %s", trName(m.transport));
   u8g2_DrawStr(u, 0, 22, s);
   char busy[8]; if (m.busy_pct <= 100) snprintf(busy, sizeof(busy), "%u%%", m.busy_pct); else snprintf(busy, sizeof(busy), "-");
-  snprintf(s, sizeof(s), "LoRa ch%u %u.%u MHz %s %s", m.lora_ch, m.lora_mhz_x10 / 10, m.lora_mhz_x10 % 10, m.ch_auto ? "Auto" : "fixed", m.chalet ? busy : "");
+  snprintf(s, sizeof(s), "LoRa ch%u %u.%uMHz %s %s", m.lora_ch, m.lora_mhz_x10 / 10, m.lora_mhz_x10 % 10, m.ch_auto ? "Auto" : "fixed", m.chalet ? busy : "");
   u8g2_DrawStr(u, 0, 31, s);
   if (m.chalet) {
     int x = 0, y = 41;
@@ -506,7 +506,7 @@ uint8_t screenSonarPages(const ScreenModel& m) {
 const char* screenPageAction(const ScreenModel& m, uint8_t page) {
   switch (page) {
     case PG_HOLES: return screenHolesPages(m) > 1 ? "next 4 holes" : "";
-    case PG_GPS: return !m.kb ? "CardKB to pin" : !m.gps_fix ? "wait for a fix" : m.gps_sel == 0 ? "origin = here" : (m.holes[m.gps_sel - 1].px_dm != 0x7FFF ? "re-pin (Del=clear)" : "pin hole here");
+    case PG_GPS: return !m.kb ? "CardKB to pin" : !m.gps_fix ? "wait for a fix" : m.gps_sel == 0 ? "origin = here" : (m.holes[m.gps_sel - 1].px_dm != 0x7FFF ? "re-pin" : "pin hole here");
     case PG_SONAR: return "";   // no footer room; paging by double press when > 9 holes
     case PG_FOCUS: return m.chalet ? "next hole" : "";
     case PG_TEST: {

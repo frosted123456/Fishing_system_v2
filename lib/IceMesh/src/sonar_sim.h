@@ -25,10 +25,10 @@ inline uint8_t staticLevel(float v) { return v < 0.06f ? 0 : (v < 0.20f ? 1 : (v
 //          every BG_EVERY pings; a new BG version when the static scene changed in > BG_CHANGE bins.
 class SonarSource {
  public:
-  enum { BASE_EVERY = 8, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12 };   // BASE every 2 s at 4 pings/s
+  enum { BASE_EVERY = 8, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12, QUIET_BASE_EVERY = 32 };   // BASE every 2 s at 4 pings/s; 8 s when nothing changes (D79)
   SonarScene scene;
   SonarProc proc;
-  uint32_t blocks_out = 0, pings_dropped = 0;
+  uint32_t blocks_out = 0, pings_dropped = 0, base_quiet = 0;
 
   // seed 0 = exactly the prototype's hole; otherwise a per-hole variant
   void begin(uint8_t node, uint32_t seed, uint16_t start_index = 0) {
@@ -38,7 +38,7 @@ class SonarSource {
     node_ = node; scene.begin(cfg); proc.reset(); proc.bait_m = cfg.bait_m;
     index_ = start_index; n_pend_ = 0; since_base_ = BASE_EVERY; since_bg_ = BG_EVERY; bg_seg_ = 0;
     bg_ver_ = 0; bg_valid_ = false; data_blocks_ = 0; act_bits_ = 0; was_focus_ = false; last_fish_ = 0;
-    tick_n_ = 0; rot_f_ = 0; last_status_ = 0; status_ = 0;
+    tick_n_ = 0; rot_f_ = 0; last_status_ = 0; status_ = 0; last_base_status_ = 0xFF; last_base_bottom_ = 0xFFFF;
     memset(slot_id_, 0, sizeof(slot_id_)); memset(slot_used_, 0, sizeof(slot_used_));
     memset(&last_, 0, sizeof(last_)); memset(&out_, 0, sizeof(out_)); memset(bg_, 0, sizeof(bg_));
   }
@@ -122,11 +122,16 @@ class SonarSource {
     // or when a fish comes near the bait (D43)
     const bool fish_new = !focus && fish > 0 && last_fish_ == 0 && since_base_ >= 4;
     const bool near_new = (status_ & ST_NEAR_BAIT) && !(last_status_ & ST_NEAR_BAIT);
-    if ((since_base_ >= BASE_EVERY || fish_new || near_new) && n_out < max_out) {
+    // D79: a quiet hole (no target, status unchanged, bottom within 5 cm of the last summary) sends its summary every
+    // QUIET_BASE_EVERY instead of BASE_EVERY: nothing new to say costs no airtime (nor battery on a tip-up)
+    const bool quiet = !focus && fish == 0 && status_ == last_base_status_ &&   // (the bait itself is a target with track 0: not "something new")
+                       (last_.bottom_cm > last_base_bottom_ ? last_.bottom_cm - last_base_bottom_ : last_base_bottom_ - last_.bottom_cm) <= 5;
+    const uint16_t every = quiet ? static_cast<uint16_t>(QUIET_BASE_EVERY) : static_cast<uint16_t>(BASE_EVERY);
+    if ((since_base_ >= every || fish_new || near_new) && n_out < max_out) {
       const Summary s = summary();
       const size_t len = encodeSummary(s, out[n_out].data, MAX_BLOCK);
-      if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
-      since_base_ = 0;
+      if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; base_quiet += quiet ? 1 : 0; }
+      since_base_ = 0; last_base_status_ = status_; last_base_bottom_ = last_.bottom_cm;
     }
     last_fish_ = fish;
     last_status_ = status_;
@@ -297,6 +302,7 @@ class SonarSource {
   Ping pend_[MAX_PINGS];
   uint8_t n_pend_ = 0;
   uint16_t since_base_ = 0, since_bg_ = 0;
+  uint8_t last_base_status_ = 0xFF; uint16_t last_base_bottom_ = 0xFFFF;   // D79: what the last summary said
   uint8_t bg_seg_ = 0, bg_ver_ = 0;
   bool bg_valid_ = false;
   uint8_t bg_[BINS];

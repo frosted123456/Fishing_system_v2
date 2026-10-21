@@ -84,7 +84,8 @@ enum SectionType : uint8_t {
 static const uint8_t SELFTEST_SECTION_LEN = 13;   // D70: [node] + SelfTestResult (12 B)
 
 
-enum LineState : uint8_t { LS_IDLE = 0, LS_TRIPPED = 1, LS_RUNNING = 2, LS_FAULT = 3, LS_OFFLINE = 4 };
+enum LineState : uint8_t { LS_IDLE = 0, LS_TRIPPED = 1, LS_RUNNING = 2, LS_FAULT = 3, LS_OFFLINE = 4,
+  LS_TRIP_SEEN = 5 };   // D79 (E5): tripped since the chalet's last ack, line already reset (the trip would be lost otherwise)
 enum RecordFlags : uint8_t { RF_LOWBAT = 0x01 };
 
 struct Slot { uint8_t kind, owner, mode, allowance, via; };

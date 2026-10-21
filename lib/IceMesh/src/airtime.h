@@ -27,12 +27,15 @@ inline uint32_t airtimeUs(uint16_t payload_len, const LoRaPhy& p) {
   const uint64_t tsym_ns = (static_cast<uint64_t>(1) << p.sf) * 1000000000ULL / p.bw_hz;
   const int de = (tsym_ns >= 16000000ULL) ? 1 : 0;
   const int ih = p.explicit_header ? 0 : 1;
-  const int num = 8 * payload_len - 4 * p.sf + 28 + 16 * (p.crc ? 1 : 0) - 20 * ih;
+  // D79: SF5 / SF6 (SX126x only, datasheet 6.1.4 as implemented in RadioLib SX126x::calculateTimeOnAir): the numerator
+  // drops the +8 and the preamble carries 6.25 extra symbols instead of 4.25
+  const bool short_sf = p.sf < 7;
+  const int num = 8 * payload_len - 4 * p.sf + (short_sf ? 20 : 28) + 16 * (p.crc ? 1 : 0) - 20 * ih;
   const int den = 4 * (p.sf - 2 * de);
   int blocks = (num > 0) ? (num + den - 1) / den : 0;
   const uint64_t n_payload = 8 + static_cast<uint64_t>(blocks) * p.cr_denom;
-  // preamble + 4.25 symbols  ==  (4 * preamble + 17) / 4 symbols
-  const uint64_t total_ns = (static_cast<uint64_t>(4 * p.preamble + 17) * tsym_ns) / 4 + n_payload * tsym_ns;
+  // preamble + 4.25 symbols (6.25 for SF5/6)  ==  (4 * preamble + 17 | 25) / 4 symbols
+  const uint64_t total_ns = (static_cast<uint64_t>(4 * p.preamble + (short_sf ? 25 : 17)) * tsym_ns) / 4 + n_payload * tsym_ns;
   return static_cast<uint32_t>(total_ns / 1000ULL);
 }
 

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 // Line states (same values as icemesh::tdma::LineState)
-enum : uint8_t { MESH_LS_IDLE = 0, MESH_LS_TRIPPED = 1, MESH_LS_RUNNING = 2, MESH_LS_FAULT = 3, MESH_LS_OFFLINE = 4 };
+enum : uint8_t { MESH_LS_IDLE = 0, MESH_LS_TRIPPED = 1, MESH_LS_RUNNING = 2, MESH_LS_FAULT = 3, MESH_LS_OFFLINE = 4, MESH_LS_TRIP_SEEN = 5 };   // D79: 5 = tripped and reset while unacked
 
 struct MeshNodeUpdate {        // chalet: owner-resolved node state change
   uint8_t node, owner, old_state, new_state; uint16_t turns; uint8_t flags;
@@ -71,6 +71,21 @@ bool meshAdaptive();
 void meshResetStats();
 void meshSendResetAll();
 void meshSetFocusNode(uint8_t node);
+void meshAutoFocus(uint8_t node);      // D79: FISH ON -> watch that hole for AUTO_FOCUS_MS (chalet)
+void meshAutoFocusTick();
+void meshSetFollow(bool on);           // D80 follow the action: focus follows the sonar activity (chalet)
+bool meshFollowOn();
+void meshFollowState(char* why, size_t n, uint32_t& pin_s, uint32_t& trip_s);   // D80: for the map marker
+// D80 range test (chalet): one hub's slot cycles SF9 -> SF5, slot results queued for the logger (rangetest.cpp)
+#include <range_test.h>
+void meshRangeStart(uint8_t hub);
+void meshRangeStop();
+uint8_t meshRangeHub();
+bool meshRangePop(icemesh::tdma::RangeSample& s);
+uint32_t meshRangeLost();
+bool meshRangeHubSide(uint8_t hub, icemesh::tdma::RangeHubSide& out, bool& direct, uint8_t& max_sf);
+bool meshHubRelaysOthers(uint8_t hub);   // D80: another hub's traffic goes through it
+static const uint32_t AUTO_FOCUS_MS = 120000UL;
 String meshRadioJson();                      // /api/radio
 
 // ---- both: human readable status (serial) ----

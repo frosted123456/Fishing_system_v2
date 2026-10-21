@@ -318,7 +318,9 @@ void checkSerialWifiConfig() {
 //   - joining a network from the OLED saves it (same NVS keys as the web page / serial WIFI:) and
 //     connects without a reboot
 // =============================================================================================
-static const uint32_t STA_RETRY_FIRST_MS = 2UL * 60UL * 1000UL, STA_RETRY_MAX_MS = 30UL * 60UL * 1000UL;
+// D78: one retry a minute, no back-off (the box roams in and out of the cabin router's range), and the core's own
+// auto-reconnect is OFF: it re-scanned all channels after every drop, taking the radio off the hotspot / ESP-NOW channel
+static const uint32_t STA_RETRY_FIRST_MS = 60UL * 1000UL, STA_RETRY_MAX_MS = 60UL * 1000UL;
 static volatile uint8_t staReason = 0;        // last disconnect reason, 0 = none yet
 static uint32_t staTryAt = 0;                 // millis() of the last WiFi.begin from here
 static uint32_t staNextTry = 0, staBackoffMs = STA_RETRY_FIRST_MS;
@@ -333,11 +335,16 @@ static bool staWanted() {
   return currentRole == ROLE_GATEWAY_OFFSHORE && storedSsid[0] && settings.wifiModeSetting != 0;
 }
 
+// D79: retry on the router's last known channel (one channel ≈ 100 ms off the hotspot / ESP-NOW channel instead of a
+// 13-channel scan every minute); every 5th try scans everything in case the router moved
+static uint8_t g_staCh = 0, g_staTries = 0;
 static void staBegin() {
   staReason = 0;
   staTryAt = millis(); if (staTryAt == 0) staTryAt = 1;
-  WiFi.begin(storedSsid, storedPassword);
-  Serial.printf("Wi-Fi: trying %s\n", storedSsid);
+  const bool pinned = g_staCh != 0 && (g_staTries % 5) != 4;
+  if (pinned) WiFi.begin(storedSsid, storedPassword, g_staCh); else WiFi.begin(storedSsid, storedPassword);
+  g_staTries++;
+  Serial.printf("Wi-Fi: trying %s%s\n", storedSsid, pinned ? " (last channel)" : "");
 }
 
 // called every 5 s while not connected (checkWiFiStatus)
@@ -410,6 +417,8 @@ void setupWiFiAP() {
   loadWifiCredentials();
   // v2: keep why the cabin Wi-Fi fails or drops (OLED: not found / bad password?) - registered before the first try
   WiFi.onEvent(onStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.setAutoReconnect(false);   // D78: staRetryTick owns the retries (60 s)
+  WiFi.setHostname(currentRole == ROLE_GATEWAY_OFFSHORE ? "icefish" : "icefish-hub");   // D79: the router's client list shows it by name
 
   char apSsid[32];
   snprintf(apSsid, sizeof(apSsid), "%s-%s",
@@ -538,6 +547,7 @@ void checkWiFiStatus() {
   if (settings.wifiModeSetting != 0) {   // v2: the saved mode (Settings / web), not only the config.h default
     if (WiFi.status() == WL_CONNECTED && !wifiStaConnected) {
       wifiStaConnected = true;
+      g_staCh = (uint8_t)WiFi.channel(); g_staTries = 0;   // D79: remember the router's channel for the retries
       staIpAddress = WiFi.localIP().toString();
       DEBUG_PRINTF("STA connected! IP: %s\n", staIpAddress.c_str());
       // BUG FIX #6: Verify channel after STA connects

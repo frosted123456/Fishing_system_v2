@@ -2,6 +2,10 @@
 // A node heard by two pockets is reported by both hubs; only its OWNER hub's records change
 // the displayed state. Ownership moves when the owner stops reporting the node for
 // OWNER_TIMEOUT frames, or reports it OFFLINE while another hub still has it.
+// D79 (E2): an OFFLINE record from a non-owner never takes the node over (a hub that lost the node keeps saying
+// OFFLINE for a long time while the other hub hears it fine), and when the owner itself says OFFLINE while another hub
+// reported the node alive within OWNER_TIMEOUT frames, that hub becomes the owner with its record instead of the node
+// flashing OFFLINE -> TRIPPED (which re-rang the alarm).
 #ifndef ICEMESH_CHALET_NODES_H
 #define ICEMESH_CHALET_NODES_H
 #include <stdint.h>
@@ -15,6 +19,7 @@ struct NodeView {
   bool used;
   uint8_t node, owner, state; uint16_t turns; uint8_t flags, battery;   // battery 0-100, 255 = unknown
   uint16_t owner_frame;                                // last frame the owner reported it
+  uint8_t alt_hub, alt_state, alt_flags; uint16_t alt_turns, alt_frame;   // D79: latest non-OFFLINE record from another hub
 };
 
 struct NodeChange { uint8_t node, owner, old_state, new_state; uint16_t turns; uint8_t flags; };
@@ -36,19 +41,29 @@ class ChaletNodes {
       v = alloc(frame);
       if (v == nullptr) return false;
       v->used = true; v->node = r.node; v->owner = hub; v->state = STATE_UNKNOWN; v->battery = 255;
-      v->owner_frame = frame;
+      v->owner_frame = frame; v->alt_hub = ID_NONE; v->alt_frame = frame;
     }
-    const bool owner_stale = seqDiff(frame, v->owner_frame) > static_cast<int16_t>(OWNER_TIMEOUT_FRAMES);
-    const bool take = (v->owner == hub) || owner_stale || (v->state == LS_OFFLINE && r.state != LS_OFFLINE);
-    if (!take) return false;
-    v->owner = hub;
-    v->owner_frame = frame;
-    v->turns = r.turns;
-    v->flags = r.flags;
-    if (r.state == v->state) return false;
-    ch.node = v->node; ch.owner = hub; ch.old_state = v->state; ch.new_state = r.state;
-    ch.turns = r.turns; ch.flags = r.flags;
-    v->state = r.state;
+    if (v->owner != hub) {
+      if (r.state != LS_OFFLINE) { v->alt_hub = hub; v->alt_state = r.state; v->alt_turns = r.turns; v->alt_flags = r.flags; v->alt_frame = frame; }
+      const bool owner_stale = seqDiff(frame, v->owner_frame) > static_cast<int16_t>(OWNER_TIMEOUT_FRAMES);
+      const bool take = r.state != LS_OFFLINE && (owner_stale || v->state == LS_OFFLINE);   // D79: OFFLINE never takes over
+      if (!take) return false;
+      return apply(v, hub, r.state, r.turns, r.flags, frame, ch);
+    }
+    // the owner says OFFLINE but another hub heard the node alive just now: that hub takes over, no OFFLINE blip
+    if (r.state == LS_OFFLINE && v->alt_hub != ID_NONE && v->alt_hub != hub && seqDiff(frame, v->alt_frame) <= static_cast<int16_t>(OWNER_TIMEOUT_FRAMES)) {
+      // replay the alt record unless it would ring a trip the owner already walked through (TRIPPED -> IDLE): then the
+      // alt hub just becomes the owner with the current displayed state and reports from now on
+      const bool trip = v->alt_state == LS_TRIPPED || v->alt_state == LS_RUNNING || v->alt_state == LS_TRIP_SEEN;
+      return apply(v, v->alt_hub, trip && v->state != v->alt_state ? v->state : v->alt_state, v->alt_turns, v->alt_flags, v->alt_frame, ch);
+    }
+    return apply(v, hub, r.state, r.turns, r.flags, frame, ch);
+  }
+  bool apply(NodeView* v, uint8_t hub, uint8_t state, uint16_t turns, uint8_t flags, uint16_t frame, NodeChange& ch) {
+    v->owner = hub; v->owner_frame = frame; v->turns = turns; v->flags = flags;
+    if (state == v->state) return false;
+    ch.node = v->node; ch.owner = hub; ch.old_state = v->state; ch.new_state = state; ch.turns = turns; ch.flags = flags;
+    v->state = state;
     return true;
   }
 

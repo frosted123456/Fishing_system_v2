@@ -11,22 +11,27 @@ namespace icemesh {
 enum RadioMode : uint8_t {
   MODE_SF9_BW500 = 0,   // most robust: beacon, echo, join, relay links, default for hubs
   MODE_SF8_BW500 = 1,
-  MODE_SF7_BW500 = 2,   // fastest
-  MODE_COUNT = 3,
+  MODE_SF7_BW500 = 2,
+  MODE_SF6_BW500 = 3,   // D79: SX126x-only short spreading factors: 62.5 kbps at SF5 (Semtech's headline figure)
+  MODE_SF5_BW500 = 4,   // fastest: a 96 B slot in ~17 ms instead of 133 ms; ~12 dB less link budget than SF9 (est.)
+  MODE_COUNT = 5,
 };
 
 struct ModeInfo {
   uint8_t sf;
   uint16_t bw_khz;
   int16_t sens_dbm_x10;  // ESTIMATE: -174 + 10log10(BW) + NF 6 dB + SNR limit (theory, not measured)
+  int16_t snr_limit_x10; // ESTIMATE: demodulation SNR limit (SF12 -20 dB ... SF5 -2.5 dB, 2.5 dB per step)
   const char* name;
 };
 
 inline const ModeInfo& modeInfo(RadioMode m) {
   static const ModeInfo table[MODE_COUNT] = {
-      {9, 500, -1235, "SF9/500"},
-      {8, 500, -1210, "SF8/500"},
-      {7, 500, -1185, "SF7/500"},
+      {9, 500, -1235, -125, "SF9/500"},
+      {8, 500, -1210, -100, "SF8/500"},
+      {7, 500, -1185, -75, "SF7/500"},
+      {6, 500, -1160, -50, "SF6/500"},
+      {5, 500, -1135, -25, "SF5/500"},
   };
   return table[m < MODE_COUNT ? m : MODE_SF9_BW500];
 }
@@ -35,7 +40,7 @@ inline bool validMode(uint8_t m) { return m < MODE_COUNT; }
 
 // More robust (slower) / less robust (faster) neighbour. Returns the same mode at the ends.
 inline RadioMode slowerMode(RadioMode m) { return m == MODE_SF9_BW500 ? m : static_cast<RadioMode>(m - 1); }
-inline RadioMode fasterMode(RadioMode m) { return m == MODE_SF7_BW500 ? m : static_cast<RadioMode>(m + 1); }
+inline RadioMode fasterMode(RadioMode m) { return m == MODE_SF5_BW500 ? m : static_cast<RadioMode>(m + 1); }
 
 // Project PHY: coding rate 4/5, preamble 8, CRC on, explicit header (src/lora_node/config.h).
 inline LoRaPhy modePhy(RadioMode m) {
@@ -43,7 +48,7 @@ inline LoRaPhy modePhy(RadioMode m) {
   p.sf = modeInfo(m).sf;
   p.bw_hz = static_cast<uint32_t>(modeInfo(m).bw_khz) * 1000UL;
   p.cr_denom = 5;
-  p.preamble = 8;
+  p.preamble = p.sf < 7 ? 12 : 8;   // D79: SX126x asks for >= 12 preamble symbols at SF5 / SF6
   p.crc = true;
   p.explicit_header = true;
   return p;

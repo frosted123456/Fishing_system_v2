@@ -23,6 +23,10 @@ class SonarOutbox {
   // not repeated (they cycle every 2 s anyway). 0 = off.
   uint8_t repeats = 1;
   uint32_t pushed = 0, sent = 0, dropped = 0, expired = 0, resent = 0;
+  // D79 (E8): the LoRa slot and the ESP-NOW backbone are two PATHS (0 / 1) fed by this one outbox. Each path has its own
+  // send count per block, so a block's first send on one path is not mistaken for a repeat on the other (a hub on both
+  // paths at the edge of ESP-NOW range used to split the fresh blocks between them: half a picture on each).
+  enum { PATH_LORA = 0, PATH_EB = 1 };
 
   SonarOutbox() { clear(); }
   void clear() { memset(items_, 0, sizeof(items_)); order_ = 0; }
@@ -40,7 +44,8 @@ class SonarOutbox {
     for (uint8_t i = 0; i < CAP && slot < 0; i++) if (!items_[i].used) slot = i;
     if (slot < 0) { slot = victim(); dropped++; }
     Item& it = items_[slot];
-    it.used = true; it.node = node; it.type = type; it.seg = seg; it.len = len; it.frame = frame; it.order = ++order_; it.sends = 0;
+    it.used = true; it.node = node; it.type = type; it.seg = seg; it.len = len; it.frame = frame; it.order = ++order_;
+    it.sends[0] = it.sends[1] = 0; it.last[0] = it.last[1] = frame;
     memcpy(it.data, blk, len);
     pushed++;
     return true;
@@ -49,46 +54,48 @@ class SonarOutbox {
   // Adds whole blocks as SEC_SONAR sections: BASE (new), DATA oldest first (a repeat of an older block
   // BEFORE a newer block: the chalet drops a ping that arrives behind a newer one as late), BG, then
   // a BASE repeat if room is left.
-  uint16_t fill(tdma::PacketWriter& w, uint16_t frame) {
+  uint16_t fill(tdma::PacketWriter& w, uint16_t frame, uint8_t path = PATH_LORA) {
     expire(frame);
+    const uint8_t p = path ? 1 : 0;
     uint16_t added = 0;
-    added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, false, frame));
-    added = static_cast<uint16_t>(added + fillPass(w, BT_DATA, true, frame));
-    added = static_cast<uint16_t>(added + fillPass(w, BT_BG, false, frame));
-    if (repeats) added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, true, frame));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, false, frame, p));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_DATA, true, frame, p));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_BG, false, frame, p));
+    if (repeats) added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, true, frame, p));
     return added;
   }
 
   uint8_t count() const { uint8_t n = 0; for (uint8_t i = 0; i < CAP; i++) n += items_[i].used ? 1 : 0; return n; }
 
  private:
-  struct Item { bool used; uint8_t node, type, seg, len; uint16_t frame; uint32_t order; uint8_t sends; uint8_t data[MAX_BLOCK]; };
+  struct Item { bool used; uint8_t node, type, seg, len; uint16_t frame; uint32_t order; uint8_t sends[2]; uint16_t last[2]; uint8_t data[MAX_BLOCK]; };
 
   // One block type, oldest first. with_repeats: blocks already sent once (in an EARLIER frame) go out
   // again in their place in the order; without: only unsent blocks. A block is kept for one repeat
   // (DATA, BASE) when repeats is on, else freed at its first send.
-  uint16_t fillPass(tdma::PacketWriter& w, uint8_t type, bool with_repeats, uint16_t frame) {
+  uint16_t fillPass(tdma::PacketWriter& w, uint8_t type, bool with_repeats, uint16_t frame, uint8_t p) {
     uint16_t added = 0;
     for (;;) {
       int best = -1;
       for (uint8_t i = 0; i < CAP; i++) {
         const Item& it = items_[i];
         if (!it.used || it.type != type || it.len > w.freeForValue()) continue;
-        if (it.sends > 0 && (!with_repeats || it.frame == frame)) continue;
+        if (it.sends[p] > 0 && (!with_repeats || it.last[p] == frame)) continue;
         if (best < 0 || it.order < items_[best].order) best = i;
       }
       if (best < 0) break;
       Item& it = items_[best];
       if (!w.add(tdma::SEC_SONAR, it.data, it.len)) break;
       added = static_cast<uint16_t>(added + it.len + 2);
-      if (it.sends > 0) resent++; else sent++;
-      it.sends++;
-      if (it.sends <= repeats && (type == BT_DATA || type == BT_BASE)) it.frame = frame; else it.used = false;
+      if (it.sends[p] > 0) resent++; else sent++;
+      it.sends[p]++; it.last[p] = frame;
+      // freed once this path has sent it (repeats + 1) times; the other path's count does not hold it back
+      if (!(it.sends[p] <= repeats && (type == BT_DATA || type == BT_BASE))) it.used = false;
     }
     return added;
   }
 
-  void expire(uint16_t frame) {
+  void expire(uint16_t frame) {   // from the frame it was pushed in (the repeat is bounded by MAX_AGE too)
     for (uint8_t i = 0; i < CAP; i++)
       if (items_[i].used && seqDiff(frame, items_[i].frame) > static_cast<int16_t>(MAX_AGE_FRAMES)) { items_[i].used = false; expired++; }
   }
@@ -97,7 +104,7 @@ class SonarOutbox {
   int victim() const {
     int best = -1;
     for (uint8_t i = 0; i < CAP; i++)
-      if (items_[i].used && items_[i].sends > 0 && (best < 0 || items_[i].order < items_[best].order)) best = i;
+      if (items_[i].used && (items_[i].sends[0] > 0 || items_[i].sends[1] > 0) && (best < 0 || items_[i].order < items_[best].order)) best = i;
     if (best >= 0) return best;
     static const uint8_t order[3] = {BT_BG, BT_DATA, BT_BASE};
     for (uint8_t p = 0; p < 3; p++) {

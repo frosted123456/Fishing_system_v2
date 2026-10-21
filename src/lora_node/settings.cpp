@@ -172,12 +172,12 @@ void loadSettings() {
   settings.wifiModeSetting = preferences.getUChar("wifiMode", 2);  // Default: AP+STA
   settings.reedActiveHigh = preferences.getBool("reedHigh", true);  // Default: trigger on HIGH
   settings.radioTestMode = preferences.getUChar("radioTest", 0);
-  settings.adaptiveRadio = preferences.getBool("adaptRadio", false);
-  settings.sonarSim = preferences.getBool("sonarSim", false);
+  settings.adaptiveRadio = preferences.getBool("adaptRadio", true);   // D79: on by default (Radio tab can still turn it off for a range test)
+  settings.sonarSim = false;   // D78: test mode never survives a reboot (was saved: a test left on came back after a battery swap)
   settings.sonarVirtualNodes = preferences.getUChar("simNodes", 2);
   if (settings.sonarVirtualNodes > 4) settings.sonarVirtualNodes = 4;
-  settings.transportMode = preferences.getUChar("transport", 0);
-  if (settings.transportMode > 3) settings.transportMode = 0;   // D71: 3 = ESP-NOW first
+  settings.transportMode = preferences.getUChar("transport", 3);
+  if (settings.transportMode > 3 || settings.transportMode == 0) settings.transportMode = 3;   // D78: "Auto" = ESP-NOW first (D71); 1 / 2 only from serial TRANSPORT (bench)
   settings.loraChannel = preferences.getUChar("loraCh", 255);
   if (settings.loraChannel > 7) settings.loraChannel = 255;
   settings.ebRelay = preferences.getBool("ebRelay", currentRole != ROLE_GATEWAY_OFFSHORE);   // v2: every hub relays by default
@@ -190,6 +190,7 @@ void loadSettings() {
   settings.hideWeak = preferences.getBool("hideWeak", false);
   settings.nearBaitBeep = preferences.getBool("nearBeep", false);
   settings.beamDeg = preferences.getUChar("beamDeg", 14);
+  settings.followAction = preferences.getBool("follow", true);   // D80
   { String pin = preferences.getString("webPin", ""); strlcpy(settings.webPin, pin.c_str(), sizeof(settings.webPin)); }   // D74
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
@@ -214,7 +215,6 @@ void saveSettings() {
   preferences.putBool("reedHigh", settings.reedActiveHigh);
   preferences.putUChar("radioTest", settings.radioTestMode);
   preferences.putBool("adaptRadio", settings.adaptiveRadio);
-  preferences.putBool("sonarSim", settings.sonarSim);
   preferences.putUChar("simNodes", settings.sonarVirtualNodes);
   preferences.putUChar("transport", settings.transportMode);
   preferences.putUChar("loraCh", settings.loraChannel);
@@ -228,6 +228,7 @@ void saveSettings() {
   preferences.putBool("hideWeak", settings.hideWeak);
   preferences.putBool("nearBeep", settings.nearBaitBeep);
   preferences.putUChar("beamDeg", settings.beamDeg);
+  preferences.putBool("follow", settings.followAction);   // D80
   preferences.putString("webPin", settings.webPin);   // D74
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);

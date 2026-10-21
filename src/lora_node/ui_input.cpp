@@ -79,6 +79,7 @@ static void buildScreenModel() {
   }
   if (!m.note[0] && localBatteryMv && localBatteryMv < BATTERY_LOW_MV)   // D66: own supply low (chalet LiPo / hub pack)
     snprintf(m.note, sizeof(m.note), "BATTERY LOW %u.%02u V", localBatteryMv / 1000, (localBatteryMv % 1000) / 10);
+  if (!m.note[0] && rangeRunning()) rangeOledLine(m.note, sizeof(m.note));   // D80: range test in progress
   // holes, grouped by pocket (owner hub), the hub's own hole first
   static MeshNodeSnapshot snap[48];
   const uint8_t ns = chalet ? meshNodeSnapshot(snap, 48) : 0;
@@ -277,8 +278,6 @@ void optBuild(ScrOptions* o) {
     if (settings.alarmHoldMin) snprintf(v, sizeof(v), "%u min", settings.alarmHoldMin); else snprintf(v, sizeof(v), "until silenced");
     optRow(o, OI_HOLD, 0, "Alarm", v);
     if (chalet) {
-      const uint8_t t = settings.transportMode;
-      optRow(o, OI_LINK, 0, "Link", t == 1 ? "LoRa only" : t == 2 ? "ESP-NOW" : t == 3 ? "ESP-NOW first" : "Auto");
       if (settings.loraChannel == MESH_CH_AUTO) snprintf(v, sizeof(v), "Auto (%u)", meshLoraChannel() + 1);
       else snprintf(v, sizeof(v), "%u fixed", settings.loraChannel + 1);
       optRow(o, OI_LORACH, 0, "LoRa channel", v);
@@ -330,12 +329,7 @@ void optBuild(ScrOptions* o) {
     using namespace icemesh::sonar;
     static const char* const FN[] = {"low", "normal", "high", "custom"};
     optRow(o, OI_K_FILTER, 0, "Noise filter", FN[presetOf(sonarPrm)]);
-    snprintf(v, sizeof(v), "%u dB", sonarPrm[P_SNR_DB]); optRow(o, OI_K_SNR, 0, "Detection", v);
-    snprintf(v, sizeof(v), "%u pings", sonarPrm[P_CONFIRM]); optRow(o, OI_K_CONFIRM, 0, "Confirm", v);
-    if (settings.unitsMetric) snprintf(v, sizeof(v), "%u.%u m", sonarPrm[P_DEADZONE_DM] / 10, sonarPrm[P_DEADZONE_DM] % 10);
-    else snprintf(v, sizeof(v), "%.1f ft", sonarPrm[P_DEADZONE_DM] * 0.328084f);
-    optRow(o, OI_K_DEAD, 0, "Dead zone", v);
-    snprintf(v, sizeof(v), "%u cm", sonarPrm[P_GATE_CM]); optRow(o, OI_K_GATE, 0, "Max fish move", v);
+    // D78: the raw numerics (detection dB, confirm pings, dead zone, max fish move) live under Advanced on the page only
     optRow(o, OI_K_RESEND, 0, "Send to holes again", "");
     optRow(o, OI_K_DEFAULTS, 0, "Defaults", "");
   } else if (optMenu == OM_GPS) {   // D73

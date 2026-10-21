@@ -181,6 +181,7 @@ struct DeviceSettings {
   bool hideWeak;              // v2 OLED: do not draw the weakest echoes
   bool nearBaitBeep;          // v2 (D43): short beep when a fish comes near a bait (off by default)
   uint8_t beamDeg;            // v2 (D52): transducer beam angle, degrees (full cone, -3 dB). Frank's 200 kHz unit: 14 ± 1
+  bool followAction;          // D80: the watched hole follows the sonar activity (default on; Sonar tab)
   char webPin[9];             // D74: PIN the page must send on every change (4-8 digits); empty = off (default)
 };
 
@@ -358,7 +359,7 @@ void holeTripClear();                 // D64: serial HOLE CLEAR (= button press 
 uint16_t holeTurns();                 // D69: quarter turns of the own hole since armed / cleared
 void holeSelfTest(SelfTestResult& r, bool toSerial);   // D70: wiring check of the own hole
 // D73: GPS (chalet)
-struct GpsStatus { bool fix, swapped, scanning, origin_set; int8_t rx_pin; uint8_t sats, hh, mm; uint16_t hdop_x10; int32_t lat_e7, lon_e7, lat0_e7, lon0_e7; uint32_t sentences, bad, data_age_s, baud; const char* levels; };
+struct GpsStatus { bool fix, swapped, scanning, origin_set; int8_t rx_pin; uint8_t sats, hh, mm, ss; uint16_t hdop_x10; int32_t lat_e7, lon_e7, lat0_e7, lon0_e7; uint32_t sentences, bad, data_age_s, baud; const char* levels; };
 void gpsSetup();
 void gpsLoop();
 void gpsScanStart();            // listen on each free header pin in turn for the module's TX (serial GPS SCAN, wiring check)
@@ -481,6 +482,15 @@ void handleWebApiTilePost();
 void handleWebApiTiles();
 void handleWebApiTilesClear();
 void handleWebApiGpsPost();        // D76
+// D80 range test (rangetest.cpp)
+bool rangeStart(uint8_t hub, const char* note, String& err);
+void rangeStop(const char* why);
+bool rangeRunning();
+void rangeLoop();
+void rangeOledLine(char* out, size_t n);
+void handleWebApiRange();
+void handleWebApiRangePost();
+void handleWebApiRangeRun();
 void baitLoad();
 void baitToSource(icemesh::sonar::SonarSource* src, uint8_t id);   // hub: this hole's bait depth into its fake sonar
 void baitSet(uint8_t hole, uint8_t v5);      // chalet: save + send (CMD_SET_BAIT) + demo

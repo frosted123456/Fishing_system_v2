@@ -26,7 +26,7 @@ class HubRole {
 
   uint8_t network_id = 0x42;
   uint8_t self = 0;
-  uint8_t fw = 1;
+  uint8_t fw = 2;   // D80: 2 = knows SF6 / SF5 (the chalet keeps fw 1 hubs at SF7 at most)
   LineTable<MAXN> table;
   HubSync sync;
 
@@ -185,7 +185,7 @@ class HubRole {
     in.nodeinfo_start = nodeinfo_idx_;
     in.line_rot = line_rot_;
     in.test = test; in.test_counter = test_counter; in.test_mode_seen = plan.test_mode;
-    in.sonar = &sonar;
+    in.sonar = &sonar; in.sonar_path = sonar::SonarOutbox::PATH_LORA;
     in.selftest = selftest_frames ? selftest : nullptr;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
     if (r.selftest_sent && selftest_frames) selftest_frames--;
@@ -215,7 +215,7 @@ class HubRole {
     in.health = with_health ? &h : nullptr;
     in.nodeinfo_start = nodeinfo_idx_;
     in.line_rot = line_rot_;
-    in.sonar = &sonar;
+    in.sonar = &sonar; in.sonar_path = sonar::SonarOutbox::PATH_EB;
     in.selftest = selftest_frames ? selftest : nullptr;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
     if (r.selftest_sent && selftest_frames) selftest_frames--;

@@ -79,6 +79,7 @@ void gpsSetup() {
   Serial.printf("GPS: UART1 rx GPIO%d at %lu baud%s%s\n", g_rxPin, (unsigned long)GPS_BAUDS[g_baudIdx], saved >= 0 ? " (pin found by an earlier scan)" : "", g_originSet ? ", map origin set" : "");
 }
 
+static void gpsAutoOrigin();   // D78, below
 void gpsLoop() {
   if (!g_gpsOn) return;
   int guard = 512;   // bounded work per loop()
@@ -89,6 +90,7 @@ void gpsLoop() {
     const uint8_t l = (uint8_t)digitalRead(g_rxPin);
     g_lvlN++; if (l) g_lvlHigh++; if (g_lvlLast != 2 && l != g_lvlLast) g_lvlEdges++; g_lvlLast = l;
   }
+  gpsAutoOrigin();
   const bool fresh = g_nmea.sentences() > g_sentencesAtOpen;   // sentences on the pin in use now
   if (fresh) g_gpsLastSentenceMs = millis();
   if (g_scanIdx >= 0) {
@@ -113,7 +115,7 @@ bool gpsStatus(GpsStatus& s) {
   s.rx_pin = g_viaUart0 ? 44 : g_rxPin; s.scanning = g_scanIdx >= 0; s.swapped = g_viaUart0 || g_rxPin != GPS_RX_PIN; s.baud = GPS_BAUDS[g_baudIdx];
   s.levels = g_levels;
   s.origin_set = g_originSet; s.lat0_e7 = g_lat0; s.lon0_e7 = g_lon0;
-  s.hh = f.hh; s.mm = f.mm;
+  s.hh = f.hh; s.mm = f.mm; s.ss = f.ss;
   return true;
 }
 
@@ -127,6 +129,22 @@ void gpsFeedSerialLine(const char* line) {
   if (upd && g_nmea.fix().valid) g_gpsFixMs = millis();
   g_gpsLastSentenceMs = millis();
   if (!g_viaUart0) { g_viaUart0 = true; g_scanIdx = -1; Serial.println(F("GPS: sentences arrive on the USB serial (module TX on the RX pin, GPIO44): fine, using them")); }
+}
+
+// D78: no origin stored yet -> the first good fix (HDOP <= 2.0) that stays within 15 m for 30 s becomes the origin by itself.
+// "Chalet here" (page / OLED) still moves it. A fix taken while walking never qualifies (it drifts past 15 m).
+static int32_t g_aoLat = 0, g_aoLon = 0; static uint32_t g_aoSinceMs = 0;
+static void gpsAutoOrigin() {
+  if (g_originSet) return;
+  const icemesh::GpsFix& f = g_nmea.fix();
+  const bool good = f.valid && millis() - g_gpsFixMs < 5000 && f.hdop_x10 > 0 && f.hdop_x10 <= 20 && f.sats >= 5;
+  if (!good) { g_aoSinceMs = 0; return; }
+  if (g_aoSinceMs == 0) { g_aoLat = f.lat_e7; g_aoLon = f.lon_e7; g_aoSinceMs = millis(); return; }
+  int32_t dx, dy; icemesh::gpsOffsetDm(g_aoLat, g_aoLon, f.lat_e7, f.lon_e7, dx, dy);
+  if (dx < -150 || dx > 150 || dy < -150 || dy > 150) { g_aoSinceMs = 0; return; }   // moved: start over
+  if (millis() - g_aoSinceMs < 30000) return;
+  gpsSetOrigin();
+  Serial.printf("GPS: map origin set by itself at %.6f, %.6f (steady fix 30 s)\n", g_lat0 / 1e7, g_lon0 / 1e7);
 }
 
 bool gpsSetOrigin() {   // "Chalet here": the map's (0, 0)

@@ -15,6 +15,7 @@
 #include <freertos/queue.h>
 #include "config.h"
 #include <hub_role.h>
+#include <follow_action.h>   // D80
 #include <chalet_role.h>
 #include <sonar_link.h>
 #include <eb_link.h>
@@ -66,6 +67,9 @@ static volatile uint8_t g_cfg_test = TEST_OFF;
 static volatile bool g_cfg_adaptive = false;
 static volatile bool g_cfg_reset_stats = false;
 static volatile uint8_t g_cfg_focus = 0;
+static volatile uint8_t g_cfg_range_hub = 0;          // D80 range test hub (0 = off)
+static RangeRing<64> g_range_ring;                     // D80 slot results of that hub (radio task -> loop)
+static sonar::FollowAction g_follow;                   // D80 follow the action (chalet, loop() only)
 static volatile bool g_cfg_reset_all = false;
 static volatile bool g_cfg_sonar_sim = false;
 // D70: the chalet keeps the last wiring-check result of each hole (SEC_SELFTEST), on top of the sonar store
@@ -201,7 +205,8 @@ static bool setMode(RadioMode m) {
   const ModeInfo& mi = modeInfo(m);
   int s1 = radio.setBandwidth(static_cast<float>(mi.bw_khz));
   int s2 = radio.setSpreadingFactor(mi.sf);
-  if (s1 != RADIOLIB_ERR_NONE || s2 != RADIOLIB_ERR_NONE) { g_cur_mode = MODE_COUNT; return false; }
+  int s3 = radio.setPreambleLength(modePhy(m).preamble);   // D79: 12 symbols at SF5 / SF6, 8 otherwise (airtime.h agrees)
+  if (s1 != RADIOLIB_ERR_NONE || s2 != RADIOLIB_ERR_NONE || s3 != RADIOLIB_ERR_NONE) { g_cur_mode = MODE_COUNT; return false; }
   g_cur_mode = m;
   return true;
 }
@@ -395,6 +400,7 @@ static void chaletApplyConfig() {   // under lock
   c.adaptive = g_cfg_adaptive;
   if (g_cfg_reset_stats) { g_ch->planner.resetStats(); g_cfg_reset_stats = false; }
   g_ch->focus_node = g_cfg_focus;
+  c.range_hub = g_cfg_range_hub;   // D80
   if (g_cfg_reset_all) { g_cfg_reset_all = false; cmdQueue(CMD_RESET_ALL, 0, 0); }
   // one command at a time, each in CMD_BEACONS beacons (also sent on the backbone)
   if (g_ch->cmd != CMD_NONE && g_cmd_beacons_left == 0) g_ch->cmd = CMD_NONE;
@@ -751,8 +757,7 @@ static void hubFrame() {
   // next beacon: listen around its expected start (REF), then the echo slots of the old plan
   // (echo positions shift with the new beacon length, hence the wider windows)
   const uint32_t ref_next = ref + frame_us;
-  const uint32_t bair = beaconAirtimeUs(g_last_beacon_len);
-  if (listenFor(ref_next - BEACON_WINDOW_US, ref_next + bair + BEACON_WINDOW_US)) return;
+  if (listenFor(ref_next - BEACON_WINDOW_US, beaconListenCloseUs(ref_next, g_last_beacon_len))) return;   // D79 (E1): room for a grown beacon
   for (uint8_t i = 0; i < plan.n_slots && plan.slots[i].kind == SLOT_ECHO; i++) {
     if (plan.slots[i].owner == g_hub->self) continue;
     if (listenFor(ref_next + times[i].start - 10000, ref_next + times[i].end + BEACON_WINDOW_US)) return;
@@ -825,6 +830,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
     g_ch = new ChaletRole<10, 48>();
     g_sonar = new ChaletSink();
     g_ch->sonar_sink = g_sonar;
+    g_ch->range_ring = &g_range_ring;   // D80
     PlannerConfig& c = g_ch->planner.cfg;
     c.network_id = network_id; c.self_id = self_id; c.frame_ms = 1000;
     c.allowance = 96; c.test_allowance = 160;          // est. budgets, see docs/protocol_v2.md
@@ -946,7 +952,79 @@ void meshSetAdaptive(bool on) { g_cfg_adaptive = on; }
 bool meshAdaptive() { return g_cfg_adaptive; }
 void meshResetStats() { g_cfg_reset_stats = true; }
 void meshSendResetAll() { g_cfg_reset_all = true; }
-void meshSetFocusNode(uint8_t node) { g_cfg_focus = node; }
+// D79: a user choice of focus cancels an automatic one
+static uint8_t g_autoFocusPrev = 0; static uint32_t g_autoFocusUntil = 0;
+void meshSetFocusNode(uint8_t node) {
+  g_cfg_focus = node; g_autoFocusUntil = 0;
+  if (g_follow.on) g_follow.manual(node, millis());   // D80: a hand pick is kept 5 min, then following resumes
+}
+// FISH ON on a hole: watch it (4 Hz pings, full waterfall) for AUTO_FOCUS_MS, then back to what was watched before
+// (a second trip inside the window re-targets; the user's own choice is what comes back at the end).
+// D80: with "follow the action" on, the follower owns this (2 min on the tripped hole, then it follows again).
+void meshAutoFocus(uint8_t node) {
+  if (!g_chalet || node == 0) return;
+  if (g_follow.on) { g_follow.trip(node, millis()); g_cfg_focus = node; return; }
+  if (node == g_cfg_focus) return;
+  if (g_autoFocusUntil == 0) g_autoFocusPrev = g_cfg_focus;   // remember the user's choice once, not the previous auto one
+  g_cfg_focus = node; g_autoFocusUntil = millis() + AUTO_FOCUS_MS;
+  if (g_autoFocusUntil == 0) g_autoFocusUntil = 1;
+}
+void meshAutoFocusTick() {
+  if (g_follow.on && g_chalet && g_sonar != nullptr) {   // D80: once a second, from the summaries every hole sends
+    static uint32_t last = 0;
+    const uint32_t now = millis();
+    if (now - last >= 1000) {
+      last = now;
+      sonar::FollowIn in[16]; uint8_t n = 0;
+      {
+        Lock l;
+        for (uint8_t i = 0; i < g_sonar->capacity() && n < 16; i++) {
+          const sonar::NodeSonar* ns = g_sonar->at(i);
+          if (ns == nullptr || !ns->has_sum) continue;
+          in[n].node = ns->node; in[n].activity = ns->sum.activity; in[n].n_fish = ns->sum.n_targets;
+          in[n].near_bait = (ns->sum.status & sonar::ST_NEAR_BAIT) != 0;
+          in[n].age_frames = static_cast<uint16_t>(static_cast<uint16_t>(g_frame - ns->frame));
+          n++;
+        }
+      }
+      if (g_follow.update(in, n, now)) g_cfg_focus = g_follow.focus;
+    }
+    return;
+  }
+  if (g_autoFocusUntil == 0 || (int32_t)(millis() - g_autoFocusUntil) < 0) return;
+  g_autoFocusUntil = 0; g_cfg_focus = g_autoFocusPrev;
+}
+void meshSetFollow(bool on) { g_follow.setOn(on, millis()); if (on) g_follow.focus = g_cfg_focus; g_autoFocusUntil = 0; }
+bool meshFollowOn() { return g_follow.on; }
+void meshFollowState(char* why, size_t n, uint32_t& pin_s, uint32_t& trip_s) {
+  const uint32_t now = millis();
+  strlcpy(why, g_follow.why, n); pin_s = g_follow.pinLeftMs(now) / 1000; trip_s = g_follow.tripLeftMs(now) / 1000;
+}
+
+// D80 range test: one hub's slot cycles through every mode; the chalet logs each slot result (rangetest.cpp)
+void meshRangeStart(uint8_t hub) { g_cfg_range_hub = hub; Lock l; g_range_ring.clear(); }
+void meshRangeStop() { g_cfg_range_hub = 0; }
+uint8_t meshRangeHub() { return g_cfg_range_hub; }
+bool meshRangePop(RangeSample& s) { Lock l; return g_range_ring.pop(s); }
+uint32_t meshRangeLost() { return g_range_ring.lost; }
+bool meshRangeHubSide(uint8_t hub, RangeHubSide& out, bool& direct, uint8_t& max_sf) {
+  memset(&out, 0, sizeof(out)); direct = false; max_sf = 7;
+  if (!g_chalet || g_ch == nullptr) return false;
+  Lock l;
+  const HubInfo* h = g_ch->planner.find(hub);
+  if (h == nullptr) return false;
+  direct = h->via == 0;
+  max_sf = modeInfo(ChaletPlanner<10>::maxModeFor(*h)).sf;
+  if (h->has_health) { out.valid = true; out.beacon_rssi = h->health.beacon_rssi; out.beacon_snr_q4 = h->health.beacon_snr_q4; out.beacon_lost64 = h->health.beacon_lost; }
+  return true;
+}
+
+bool meshHubRelaysOthers(uint8_t hub) {
+  if (!g_chalet || g_ch == nullptr || hub == 0) return false;
+  Lock l;
+  for (uint8_t i = 0; i < 10; i++) { const HubInfo* h = g_ch->planner.hubAt(i); if (h && h->id != hub && h->via == hub) return true; }
+  return false;
+}
 
 // ---------------------------------------------------------------------------------------------
 // v2 network config + ESP-NOW backbone (docs/protocol_v2.md §6c)
@@ -1384,6 +1462,10 @@ String meshSonarListJson() {
   s = "{\"sim\":"; s += g_cfg_sonar_sim ? "true" : "false";
   s += ",\"focus\":"; s += g_cfg_focus;
   s += ",\"frame\":"; s += g_frame;
+  { const uint32_t now = millis();   // D80 follow the action
+    s += ",\"follow\":"; s += g_follow.on ? "true" : "false";
+    s += ",\"why\":\""; s += g_follow.why; s += "\"";
+    s += ",\"pin_s\":"; s += g_follow.pinLeftMs(now) / 1000; s += ",\"trip_s\":"; s += g_follow.tripLeftMs(now) / 1000; }
   s += ",\"nodes\":[";
   if (g_sonar != nullptr) {
     static sonar::NodeSonar copy[16];

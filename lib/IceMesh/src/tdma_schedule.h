@@ -36,6 +36,16 @@ inline uint32_t slotDurationUs(const Slot& s) {
 
 inline uint32_t beaconAirtimeUs(uint16_t beacon_len) { return modeAirtimeUs(MODE_SF9_BW500, beacon_len); }
 
+// D79 (E1): a hub listens for the next beacon until a beacon up to BEACON_GROW_MAX bytes longer than the last one would
+// have ended (+ BEACON_WINDOW). A beacon that grew by more than the window (9+ new acks, or 5 new slots, in one frame)
+// was missed by every hub at once. 36 B = 12 acks (the test holes of 3 hubs going OFFLINE at once); 36 B = 41 ms of extra listening, inside the JOIN slot + gaps (43 ms) that follow the beacon.
+static const uint16_t BEACON_GROW_MAX = 36;
+inline uint32_t beaconListenCloseUs(uint32_t ref_next, uint16_t last_len) {
+  const uint16_t max_len = beaconSize(MAX_SLOTS, MAX_ACKS);
+  const uint16_t len = static_cast<uint16_t>(last_len + BEACON_GROW_MAX > max_len ? max_len : last_len + BEACON_GROW_MAX);
+  return ref_next + beaconAirtimeUs(len) + BEACON_WINDOW_US;
+}
+
 // REF from the end of a received/transmitted beacon of `len` bytes.
 inline uint32_t refFromBeaconEnd(uint32_t end_us, uint16_t len) { return end_us - beaconAirtimeUs(len); }
 

@@ -40,6 +40,7 @@ struct HubBuild {
   uint16_t test_counter;
   uint8_t test_mode_seen;     // echoed in the TEST section
   sonar::SonarOutbox* sonar;  // nullptr = no sonar blocks
+  uint8_t sonar_path;         // D79 (E8): SonarOutbox::PATH_LORA (slot packet) or PATH_EB (backbone packet)
   const uint8_t* selftest;    // D70: nullptr or 13 B ([node] + SelfTestResult) for a SEC_SELFTEST section
 };
 
@@ -126,7 +127,7 @@ inline HubBuildResult buildHubPacket(const HubBuild& in, const LineTable<MAXN>& 
   // 5. sonar blocks
   // 4b. D70 wiring-check result (one per packet, whole or not at all; before the sonar blocks, which fill greedily)
   if (in.selftest != nullptr && w.freeForValue() >= SELFTEST_SECTION_LEN) { w.add(SEC_SELFTEST, in.selftest, SELFTEST_SECTION_LEN); r.selftest_sent = true; }
-  if (in.sonar != nullptr) r.sonar_bytes = in.sonar->fill(w, in.frame);
+  if (in.sonar != nullptr) r.sonar_bytes = in.sonar->fill(w, in.frame, in.sonar_path);   // D79 (E8): per-path repeats
   // 6. node info, rotating: 3 B per node {node, battery %, flags}
   r.nodeinfo_next = in.nodeinfo_start;
   {

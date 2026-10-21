@@ -56,7 +56,7 @@ DeviceSettings settings = {
   .wifiModeSetting = 2,       // Default: AP+STA mode
   .reedActiveHigh = true,     // Default: trigger on HIGH (magnet away)
   .radioTestMode = 0,
-  .adaptiveRadio = false,     // fixed SF9/500 until range tests say otherwise
+  .adaptiveRadio = true,    // D79: on (was off "until range tests"): SF9 -> SF5 per hub on RSSI + SNR margin, trial frames, 2 misses = back     // fixed SF9/500 until range tests say otherwise
   .sonarSim = false,
   .sonarVirtualNodes = 2,
   .transportMode = 0,
@@ -228,6 +228,7 @@ void setup() {
     meshSetTestMode(settings.radioTestMode);
     meshSetAdaptive(settings.adaptiveRadio);
     meshSetSonarSim(settings.sonarSim);
+    meshSetFollow(settings.followAction);   // D80
     meshSetTransport(settings.transportMode);
     meshSetLoraChannel(settings.loraChannel);
   }
@@ -1670,6 +1671,7 @@ bool simAnyOn() {
 // v1 race where LoRa was driven from the Wi-Fi task while loop() used the radio too.
 static icemesh::RxRing<16, 250> espNowRing;
 
+static volatile uint32_t g_sonarHeardMs = 0;   // D79 (E4): last MSG_SONAR from any tip-up
 void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   espNowRing.push(mac, data, len, 0);   // core 2.x callback gives no RSSI
 }
@@ -1707,6 +1709,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
       // one block per frame; the block's own node ID must be the sender (no spoofed holes)
       if (currentRole != ROLE_GATEWAY_OFFSHORE && len > 5 && len - 3 <= 120 && data[3] == nodeId) {
         meshHubPushSonar(data + 3, (uint8_t)(len - 3));
+        g_sonarHeardMs = millis();   // D79 (E4): a real-sonar node is streaming: keep its control alive (sonarHubLoop)
       }
       break;
     }
@@ -2548,7 +2551,8 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
   }
   const bool wasFish = HAS_FLAG(n->flags, FLAG_FISH_ON);
   const bool disarmed = (u.flags & MESH_LF_DISARMED) != 0;   // D61: a disarmed hole never alarms
-  const bool fish = !disarmed && (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING);
+  const bool tripSeen = !disarmed && u.new_state == MESH_LS_TRIP_SEEN;   // D79 (E5): a trip that ended while the link was down
+  const bool fish = !disarmed && (u.new_state == MESH_LS_TRIPPED || u.new_state == MESH_LS_RUNNING || tripSeen);
   n->initialized = true;
   n->via_lora = true;
   n->role = ROLE_SENSOR_ONLY;
@@ -2572,7 +2576,12 @@ static void applyMeshNodeUpdate(const MeshNodeUpdate& u) {
     recordAlert(u.node);
     triggerBuzzer(3);
     registerActivity();
-  } else if (!fish && wasFish) {
+    if (!disarmed && !tripSeen) meshAutoFocus(u.node);   // D79: the sonar follows the fight (not a trip that already ended)
+    if (tripSeen) {   // the line is already back: alarm as a trip (hold / until silenced), line state down
+      Serial.printf("mesh: node %u tripped while its report could not reach us (line already reset)\n", u.node);
+      CLEAR_FLAG(n->flags, FLAG_FISH_ON); n->fish_on_time = 0; alarmLineReset(n);
+    }
+  } else if ((!fish || tripSeen) && wasFish) {   // D79: TRIP_SEEN on a hole already shown tripped = its line is back down
     CLEAR_FLAG(n->flags, FLAG_FISH_ON);
     n->fish_on_time = 0;
     alarmLineReset(n);
@@ -2604,6 +2613,7 @@ void meshLoop() {
   const bool chalet = (currentRole == ROLE_GATEWAY_OFFSHORE);
   static unsigned long lastSync = 0, lastSnap = 0, lastCounters = 0;
 
+  if (chalet) { meshAutoFocusTick(); rangeLoop(); }   // D79 / D80
   if (!chalet) {
     if (meshSyncPending || millis() - lastSync >= 250) {
       meshSyncPending = false;
@@ -2615,6 +2625,7 @@ void meshLoop() {
         const uint8_t own_sim = self ? hubHoleSim(NODE_ID) : 0;
         if (self && !HAS_LOCAL_SENSOR && !own_sim) continue;
         if (!self && !n.initialized) continue;
+        if (!self && !n.online && millis() - n.last_seen > 15UL * 60UL * 1000UL) continue;   // D79 (E6): long gone: stop reporting it (the line table forgets it after 10 more min)
         const uint16_t mv = self ? localBatteryMv : n.battery_mv;
         uint8_t st = lineStateOf(n, self);
         uint8_t fl = HAS_FLAG(n.flags, FLAG_LOW_BATTERY) ? MESH_LF_LOWBAT : 0;
@@ -3196,7 +3207,11 @@ void sonarHubLoop() {
   }
   const bool recentOff = !sim && simOffSince != 0 && millis() - simOffSince < 10000UL;
   const bool knobsFresh = sonarPrmChangedMs != 0 && millis() - sonarPrmChangedMs < 60000UL;   // new knobs: tell the tip-ups for 1 min
+  // D79 (E4): a real-sonar tip-up stops pinging when it has not heard a control for a while (it used to get one only as
+  // the answer to its minute heartbeat): while sonar frames arrive, repeat the control every 10 s
+  const bool streaming = g_sonarHeardMs != 0 && millis() - g_sonarHeardMs < 60000UL;
   if (espNowReady && (((sim || recentOff || knobsFresh) && millis() - lastCtrl >= 1000UL) ||
+                      (streaming && millis() - lastCtrl >= 10000UL) ||
                       (sonarCtrlKick && millis() - lastCtrl >= 50UL))) {   // a tip-up just sent: it listens now
     sendSonarCtrl(sim, focus);
     lastCtrl = millis();
