@@ -191,6 +191,7 @@ void loadSettings() {
   settings.nearBaitBeep = preferences.getBool("nearBeep", false);
   settings.beamDeg = preferences.getUChar("beamDeg", 14);
   settings.followAction = preferences.getBool("follow", true);   // D80
+  settings.followHoles = preferences.getUChar("followN", 2); if (settings.followHoles < 1 || settings.followHoles > 3) settings.followHoles = 2;   // D82
   { String pin = preferences.getString("webPin", ""); strlcpy(settings.webPin, pin.c_str(), sizeof(settings.webPin)); }   // D74
   settings.ebChaletLr = preferences.getBool("ebChLr", false);
   settings.lastLoraCh = preferences.getUChar("lastLoraCh", 0);
@@ -229,6 +230,7 @@ void saveSettings() {
   preferences.putBool("nearBeep", settings.nearBaitBeep);
   preferences.putUChar("beamDeg", settings.beamDeg);
   preferences.putBool("follow", settings.followAction);   // D80
+  preferences.putUChar("followN", settings.followHoles);   // D82
   preferences.putString("webPin", settings.webPin);   // D74
   preferences.putBool("ebChLr", settings.ebChaletLr);
   preferences.putUChar("lastLoraCh", settings.lastLoraCh);

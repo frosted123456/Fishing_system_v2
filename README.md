@@ -5,7 +5,7 @@ shows everything on its screen and on a phone or PC web page.
 
 | | |
 |---|---|
-| Firmware | v2, D81 (2026-10-22) |
+| Firmware | v2, D82 (2026-10-22) |
 | Branch | `v2/phase1-mesh-core` |
 | Boards | Heltec WiFi LoRa 32 V3, ESP32 WROOM DevKit V1 (30-pin), ESP32-C3 Super Mini (v1 head) |
 
@@ -396,7 +396,8 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 | Cyan ring | Hole being followed (see Sonar tab). Arrow = it just moved there. Padlock = your pick |
 | Tap a hole | Sheet: bottom, fish, bait, line out, battery, link, distance. Arm / Disarm, bait, Watch sonar, Pin here, Move, Remove |
 | Tap the chalet | Chalet here, clear all positions |
-| Hole cards | State, battery, link, last 3 min of sonar. Watch, Set bait, Arm / Disarm, Rename |
+| Live card | Beside the map: the whole water column of every streaming hole, newest on the right. Bottom, fish, bait line. Follow the action button and the 1 / 2 / 3 picker: how many holes stream at once (more = more radio, slower page). Tap a panel for the full view on the Sonar tab |
+| Hole cards | Folded under the Live card. State, battery, link, last minutes of sonar. Watch, Set bait, Arm / Disarm, Rename |
 
 **Sonar tab**
 
@@ -405,7 +406,7 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 | Item | Does |
 |---|---|
 | Follow the action | On by default. The live view goes to the hole with the most action. FISH ON wins for 2 min. Up to 2 more holes stream at the same time when the radio has room ("LIVE too") |
-| Tap a hole | Watch it live. Your pick stays 5 min, then Follow takes over again |
+| Hole cards on top | Every sonar hole with its water-column preview. Tap one to watch it live; your pick stays 5 min, then Follow takes over again |
 | Flasher | Live, about 1 s behind. Pause to freeze |
 | Last 60 seconds | Waterfall, 4 pings per second |
 | ft / m | Depth units on this phone |

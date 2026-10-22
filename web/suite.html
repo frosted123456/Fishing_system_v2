@@ -179,6 +179,12 @@ details.adv{margin-top:6px}details.adv h3{font-size:.9rem;margin:14px 0 6px;colo
 .rl{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.rl .sm{color:var(--muted);font-size:.86rem}
 .node.low .bat .bar i{background:#E0A43A}
 .gl{display:block;width:100%;height:64px;border-radius:8px;background:var(--chip);margin-top:6px}
+.lpgrid{display:grid;gap:8px;grid-template-columns:1fr}
+.lp{border:1px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--surface);cursor:pointer;text-align:left;color:inherit;font:inherit;display:block;width:100%}
+.lp.main{border-color:var(--accent)}.lp .hd{display:flex;justify-content:space-between;align-items:baseline;gap:6px}.lp .nm{font-weight:700}.lp .st{color:var(--muted);font-size:.85rem}
+.lp canvas{display:block;width:100%;height:120px;border-radius:8px;background:#0A1E26;margin-top:6px}.lpgrid[data-n="1"] .lp canvas{height:170px}
+.hcards summary{cursor:pointer;font-weight:700;padding:6px 0}.hcards summary .hint{font-weight:400;margin-left:6px}
+@media (min-width:920px){.pmlive{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start}.pmlive>.card{margin:0}}
 .hole.live2{border-color:rgba(0,179,214,.6)}.badge.on2{background:rgba(0,179,214,.18);color:#0b6a80}.hole .gl{height:44px;margin-top:4px}
 .glt{display:grid;gap:1px;font-size:.86rem}.glt small{color:var(--muted)}
 .badge.sim{background:#E0A43A;color:#1b1b1b}
@@ -240,6 +246,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div class="stat"><span>LoRa mesh</span><strong id="sLora">–</strong></div>
       <div class="stat"><span>Wi-Fi</span><strong id="sWifi">–</strong></div>
     </div>
+    <div class="pmlive">
     <div class="card pmap" id="pmapCard">
       <div class="pmhd"><h2 style="margin:0">Pocket map</h2>
         <div class="btnrow"><span class="seg" role="group" aria-label="Map layer" id="pmLay"><button type="button" data-lay="map" aria-pressed="true">Map</button><button type="button" data-lay="sat" aria-pressed="false">Satellite</button></span><button class="btn small" id="pmDepth" type="button" aria-pressed="false" title="CHS NONNA bathymetry where it exists (Ottawa River around Ottawa; not upstream of the Chats dam)">Depth</button><button class="btn small" id="pmSave" type="button" title="Keep the tiles of this area on the chalet for the ice (no internet)">Save area</button><button class="btn small" id="pmFull" type="button" aria-pressed="false" title="Expand the map">⤢</button></div></div>
@@ -253,10 +260,21 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div class="pmchips" id="pmChips"></div>
       <div class="pmsheet" id="pmSheet" hidden></div>
     </div>
-    <label class="hint" style="display:flex;gap:8px;align-items:center;margin:0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
+    <div class="card" id="liveCard">
+      <div class="pmhd"><h2 style="margin:0">Live</h2>
+        <div class="btnrow"><button class="btn small" id="follow2" type="button" aria-pressed="true" title="The streamed holes follow the fish">Follow the action</button>
+        <span class="seg" role="group" aria-label="Holes streamed at once" id="followN" title="Holes streamed at once (more = more radio and a slower page)"><button type="button" data-fn="1" aria-pressed="false">1</button><button type="button" data-fn="2" aria-pressed="true">2</button><button type="button" data-fn="3" aria-pressed="false">3</button></span></div></div>
+      <p class="hint" id="liveWhy" style="margin:4px 0 8px"></p>
+      <div class="lpgrid" id="lpgrid"><p class="empty">No hole streaming yet.</p></div>
+      <p class="hint" style="margin:8px 0 0">Whole water column of every hole that streams (up to 3 when the radio has room), newest on the right. Tap a panel for the full view.</p>
+    </div>
+    </div>
+    <details id="holeCards" class="hcards"><summary>Hole cards <span class="hint" id="hcSum"></span></summary>
+    <label class="hint" style="display:flex;gap:8px;align-items:center;margin:8px 0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
     <div class="ngrid" id="ngrid"></div>
+    </details>
     <p class="hint" id="tripsInfo" style="margin:0"></p>
-    <p class="hint" style="margin:0">Holes with a sonar show their last 3 minutes; Watch opens the live sonar. Set bait tells the hole where your lure is (labels, near-bait warning).</p>
+    <p class="hint" style="margin:0">Hole cards: last minutes of every sonar hole; Watch opens the live sonar. Set bait tells the hole where your lure is (labels, near-bait warning).</p>
   </div>
 </div>
 
@@ -566,9 +584,9 @@ function renderHoles() {
       `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
       `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
       `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span>` +
-      (live ? `<canvas class="gl" data-glance="${n.node}" title="live: one column per frame (about a minute)"></canvas>` : '') + `</button>`;
+      `<canvas class="gl" data-glance="${n.node}" title="${live || foc ? 'live: one column per frame' : 'last minutes: one column per summary'}"></canvas></button>`;
   });
-  if ((L.live || []).length > 1 && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D81: the extra streams draw their strip here too
+  if (window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: every card carries its water-column preview
   if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
   $('holes').innerHTML = h;
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
@@ -577,12 +595,78 @@ function renderHoles() {
       L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish');
     const extra = (L.live || []).filter(x => x !== L.focus);   // D81: more holes stream when the radio has room
     if (extra.length) $('followWhy').textContent += ` · also live: ${extra.map(nameOf).join(', ')}`; }
+  if (window.suiteTab === 'holes') lpRender();   // D82
   const f = nodes.find(n => n.node === focus);
   if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
 }
 $('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
 $('sim').addEventListener('click', () => post({ sim: !L.sim }));
 $('follow').addEventListener('click', () => post({ follow: !(L.follow !== false) }));   // D80
+$('follow2').addEventListener('click', () => post({ follow: !(L.follow !== false) }));  // D82: same button on the Holes tab
+$('followN').addEventListener('click', e => { const b = e.target.closest('[data-fn]'); if (b) post({ follow_n: +b.dataset.fn }); });
+
+/* ---------- D82: live panels on the Holes tab: the whole water column of every streamed hole ---------- */
+const LP = { nodes: {}, busy: false, order: [] };   // per node: since, recs (last 240 pings), el
+function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0); }
+function lpPoll() {
+  if (window.suiteTab !== 'holes' || document.hidden || LP.busy) return;
+  const ids = lpNodes(); if (!ids.length) return;
+  LP.busy = true;
+  ids.forEach(n => { if (!LP.nodes[n]) LP.nodes[n] = { since: 0, recs: [] }; });
+  // one request for every streaming hole, bottom + targets only (the chalet serves one request at a time)
+  sfetch('/api/sonar/pings?nodes=' + ids.join(',') + '&since=' + ids.map(n => LP.nodes[n].since).join(',') + '&max=24&lite=1').then(r => r.json()).then(d => {
+    (d.nodes || []).forEach(x => {
+      const st = LP.nodes[x.node]; if (!st) return;
+      (x.pings || []).forEach(p => { st.since = Math.max(st.since, p[0]); const b = p[2] < 2047 ? p[2] / 100 : null;
+        st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); });
+      if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
+    });
+  }).catch(() => {}).then(() => { LP.busy = false; lpRender(); });
+}
+function lpRender() {
+  const ids = lpNodes(), g = $('lpgrid');
+  const fo = L.follow !== false;
+  $('follow2').setAttribute('aria-pressed', String(fo));
+  document.querySelectorAll('#followN [data-fn]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.fn === (L.follow_n || 2))));
+  $('liveWhy').textContent = $('followWhy').textContent;
+  if (!ids.length) { g.innerHTML = '<p class="empty">No hole streaming yet. Tap a hole on the Sonar tab, or wait for Follow the action.</p>'; g.dataset.n = 1; LP.order = []; return; }
+  g.dataset.n = ids.length;
+  if (ids.join(',') !== LP.order.join(',')) {   // rebuild the panels only when the set changes
+    g.innerHTML = ids.map(n => `<button type="button" class="lp${n === L.focus ? ' main' : ''}" data-lp="${n}"><span class="hd"><span class="nm">${nameOf(n)}</span><span class="st" data-lpst="${n}"></span></span><canvas data-lpc="${n}" aria-label="live water column"></canvas></button>`).join('');
+    LP.order = ids.slice();
+  }
+  const acc = '#00B3D6', al = '#C2412D';
+  ids.forEach(n => {
+    const st = LP.nodes[n], c = document.querySelector(`canvas[data-lpc="${n}"]`); if (!c) return;
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight; if (!w) return;
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    const x = c.getContext('2d'); x.scale(dpr, dpr); x.fillStyle = '#0A1E26'; x.fillRect(0, 0, w, h);
+    const recs = st ? st.recs : [];
+    const lastB = recs.length ? (recs.slice().reverse().find(r => r.b != null) || {}).b : null;
+    const sum = (L.nodes || []).find(k => k.node === n);
+    const stEl = document.querySelector(`[data-lpst="${n}"]`);
+    if (stEl) stEl.textContent = sum ? (sum.fish ? sum.fish + ' fish · ' : '') + 'bottom ' + (lastB != null ? fmtD(lastB) : (sum.bottom < 2047 ? fmtD(sum.bottom / 100) : '–')) : '';
+    if (!recs.length) { x.fillStyle = '#7E9AA3'; x.font = '12px system-ui'; x.fillText('waiting for pings…', 8, h / 2 + 4); return; }
+    let maxD = 3; recs.forEach(r => { if (r.b != null && r.b * 1.12 > maxD) maxD = r.b * 1.12; });
+    const N = 240, cw = w / N, off = N - recs.length, y = d => 2 + (h - 4) * Math.min(d, maxD) / maxD;
+    // depth grid
+    x.strokeStyle = 'rgba(215,230,234,0.08)'; x.fillStyle = 'rgba(215,230,234,0.5)'; x.font = '10px system-ui';
+    const stepM = maxD > 12 ? 5 : maxD > 6 ? 2 : 1;
+    for (let d = stepM; d < maxD; d += stepM) { const yy = Math.round(y(d)) + 0.5; x.beginPath(); x.moveTo(0, yy); x.lineTo(w, yy); x.stroke(); x.fillText(fmtD(d), 4, yy - 2); }
+    // bottom fill
+    x.beginPath(); let started = false;
+    recs.forEach((r, i) => { if (r.b == null) return; const xx = (i + off) * cw; if (!started) { x.moveTo(xx, y(r.b)); started = true; } else x.lineTo(xx, y(r.b)); });
+    if (started) { x.lineTo(w, y(recs[recs.length - 1].b != null ? recs[recs.length - 1].b : maxD)); x.lineTo(w, h); x.lineTo((off) * cw, h); x.closePath(); x.fillStyle = (HARD[recs[recs.length - 1].hard] || HARD[3]).c; x.globalAlpha = 0.55; x.fill(); x.globalAlpha = 1; }
+    // bait line (median of the last 40 pings' slot 0) and fish
+    const ds = []; recs.slice(-40).forEach(r => r.t.forEach(t => { if (t.slot === 0) ds.push(t.d); }));
+    if (ds.length) { ds.sort((a, b) => a - b); const yb = Math.round(y(ds[ds.length >> 1])) + 0.5; x.strokeStyle = 'rgba(255,255,255,0.7)'; x.setLineDash([4, 4]); x.beginPath(); x.moveTo(0, yb); x.lineTo(w, yb); x.stroke(); x.setLineDash([]); }
+    recs.forEach((r, i) => { const xx = (i + off + 0.5) * cw; r.t.forEach(t => { if (t.slot === 0) return; const rr = 1 + 2.5 * Math.max(0.2, t.s); x.fillStyle = t.s > 0.6 ? al : acc; x.globalAlpha = 0.45 + 0.55 * t.s; x.beginPath(); x.arc(xx, y(t.d), rr, 0, Math.PI * 2); x.fill(); }); });
+    x.globalAlpha = 1;
+  });
+}
+$('lpgrid').addEventListener('click', e => { const b = e.target.closest('[data-lp]'); if (!b) return; post({ focus: +b.dataset.lp }).then(() => { if (window.suiteShowTab) window.suiteShowTab('sonar'); }); });
+setInterval(lpPoll, 2000);
+setInterval(() => { if (window.suiteTab === 'holes' && !document.hidden) loadList(); }, 3000);   // D82: the live card needs the list on the Holes tab too
 $('stop').addEventListener('click', () => post({ focus: 0 }));
 
 function setFocus(n) {
@@ -971,11 +1055,13 @@ try { soundOn = localStorage.getItem('alertSound') !== 'false'; } catch (e) { /*
 /* ---------- Tabs ---------- */
 function showTab(t) {
   tab = t;
+  window.suiteShowTab = showTab;
   document.querySelectorAll('.tabs [role=tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
   ['holes', 'sonar', 'radio', 'settings'].forEach(k => { $('tab-' + k).hidden = k !== t; });
   try { history.replaceState(null, '', '#' + t); } catch (e) { /* file:// */ }
   window.suiteTab = t;
   if (t === 'sonar' && SON()) SON().show();
+  if (t === 'holes' && SON()) SON().show();   // D82: the live card wants the list and the pings too
   if (t === 'radio') loadRadio();
   if (t === 'settings') { loadSettings(); renderAbout(); loadRadio(); }
   if (t === 'holes') { renderNodes(); loadGlance(); }
@@ -1067,7 +1153,10 @@ $('silenceBtn').addEventListener('click', toggleSilence);
 $('alertSilence').addEventListener('click', toggleSilence);
 
 /* ---------- Holes tab ---------- */
+try { $('holeCards').open = localStorage.getItem('holeCardsOpen') === '1'; } catch (e) {}
+$('holeCards').addEventListener('toggle', () => { try { localStorage.setItem('holeCardsOpen', $('holeCards').open ? '1' : '0'); } catch (e) {} });
 function renderNodes() {
+  { const ns = (st && st.nodes) || [], f = ns.filter(n => n.fish && n.online !== false).length; $('hcSum').textContent = `${ns.length} hole${ns.length === 1 ? '' : 's'}` + (f ? ` · ${f} FISH ON` : ''); }
   if (!st) return;
   $('tripsInfo').innerHTML = st.trips ? `Trip recordings (sonar of the minute before each flag): ${st.trips} · <a href="/api/trips?download=1">Download</a>` : '';
   const rank = n => (n.fish && n.online !== false ? 0 : n.online === false ? 2 : 1);   // tripped, then online, offline last

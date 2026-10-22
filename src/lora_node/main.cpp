@@ -229,6 +229,7 @@ void setup() {
     meshSetAdaptive(settings.adaptiveRadio);
     meshSetSonarSim(settings.sonarSim);
     meshSetFollow(settings.followAction);   // D80
+    meshSetFollowHoles(settings.followHoles);   // D82
     meshSetTransport(settings.transportMode);
     meshSetLoraChannel(settings.loraChannel);
   }

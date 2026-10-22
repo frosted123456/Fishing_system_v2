@@ -34,6 +34,7 @@ class FollowAction {
   bool on = true;
   uint8_t focus = 0;    // current pick (0 = none)
   uint8_t extra[EXTRAS] = {0, 0};   // D81: next busiest holes (0 = none); re-ranked every DWELL_MS, never the watched hole
+  uint8_t max_extra = 1;            // D82: holes streamed beside the watched one (0-2; the user picks 1, 2 or 3 holes in all)
   char why[28] = "";    // short reason for the page / OLED
 
   static int score(const FollowIn& c) {
@@ -42,6 +43,7 @@ class FollowAction {
     return c.activity + 4 * fish + (c.near_bait ? 10 : 0);
   }
 
+  void setMaxExtra(uint8_t n) { max_extra = n > EXTRAS ? static_cast<uint8_t>(EXTRAS) : n; extra_since_ = 0; }   // ranks again at once
   void setOn(bool v, uint32_t now) { on = v; pin_until_ = 0; trip_until_ = 0; since_ = now; if (!v) { extra[0] = extra[1] = 0; } }
   // The user picked a hole (0 = stopped the stream): keep it for PIN_MS.
   void manual(uint8_t node, uint32_t now) {
@@ -95,16 +97,19 @@ class FollowAction {
   // D81 (5.4): the extras follow the fish too, with their own dwell: re-ranked every DWELL_MS, kept while they stay
   // busy enough (QUIET_SCORE) and nothing clearly busier (MARGIN) waits. Follow on only; a manual pick does not pin them.
   void updateExtras(const FollowIn* c, uint8_t n, uint32_t now) {
-    for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == focus) extra[k] = 0;
+    for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == focus || k >= max_extra) extra[k] = 0;
+    if (max_extra == 0) return;
     if (extra_since_ != 0 && now - extra_since_ < DWELL_MS) return;
     extra_since_ = now ? now : 1;
+    // D82: the user asked for N holes, so the places are filled even when nothing is going on (the busiest first);
+    // an extra leaves only when its summaries stop (gone) or a clearly busier hole waits
     int sc[EXTRAS]; for (uint8_t k = 0; k < EXTRAS; k++) sc[k] = -1;
-    for (uint8_t i = 0; i < n; i++) for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] && c[i].node == extra[k]) sc[k] = score(c[i]);
-    for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] && sc[k] < QUIET_SCORE) { extra[k] = 0; sc[k] = -1; }   // gone or quiet
+    for (uint8_t i = 0; i < n; i++) for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] && c[i].node == extra[k] && c[i].age_s <= MAX_AGE) sc[k] = score(c[i]);
+    for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] && sc[k] < 0) extra[k] = 0;   // gone
     for (;;) {   // best remaining candidate beats the weakest kept extra by MARGIN (or fills an empty place)
-      int best = -1, bs = MIN_SCORE - 1;
+      int best = -1, bs = -1;
       for (uint8_t i = 0; i < n; i++) {
-        if (c[i].node == focus || c[i].node == 0) continue;
+        if (c[i].node == focus || c[i].node == 0 || c[i].age_s > MAX_AGE) continue;
         bool kept = false; for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == c[i].node) kept = true;
         if (kept) continue;
         const int sv = score(c[i]);
@@ -112,8 +117,9 @@ class FollowAction {
       }
       if (best < 0) break;
       int w = -1;
-      for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == 0) { w = k; break; }
-      if (w < 0) { w = 0; for (uint8_t k = 1; k < EXTRAS; k++) if (sc[k] < sc[w]) w = k; if (bs < sc[w] + MARGIN) break; }
+      const uint8_t lim = max_extra > static_cast<uint8_t>(EXTRAS) ? static_cast<uint8_t>(EXTRAS) : max_extra;
+      for (uint8_t k = 0; k < lim; k++) if (extra[k] == 0) { w = k; break; }
+      if (w < 0) { w = 0; for (uint8_t k = 1; k < lim; k++) if (sc[k] < sc[w]) w = k; if (bs < sc[w] + MARGIN) break; }
       extra[w] = c[best].node; sc[w] = bs;
     }
   }

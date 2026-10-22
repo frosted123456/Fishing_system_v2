@@ -73,7 +73,8 @@ void meshSendResetAll();
 void meshSetFocusNode(uint8_t node);
 void meshAutoFocus(uint8_t node);      // D79: FISH ON -> watch that hole for AUTO_FOCUS_MS (chalet)
 void meshAutoFocusTick();
-void meshSetFollow(bool on);           // D80 follow the action: focus follows the sonar activity (chalet)
+void meshSetFollow(bool on);
+void meshSetFollowHoles(uint8_t n);   // D82: 1-3 holes streamed with follow on           // D80 follow the action: focus follows the sonar activity (chalet)
 bool meshFollowOn();
 void meshFollowState(char* why, size_t n, uint32_t& pin_s, uint32_t& trip_s);   // D80: for the map marker
 // D80 range test (chalet): one hub's slot cycles SF9 -> SF5, slot results queued for the logger (rangetest.cpp)
@@ -141,7 +142,7 @@ uint8_t meshFocusNodes(uint8_t* out3);        // D81: streamed holes (watched + 
 bool meshIsFocus(uint8_t node);
 bool meshHubPushSonar(const uint8_t* blk, uint8_t len);   // hub: queue one block for the next slots
 String meshSonarListJson();                  // chalet: /api/sonar (one summary per sonar node)
-String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings);   // chalet: /api/sonar/pings
+String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool lite = false);   // chalet: /api/sonar/pings (lite: no residual cells / track info)
 String meshSonarBgJson(uint8_t node);        // chalet: /api/sonar/bg (2-bit background profile)
 String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glance (every hole, ~3 min of summaries)
 

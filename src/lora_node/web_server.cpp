@@ -883,6 +883,7 @@ void handleWebApiSonarPost() {
   }
   if (doc.containsKey("sim")) { settings.sonarSim = doc["sim"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
   if (doc.containsKey("follow")) { settings.followAction = doc["follow"].as<bool>(); meshSetFollow(settings.followAction); saveSettings(); }   // D80
+  if (doc.containsKey("follow_n")) { const int n = doc["follow_n"].as<int>(); if (n >= 1 && n <= 3) { settings.followHoles = (uint8_t)n; meshSetFollowHoles(settings.followHoles); saveSettings(); } }   // D82
   if (doc.containsKey("focus")) {
     const int f = doc["focus"].as<int>();
     if (f >= 0 && f <= 255) meshSetFocusNode((uint8_t)f);
@@ -891,11 +892,27 @@ void handleWebApiSonarPost() {
 }
 
 void handleWebApiSonarPings() {
+  const int mx = server.hasArg("max") ? server.arg("max").toInt() : 40;
+  const uint8_t m = (uint8_t)(mx < 1 ? 1 : (mx > 64 ? 64 : mx));
+  const bool lite = server.arg("lite") == "1";   // D82: bottom + targets only (the Live card), ~1/3 of the bytes
+  if (server.hasArg("nodes")) {   // D82: several holes in one request: nodes=a,b,c & since=s1,s2,s3
+    String ns = server.arg("nodes"), ss = server.arg("since"), out; out.reserve(600 * 3); out = "{\"nodes\":[";
+    int pn = 0, ps = 0, k = 0;
+    while (pn < (int)ns.length() && k < 3) {
+      int en = ns.indexOf(',', pn); if (en < 0) en = ns.length();
+      int es = ss.indexOf(',', ps); if (es < 0) es = ss.length();
+      const int node = ns.substring(pn, en).toInt(); const uint32_t since = strtoul(ss.substring(ps, es).c_str(), nullptr, 10);
+      if (node > 0 && node <= 255) { if (k) out += ","; out += meshSonarPingsJson((uint8_t)node, since, m, lite); k++; }
+      pn = en + 1; ps = es + 1;
+    }
+    out += "]}";
+    server.send(200, "application/json", out);
+    return;
+  }
   const int node = server.arg("node").toInt();
   const uint32_t since = strtoul(server.arg("since").c_str(), nullptr, 10);
-  const int mx = server.hasArg("max") ? server.arg("max").toInt() : 40;
   if (node <= 0 || node > 255) { server.send(400, "application/json", "{\"error\":\"node\"}"); return; }
-  server.send(200, "application/json", meshSonarPingsJson((uint8_t)node, since, (uint8_t)(mx < 1 ? 1 : (mx > 64 ? 64 : mx))));
+  server.send(200, "application/json", meshSonarPingsJson((uint8_t)node, since, m, lite));
 }
 
 void handleWebApiSonarBg() {

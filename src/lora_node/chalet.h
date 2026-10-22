@@ -182,6 +182,7 @@ struct DeviceSettings {
   bool nearBaitBeep;          // v2 (D43): short beep when a fish comes near a bait (off by default)
   uint8_t beamDeg;            // v2 (D52): transducer beam angle, degrees (full cone, -3 dB). Frank's 200 kHz unit: 14 ± 1
   bool followAction;          // D80: the watched hole follows the sonar activity (default on; Sonar tab)
+  uint8_t followHoles;        // D82: holes streamed at once with follow on, 1-3 (default 2)
   char webPin[9];             // D74: PIN the page must send on every change (4-8 digits); empty = off (default)
 };
 

@@ -1005,6 +1005,7 @@ void meshAutoFocusTick() {
   g_autoFocusUntil = 0; g_cfg_focus = g_autoFocusPrev;
 }
 void meshSetFollow(bool on) { g_follow.setOn(on, millis()); if (on) g_follow.focus = g_cfg_focus; g_autoFocusUntil = 0; }
+void meshSetFollowHoles(uint8_t n) { g_follow.setMaxExtra(n < 1 ? 0 : (n > 3 ? 2 : static_cast<uint8_t>(n - 1))); }
 bool meshFollowOn() { return g_follow.on; }
 void meshFollowState(char* why, size_t n, uint32_t& pin_s, uint32_t& trip_s) {
   const uint32_t now = millis();
@@ -1495,7 +1496,7 @@ String meshSonarListJson() {
     for (uint8_t i = 0; i < n; i++) { if (i) s += ","; s += f[i]; } s += "]"; }
   s += ",\"frame\":"; s += g_frame;
   { const uint32_t now = millis();   // D80 follow the action
-    s += ",\"follow\":"; s += g_follow.on ? "true" : "false";
+    s += ",\"follow\":"; s += g_follow.on ? "true" : "false"; s += ",\"follow_n\":"; s += g_follow.max_extra + 1;
     s += ",\"why\":\""; s += g_follow.why; s += "\"";
     s += ",\"pin_s\":"; s += g_follow.pinLeftMs(now) / 1000; s += ",\"trip_s\":"; s += g_follow.tripLeftMs(now) / 1000; }
   s += ",\"nodes\":[";
@@ -1531,7 +1532,7 @@ String meshSonarListJson() {
 
 // {"node":N,"last":seq,"pings":[[seq,index,bottom,[[track,depth,strength,width],..],[[bin,level],..],hard,nf_neg,
 //                                 [[track,flick_q,spread_q,elen,mature],..]],..]}   (see sonar_codec.h for units)
-String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings) {
+String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool lite) {
   String s;
   if (g_sonar == nullptr) return F("{\"pings\":[]}");
   if (max_pings > 64) max_pings = 64;
@@ -1559,13 +1560,13 @@ String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings) {
       s += b;
     }
     s += "],[";
-    for (uint8_t k = 0; k < p.n_resid; k++) {
+    for (uint8_t k = 0; k < (lite ? 0 : p.n_resid); k++) {
       snprintf(b, sizeof(b), "%s[%u,%u]", k ? "," : "", p.r[k].bin, p.r[k].level);
       s += b;
     }
     snprintf(b, sizeof(b), "],%u,%u,[", copy[i].hard, copy[i].nf_neg);
     s += b;
-    for (uint8_t k = 0; k < copy[i].n_info; k++) {
+    for (uint8_t k = 0; k < (lite ? 0 : copy[i].n_info); k++) {
       const sonar::TrackInfo& x = copy[i].info[k];
       snprintf(b, sizeof(b), "%s[%u,%u,%u,%u,%u]", k ? "," : "", x.track, x.flick_q, x.spread_q, x.elen, x.mature ? 1 : 0);
       s += b;
@@ -1724,6 +1725,7 @@ struct DemoHub { HubRole<8>* role; DemoHole holes[DEMO_MAX_HOLES]; };
 static DemoHub g_demo[DEMO_MAX_HUBS];
 static uint8_t g_demo_hubs = 0, g_demo_holes = 3;
 static sonar::SonarSource* g_demo_src = nullptr;   // full fake sonar of the FOCUS hole
+static sonar::SonarSource* g_demo_xsrc[2] = {nullptr, nullptr}; static uint8_t g_demo_xnode[2] = {0, 0};   // D82: the extra streamed holes
 static sonar::Params g_demo_prm;                   // the chalet's sonar knobs, applied to the demo FOCUS sonar
 static uint8_t g_demo_src_node = 0;
 static uint32_t g_demo_rng = 0x1234567u;
@@ -1751,6 +1753,7 @@ uint8_t meshDemoHubs() { return g_demo_hubs; }
 void meshDemoSetParams(const uint8_t* v, uint8_t n) {
   for (uint8_t i = 0; i < n && i < sonar::P_COUNT; i++) g_demo_prm.v[i] = v[i];
   if (g_demo_src != nullptr) g_demo_src->proc.prm = g_demo_prm;
+  for (uint8_t k = 0; k < 2; k++) if (g_demo_xsrc[k] != nullptr) g_demo_xsrc[k]->proc.prm = g_demo_prm;
 }
 uint8_t meshDemoHoles() { return g_demo_holes; }
 
@@ -1784,6 +1787,7 @@ void meshDemoSetBait(uint8_t id, uint8_t v5) {   // demo hole: bait depth (5 cm 
   if (cm + 20 > d->bottom_cm) cm = static_cast<uint16_t>(d->bottom_cm - 20);
   d->bait_cm = cm;
   if (g_demo_src != nullptr && g_demo_src_node == id) { g_demo_src->proc.bait_m = cm / 100.0f; g_demo_src->scene.setBait(cm / 100.0f); }
+  for (uint8_t k = 0; k < 2; k++) if (g_demo_xsrc[k] != nullptr && g_demo_xnode[k] == id) { g_demo_xsrc[k]->proc.bait_m = cm / 100.0f; g_demo_xsrc[k]->scene.setBait(cm / 100.0f); }
 }
 
 void meshDemoSet(uint8_t hubs, uint8_t holes) {
@@ -1825,6 +1829,7 @@ void meshDemoSet(uint8_t hubs, uint8_t holes) {
   }
   g_demo_hubs = hubs; g_demo_holes = holes;
   if (hubs == 0 && g_demo_src != nullptr) { delete g_demo_src; g_demo_src = nullptr; g_demo_src_node = 0; }
+  if (hubs == 0) for (uint8_t k = 0; k < 2; k++) if (g_demo_xsrc[k] != nullptr) { delete g_demo_xsrc[k]; g_demo_xsrc[k] = nullptr; g_demo_xnode[k] = 0; }
 }
 
 // light fake sonar: bottom, bait and 0-3 fish wandering, as one BASE block (what a non-focus hole sends)
@@ -1890,8 +1895,8 @@ void meshDemoTick() {
   if (now - last_ms < 250) return;
   last_ms = now;
   // 1. the chalet beacon, as the hubs get it on the backbone: acks, focus, commands
-  size_t bl; uint8_t focus;
-  { Lock l; bl = g_ch->buildEbBeacon(eb, sizeof(eb)); focus = g_ch->focus_node; }
+  size_t bl; uint8_t focus; uint8_t xf[2];
+  { Lock l; bl = g_ch->buildEbBeacon(eb, sizeof(eb)); focus = g_ch->focus_node; xf[0] = g_ch->beacon.focus_extra[0]; xf[1] = g_ch->beacon.focus_extra[1]; }
   for (uint8_t h = 0; h < g_demo_hubs; h++) {
     HubRole<8>& r = *g_demo[h].role;
     uint8_t cmd = CMD_NONE;
@@ -1912,6 +1917,23 @@ void meshDemoTick() {
         if (g_demo[h].holes[k].id == focus)
           for (uint8_t i = 0; i < n; i++) g_demo[h].role->sonar.push(out[i].data, out[i].len, g_demo[h].role->frameNow());
   }
+  // 2b. D82: the extra streamed holes (what the beacon says), each with its own fake fish finder
+  for (uint8_t x = 0; x < 2; x++) {
+    const uint8_t id = xf[x];
+    DemoHole* xd = id ? demoHole(id) : nullptr;
+    if (xd == nullptr || !(xd->sim & MESH_SIM_SONAR) || id == focus) { g_demo_xnode[x] = 0; continue; }
+    if (g_demo_xsrc[x] == nullptr) { g_demo_xsrc[x] = new sonar::SonarSource(); g_demo_xsrc[x]->proc.prm = g_demo_prm; }
+    if (g_demo_xnode[x] != id) {
+      g_demo_xsrc[x]->begin(id, 7919UL * id + 31UL, static_cast<uint16_t>(demoRand())); g_demo_xnode[x] = id;
+      g_demo_xsrc[x]->proc.bait_m = xd->bait_cm / 100.0f; g_demo_xsrc[x]->scene.setBait(xd->bait_cm / 100.0f);
+    }
+    sonar::Block out[2];
+    const uint8_t n = g_demo_xsrc[x]->tick(true, out, 2);
+    for (uint8_t h = 0; h < g_demo_hubs; h++)
+      for (uint8_t k = 0; k < g_demo_holes; k++)
+        if (g_demo[h].holes[k].id == id)
+          for (uint8_t i = 0; i < n; i++) g_demo[h].role->sonar.push(out[i].data, out[i].len, g_demo[h].role->frameNow());
+  }
   const bool base = now - last_base >= 2000;
   if (base) last_base = now;
   if (now - last_pkt < 500) return;
@@ -1924,7 +1946,7 @@ void meshDemoTick() {
       DemoHole& o = d.holes[k];
       const uint8_t st = demoTripped(o, now) ? MESH_LS_TRIPPED : MESH_LS_IDLE;
       r.table.observe(o.id, st, 0, MESH_LF_SIM, o.batt, now);
-      if (base && (o.sim & MESH_SIM_SONAR) && o.id != focus) demoSummary(o, r);
+      if (base && (o.sim & MESH_SIM_SONAR) && o.id != focus && o.id != xf[0] && o.id != xf[1]) demoSummary(o, r);
     }
     const size_t n = r.buildHubFree(pl, sizeof(pl), 0, 3900, static_cast<uint16_t>(now / 60000UL), r.frameNow());
     if (n == 0) continue;
