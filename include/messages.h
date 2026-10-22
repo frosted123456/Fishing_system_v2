@@ -237,6 +237,7 @@ typedef struct __attribute__((packed)) {
   uint8_t  sim_on;          // 1 = sonar nodes generate fake data
   uint8_t  n_params;        // v2 (D42): sonar knobs that follow (0 = none)
   uint8_t  params[SONAR_CTRL_PARAMS];
+  uint8_t  focus_extra[2];  // D81 (5.4): up to two more streamed holes (0 = none)
 } SonarCtrlMessage;
 
 // v2 device command (6 bytes) - hub -> one node, sent right after a message from that node

@@ -2774,6 +2774,8 @@ static void sendSonarCtrl(bool sim, uint8_t focus) {
   memset(&m, 0, sizeof(m));
   m.network_id = NETWORK_ID; m.sender_id = NODE_ID; m.msg_type = MSG_SONAR_CTRL;
   m.focus_node = focus; m.sim_on = sim ? 1 : 0;
+  { uint8_t f[3]; const uint8_t n = meshFocusNodes(f); uint8_t k = 0;   // D81 (5.4): the extra streamed holes ride along
+    for (uint8_t i = 0; i < n && k < 2; i++) if (f[i] != focus) m.focus_extra[k++] = f[i]; }
   m.n_params = icemesh::sonar::P_COUNT;   // v2 (D42): the sonar knobs ride along
   memcpy(m.params, sonarPrm.v, icemesh::sonar::P_COUNT);
   nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
@@ -3154,6 +3156,7 @@ void sonarHubLoop() {
   const bool global = meshSonarSim();                       // chalet: test holes (virtual) on
   const bool sim = global || realSonarSim;                  // tip-ups may run fake sonar
   const uint8_t focus = meshFocusNode();
+  const bool ownFocus = meshIsFocus(NODE_ID);   // D81: the own hole may be one of the extra streamed holes
 
   // own hole: fake sonar when asked (independent of the virtual holes); D62: else the real sonar when the
   // shield answered (same 250 ms ticks, same block path)
@@ -3167,7 +3170,7 @@ void sonarHubLoop() {
     while (millis() - ownTick >= 250UL) {
       ownTick += 250UL;
       icemesh::sonar::Block out[2];
-      const uint8_t n = ownSonar->tick(focus == NODE_ID, out, 2);
+      const uint8_t n = ownSonar->tick(ownFocus, out, 2);
       for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     }
   }
@@ -3183,7 +3186,7 @@ void sonarHubLoop() {
     if (millis() - realTick > 1000UL) realTick = millis() - 250UL;   // loop() was busy: don't burst
     while (millis() - realTick >= 250UL) {
       realTick += 250UL;
-      sonarRealTick(focus == NODE_ID);
+      sonarRealTick(ownFocus);
     }
   } else if (realRunning || (g_sonarHwOk && !realSlept)) {   // stopped / not started (the chalet asked for fake data): shield to sleep, no power switch
     realRunning = false; realSlept = true;
@@ -3248,7 +3251,7 @@ void sonarHubLoop() {
       icemesh::sonar::Block out[2];
       const uint32_t t0 = micros();
       if (!(hubHoleSim(sonarVirt[k].node()) & MESH_SIM_SONAR)) continue;
-      const uint8_t n = sonarVirt[k].tick(focus == sonarVirt[k].node(), out, 2);
+      const uint8_t n = sonarVirt[k].tick(meshIsFocus(sonarVirt[k].node()), out, 2);
       const uint32_t dt = micros() - t0;
       if (dt > sonarTickUsMax) sonarTickUsMax = dt;
       sonarTickUsSum += dt; sonarTickCount++;

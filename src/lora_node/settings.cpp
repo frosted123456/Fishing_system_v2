@@ -151,7 +151,7 @@ void nearBaitWatch() {
   for (int i = 1; i < network.node_count; i++) {
     const uint8_t id = network.nodes[i].node_id;
     MeshSonarLite sl;
-    const bool near = meshSonarSummary(id, sl) && sl.age_frames < 10 && (sl.status & 0x02);
+    const bool near = meshSonarSummary(id, sl) && sl.age_s < 10 && (sl.status & 0x02);
     if (near && !was[id]) {
       nearBaitNode = id; nearBaitAt = millis();
       if (settings.nearBaitBeep && settings.buzzerEnabled && !activeAlerts) triggerBuzzer(1);

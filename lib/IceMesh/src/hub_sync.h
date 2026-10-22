@@ -9,7 +9,8 @@ namespace tdma {
 
 class HubSync {
  public:
-  enum { MAX_FREERUN = 3 };   // frames without beacon before going back to search (est.)
+  enum { MAX_FREERUN = 3 };   // frames without beacon before going back to search (est., at a 1 s frame)
+  uint16_t max_freerun = MAX_FREERUN;   // D81 (5.1): ~3 s whatever the frame length (the hub sets it from the beacon)
 
   HubSync() { reset(); }
   void reset() {
@@ -22,7 +23,7 @@ class HubSync {
     if (synced_) {
       // predicted reference for this frame number
       const int16_t df = static_cast<int16_t>(static_cast<uint16_t>(frame - frame_));
-      if (df > 0 && df <= MAX_FREERUN + 1) {
+      if (df > 0 && df <= max_freerun + 1) {
         const uint32_t predicted = ref_ + static_cast<uint32_t>(df) * frame_us_;
         last_err_us_ = static_cast<int32_t>(ref_us - predicted);
         have_err_ = true;
@@ -40,7 +41,7 @@ class HubSync {
     frame_++;
     lost_streak_++;
     lost_bits_ = (lost_bits_ << 1) | 1;
-    if (lost_streak_ > MAX_FREERUN) synced_ = false;
+    if (lost_streak_ > max_freerun) synced_ = false;
   }
 
   bool synced() const { return synced_; }

@@ -137,6 +137,8 @@ uint8_t meshSonarVirtualId(uint8_t hub_id, uint8_t k);
 void meshSetSonarSim(bool on);               // chalet: BF_SONAR_SIM in the beacon
 bool meshSonarSim();                         // chalet: configured; hub: as seen in the beacon
 uint8_t meshFocusNode();                     // chalet: configured; hub: from the beacon
+uint8_t meshFocusNodes(uint8_t* out3);        // D81: streamed holes (watched + up to 2 extras), count
+bool meshIsFocus(uint8_t node);
 bool meshHubPushSonar(const uint8_t* blk, uint8_t len);   // hub: queue one block for the next slots
 String meshSonarListJson();                  // chalet: /api/sonar (one summary per sonar node)
 String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings);   // chalet: /api/sonar/pings
@@ -144,7 +146,7 @@ String meshSonarBgJson(uint8_t node);        // chalet: /api/sonar/bg (2-bit bac
 String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glance (every hole, ~3 min of summaries)
 
 // ---- raw views for the OLED screens (chalet) ----
-struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; uint8_t status, bottom_snr; };   // status: ST_* (D43)   // t: depth | level << 11 | bait << 13
+struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; uint16_t age_s; uint8_t status, bottom_snr; };   // status: ST_* (D43)   // t: depth | level << 11 | bait << 13
 struct MeshPingLite { uint16_t bottom_cm; uint8_t n; uint16_t d[5]; uint8_t lv[5]; uint8_t bait_mask; };
 struct MeshHubLink { uint8_t id; int8_t rssi; int32_t lora_age_s, eb_age_s; uint8_t hops; bool demo; };
 bool meshSonarSummary(uint8_t node, MeshSonarLite& out);

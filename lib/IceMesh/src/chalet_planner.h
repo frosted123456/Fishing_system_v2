@@ -48,6 +48,12 @@ struct HubInfo {
   uint8_t relay_cand; int8_t relay_cand_rssi; uint16_t relay_cand_frame;
   bool has_health; uint16_t health_frame; Health health;
   ModeStats stats[MODE_COUNT];
+  // D81 (5.5): the first hop of a relayed hub (hub -> its relay) has its own adaptive mode, fed by "the relay
+  // carried it this frame" and the relay's health neighbour entry (RSSI / SNR of this hub as the relay hears it)
+  uint8_t hop_mode, hop_hist, hop_hist_n, hop_miss, hop_trial_left, hop_trial_prev, hop_trial_fails;
+  uint16_t hop_hold_until, hop_seen_frame;
+  bool hop_carried;            // SEC_RELAY for this hub seen in the current frame
+  int8_t hop_rssi, hop_snr_q4; bool hop_has_signal; uint16_t hop_signal_frame;
 };
 
 struct PlannerConfig {
@@ -60,6 +66,7 @@ struct PlannerConfig {
   uint16_t frame_ms;         // shortest frame (normally 1000)
   uint16_t frame_ms_max;     // longest frame the planner may step up to when the hubs do not fit (2000)
   uint8_t focus_hub;        // hub reporting the FOCUS sonar node (ID_NONE = none)
+  uint8_t extra_hubs[2];    // D81 (5.4): hubs of up to two more streamed holes, kept only while they fit (ID_NONE = none)
   uint8_t range_hub;        // D80 range test: this hub's slot cycles SF9 -> SF5 one mode per frame (ID_NONE = off)
   uint8_t focus_allowance;  // its slot allowance (est. 180 B = FOCUS stream + line state)
 };
@@ -67,11 +74,15 @@ struct PlannerConfig {
 template <uint8_t MAX_HUBS = 10>
 class ChaletPlanner {
  public:
+  // D81 (5.1): the frame is 0.5-2 s long, so every timeout here is in milliseconds and turned into frames with fr()
+  // at the frame length in use. The *_FRAMES names stay as their value at a 1 s frame (tests).
   enum {
     HUB_TIMEOUT_FRAMES = 30,
     DIRECT_WINDOW = 5,
     RELAY_CAND_TIMEOUT = 10,
     RELAY_KEEP_FRAMES = 60,
+    EXTRA_FOCUS = 2,          // D81: streamed holes beyond the first (follow the action watches the top 3)
+    EXTRA_HOLD_MS = 10000,    // D81: a dropped extra is not tried again for this long
     ACK_REPEAT = 3,
     MAX_RELAYS = 3,
     MIN_ALLOWANCE = 40,
@@ -88,7 +99,10 @@ class ChaletPlanner {
     FW_FAST_MODES = 2,        // D80: hub firmware (Health.fw) that knows SF6 / SF5; older hubs stop at SF7
     UP_HOLD_FRAMES = 20,
     DOWN_HOLD_FRAMES = 30,
+    HOP_UP_EXTRA_DB = 3,      // D81 est.: the relay's RSSI of the far hub arrives every 8 frames only: ask a little more margin
   };
+  // frames for `ms` at the frame length in use (at least 1)
+  uint16_t fr(uint32_t ms) const { const uint16_t f = frame_ms_ ? frame_ms_ : (cfg.frame_ms ? cfg.frame_ms : 1000); const uint32_t n = ms / f; return n < 1 ? 1 : (n > 65535 ? 65535 : static_cast<uint16_t>(n)); }
 
   PlannerConfig cfg;
 
@@ -96,6 +110,7 @@ class ChaletPlanner {
     memset(&cfg, 0, sizeof(cfg));
     cfg.allowance = 96; cfg.test_allowance = 160; cfg.frame_ms = 1000;
     cfg.focus_hub = ID_NONE; cfg.focus_allowance = 180; cfg.frame_ms_max = 2000; cfg.range_hub = ID_NONE;
+    cfg.extra_hubs[0] = cfg.extra_hubs[1] = ID_NONE;
     for (uint8_t i = 0; i < MAX_HUBS; i++) hubs_[i].used = false;
     n_acks_ = 0;
   }
@@ -140,10 +155,10 @@ class ChaletPlanner {
       if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->trial_left && h->mode != MODE_SF9_BW500) {   // D79: trial failed
         const uint8_t f = h->trial_fails < 3 ? h->trial_fails : 3;   // D80 back-off: hold x1, x2, x4, x8
         const uint8_t fails = static_cast<uint8_t>(h->trial_fails < 255 ? h->trial_fails + 1 : 255);
-        setMode(*h, static_cast<RadioMode>(h->trial_prev), frame, static_cast<uint16_t>(DOWN_HOLD_FRAMES << f));
+        setMode(*h, static_cast<RadioMode>(h->trial_prev), frame, static_cast<uint16_t>(fr(DOWN_HOLD_FRAMES * 1000UL) << f));
         h->trial_fails = fails;
       } else if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->miss_streak >= 2 && h->mode != MODE_SF9_BW500) {
-        setMode(*h, slowerMode(static_cast<RadioMode>(h->mode)), frame, DOWN_HOLD_FRAMES);
+        setMode(*h, slowerMode(static_cast<RadioMode>(h->mode)), frame, fr(DOWN_HOLD_FRAMES * 1000UL));
       }
     }
   }
@@ -152,6 +167,7 @@ class ChaletPlanner {
     HubInfo* h = get(hub, frame);
     if (h == nullptr) return;
     h->last_any = frame;
+    if (via == h->via && h->hop_seen_frame == frame) h->hop_carried = true;   // D81 (5.5): the first hop worked this frame
     noteRelayCandidate(*h, via, 0, frame, true);
   }
 
@@ -177,7 +193,11 @@ class ChaletPlanner {
     HubInfo* h = findMut(hub);
     if (h == nullptr) return;
     h->health = hl; h->has_health = true; h->health_frame = frame;
-    for (uint8_t i = 0; i < hl.n_nb; i++) onNeighbor(hub, hl.nb[i].hub, hl.nb[i].rssi, frame);
+    for (uint8_t i = 0; i < hl.n_nb; i++) {
+      onNeighbor(hub, hl.nb[i].hub, hl.nb[i].rssi, frame);
+      HubInfo* r = findMut(hl.nb[i].hub);   // D81 (5.5): the relay's view of its remote hub feeds the hop's step-up margin
+      if (r != nullptr && r->via == hub) { r->hop_rssi = hl.nb[i].rssi; r->hop_snr_q4 = hl.nb[i].snr_q4; r->hop_has_signal = true; r->hop_signal_frame = frame; }
+    }
   }
 
   void addAck(uint8_t hub, uint8_t node, uint8_t seq) {
@@ -201,6 +221,7 @@ class ChaletPlanner {
   void buildBeacon(uint16_t frame, Beacon& bc) {
     expire(frame);
     classify(frame);
+    scoreHops(frame);
     bc.network_id = cfg.network_id; bc.src = cfg.self_id; bc.frame = frame;
     bc.test_mode = cfg.test_mode;
     // acks
@@ -215,7 +236,7 @@ class ChaletPlanner {
       Beacon probe = bc;
       const uint16_t shorter = static_cast<uint16_t>(frame_ms_ - FRAME_STEP_MS < fmin ? fmin : frame_ms_ - FRAME_STEP_MS);
       if (plan(frame, probe, shorter, nullptr)) {
-        if (++down_streak_ >= DOWN_FRAMES) { frame_ms_ = shorter; down_streak_ = 0; }
+        if (++down_streak_ >= fr(DOWN_FRAMES * 1000UL)) { frame_ms_ = shorter; down_streak_ = 0; }
       } else {
         down_streak_ = 0;
       }
@@ -226,9 +247,37 @@ class ChaletPlanner {
       down_streak_ = 0;
     }
     plan(frame, bc, frame_ms_, &allow);
+    grow(frame, bc, frame_ms_);
     bc.frame_10ms = static_cast<uint8_t>(frame_ms_ / 10);
     last_allowance_ = allow;
+    for (uint8_t i = 0; i < MAX_HUBS; i++) if (hubs_[i].used && hubs_[i].via != 0 && hubScheduled(bc, hubs_[i].id)) hubs_[i].hop_seen_frame = frame;
   }
+  // D81 (5.2): the time left in the frame goes to bigger turns, fastest hubs first (a turn of 255 B is 40 ms at SF5,
+  // 318 ms at SF9). After the frame-length decision, so a big turn never keeps the frame long.
+  // Only hubs that stream a hole grow (the others have nothing to fill a big turn with, and every hub listens to every
+  // turn: a long empty window costs the others battery). GROW_KEEP_US stays free for the chalet's channel sample and
+  // the random JOIN listen that live between the last slot and the next beacon.
+  enum { GROW_KEEP_US = 100000 };
+  void grow(uint16_t frame, Beacon& bc, uint16_t fm) {
+    (void)frame;
+    if (cfg.test_mode != TEST_OFF) return;
+    const uint32_t fus = static_cast<uint32_t>(fm) * 1000UL;
+    if (fus <= GROW_KEEP_US) return;
+    const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
+    for (uint8_t m = MODE_COUNT; m-- > 0;) for (uint8_t pass = 0; pass < 2; pass++) {   // fastest mode first; streaming hubs before the others
+      for (uint8_t s = 0; s < bc.n_slots; s++) {
+        Slot& sl = bc.slots[s];
+        if (sl.kind != SLOT_HUB || sl.via != 0 || sl.mode != m || sl.allowance >= MAX_PACKET || sl.owner == cfg.range_hub) continue;
+        if (focusCount(sl.owner) == 0 || pass == 1) continue;
+        { uint8_t own = 0; for (uint8_t k = 0; k < bc.n_slots; k++) if (bc.slots[k].kind == SLOT_HUB && bc.slots[k].owner == sl.owner) own++; if (own > 1) continue; }   // two turns already: it asked for what it needs
+        const uint8_t keep = sl.allowance;
+        sl.allowance = MAX_PACKET;
+        if (!planFits(bc.slots, bc.n_slots, fus - GROW_KEEP_US, blen)) sl.allowance = keep;
+      }
+    }
+  }
+  // D81 (5.4): which of the extra streamed holes the plan kept (0 = the first extra, 1 = the second)
+  bool extraKept(uint8_t k) const { return k < extras_kept_; }
   uint16_t frameMs() const { return frame_ms_; }
 
   // ---- read access ------------------------------------------------------------------------
@@ -276,7 +325,8 @@ class ChaletPlanner {
         HubInfo& n = hubs_[i];
         memset(&n, 0, sizeof(n));
         n.used = true; n.id = id; n.last_any = frame; n.last_direct = static_cast<uint16_t>(frame - 1000);
-        n.mode = MODE_SF9_BW500;
+        n.mode = MODE_SF9_BW500; n.hop_mode = MODE_SF9_BW500;
+        n.hold_until = frame; n.hop_hold_until = frame;   // D81: a hold of 0 is "half a wrap away" in the upper half of the frame counter
         return &n;
       }
     }
@@ -284,7 +334,7 @@ class ChaletPlanner {
   }
 
   void noteDirect(HubInfo& h, uint16_t frame) {
-    if (seqDiff(frame, h.last_direct) > static_cast<int16_t>(DIRECT_WINDOW)) h.direct_hits = 0;
+    if (seqDiff(frame, h.last_direct) > static_cast<int16_t>(fr(DIRECT_WINDOW * 1000UL))) h.direct_hits = 0;
     if (h.direct_hits < 255) h.direct_hits++;
     h.last_direct = frame; h.last_any = frame; h.ever_direct = true;
   }
@@ -293,7 +343,7 @@ class ChaletPlanner {
   // is taken at once; a neighbour report must beat the current candidate by RELAY_SWITCH_DB.
   void noteRelayCandidate(HubInfo& h, uint8_t relay, int8_t rssi, uint16_t frame, bool proven) {
     if (relay == ID_NONE || relay == h.id || relay == cfg.self_id) return;
-    const bool stale = seqDiff(frame, h.relay_cand_frame) > static_cast<int16_t>(RELAY_CAND_TIMEOUT);
+    const bool stale = seqDiff(frame, h.relay_cand_frame) > static_cast<int16_t>(fr(RELAY_CAND_TIMEOUT * 1000UL));
     const bool replace = h.relay_cand == ID_NONE || stale || relay == h.relay_cand || proven ||
                          rssi >= h.relay_cand_rssi + RELAY_SWITCH_DB;
     if (!replace) return;
@@ -307,13 +357,13 @@ class ChaletPlanner {
   }
 
   bool directRecent(const HubInfo& h, uint16_t frame) const {
-    return h.ever_direct && seqDiff(frame, h.last_direct) <= static_cast<int16_t>(DIRECT_WINDOW);
+    return h.ever_direct && seqDiff(frame, h.last_direct) <= static_cast<int16_t>(fr(DIRECT_WINDOW * 1000UL));
   }
 
   void expire(uint16_t frame) {
     for (uint8_t i = 0; i < MAX_HUBS; i++)
       if (hubs_[i].used && hubs_[i].id != cfg.range_hub &&   // D80: the range test hub stays (its misses are the data)
-          seqDiff(frame, hubs_[i].last_any) > static_cast<int16_t>(HUB_TIMEOUT_FRAMES))
+          seqDiff(frame, hubs_[i].last_any) > static_cast<int16_t>(fr(HUB_TIMEOUT_FRAMES * 1000UL)))
         hubs_[i].used = false;
   }
 
@@ -330,9 +380,69 @@ class ChaletPlanner {
       // a direct slot nobody hears is worse than a relay that worked a minute ago (sim h10, hub behind a ridge)
       const int16_t age = seqDiff(frame, h.relay_cand_frame);
       const bool cand_ok = r != nullptr && r->via == 0 && directRecent(*r, frame) &&
-                           (age <= static_cast<int16_t>(RELAY_CAND_TIMEOUT) ||
-                            (!directRecent(h, frame) && age <= static_cast<int16_t>(RELAY_KEEP_FRAMES)));
-      h.via = cand_ok ? h.relay_cand : 0;   // no usable relay: keep trying a direct slot
+                           (age <= static_cast<int16_t>(fr(RELAY_CAND_TIMEOUT * 1000UL)) ||
+                            (!directRecent(h, frame) && age <= static_cast<int16_t>(fr(RELAY_KEEP_FRAMES * 1000UL))));
+      const uint8_t nv = cand_ok ? h.relay_cand : 0;   // no usable relay: keep trying a direct slot
+      if (nv != h.via) resetHop(h, frame);
+      h.via = nv;
+    }
+  }
+
+  // ---- D81 (5.5): adaptive mode on the first hop of a relayed hub (far hub -> its relay) -------------------------
+  static void resetHop(HubInfo& h, uint16_t frame) {
+    h.hop_mode = MODE_SF9_BW500; h.hop_hist = 0; h.hop_hist_n = 0; h.hop_miss = 0; h.hop_trial_left = 0; h.hop_trial_fails = 0;
+    h.hop_hold_until = frame; h.hop_has_signal = false; h.hop_carried = false; h.hop_seen_frame = static_cast<uint16_t>(frame - 2);
+  }
+  void setHopMode(HubInfo& h, RadioMode m, uint16_t frame, uint16_t hold) {
+    h.hop_mode = m; h.hop_hist = 0; h.hop_hist_n = 0; h.hop_miss = 0; h.hop_trial_left = 0;
+    h.hop_hold_until = static_cast<uint16_t>(frame + hold);
+  }
+  uint8_t hopModeFor(const HubInfo& h) const {
+    return (cfg.adaptive && cfg.test_mode == TEST_OFF) ? h.hop_mode : static_cast<uint8_t>(MODE_SF9_BW500);
+  }
+  // Called once per frame, before the new plan: last frame's remote slots are scored. A miss only counts when the relay's
+  // own packet got through (otherwise the loss was on the second hop, which has its own adaptation).
+  void scoreHops(uint16_t frame) {
+    const uint16_t prev = static_cast<uint16_t>(frame - 1);
+    for (uint8_t i = 0; i < MAX_HUBS; i++) {
+      HubInfo& h = hubs_[i];
+      if (!h.used || h.via == 0 || h.hop_seen_frame != prev) continue;
+      const HubInfo* r = find(h.via);
+      const bool relay_heard = r != nullptr && r->last_direct == prev;
+      if (h.hop_carried) {
+        h.hop_hist = static_cast<uint8_t>((h.hop_hist << 1) | 1); if (h.hop_hist_n < 255) h.hop_hist_n++;
+        h.hop_miss = 0;
+        if (h.hop_trial_left && --h.hop_trial_left == 0) h.hop_trial_fails = 0;
+        adaptHopUp(h, r, frame);
+      } else if (relay_heard && cfg.adaptive && cfg.test_mode == TEST_OFF) {
+        h.hop_hist = static_cast<uint8_t>(h.hop_hist << 1); if (h.hop_hist_n < 255) h.hop_hist_n++;
+        h.hop_miss++;
+        if (h.hop_trial_left && h.hop_mode != MODE_SF9_BW500) {
+          const uint8_t f = h.hop_trial_fails < 3 ? h.hop_trial_fails : 3;
+          const uint8_t fails = static_cast<uint8_t>(h.hop_trial_fails < 255 ? h.hop_trial_fails + 1 : 255);
+          setHopMode(h, static_cast<RadioMode>(h.hop_trial_prev), frame, static_cast<uint16_t>(fr(DOWN_HOLD_FRAMES * 1000UL) << f));
+          h.hop_trial_fails = fails;
+        } else if (h.hop_miss >= 2 && h.hop_mode != MODE_SF9_BW500) {
+          setHopMode(h, slowerMode(static_cast<RadioMode>(h.hop_mode)), frame, fr(DOWN_HOLD_FRAMES * 1000UL));
+        }
+      }
+      h.hop_carried = false;
+    }
+  }
+  void adaptHopUp(HubInfo& h, const HubInfo* relay, uint16_t frame) {
+    if (!cfg.adaptive || cfg.test_mode != TEST_OFF || relay == nullptr) return;
+    const RadioMode next = fasterMode(static_cast<RadioMode>(h.hop_mode));
+    if (next == h.hop_mode) return;
+    const uint8_t cap = static_cast<uint8_t>(maxModeFor(h)) < static_cast<uint8_t>(maxModeFor(*relay)) ? static_cast<uint8_t>(maxModeFor(h)) : static_cast<uint8_t>(maxModeFor(*relay));
+    if (static_cast<uint8_t>(next) > cap) return;   // the hub or its relay runs old firmware
+    if (seqDiff(frame, h.hop_hold_until) < 0 || h.hop_hist_n < 8 || h.hop_hist != 0xFF || h.hop_trial_left) return;
+    if (!h.hop_has_signal || seqDiff(frame, h.hop_signal_frame) > static_cast<int16_t>(fr(30000UL))) return;   // no fresh relay-side signal
+    const int16_t margin_x10 = static_cast<int16_t>(h.hop_rssi * 10 - modeInfo(next).sens_dbm_x10);
+    const int16_t snr_margin_x10 = static_cast<int16_t>((h.hop_snr_q4 * 10) / 4 - modeInfo(next).snr_limit_x10);
+    if (margin_x10 >= (UP_MARGIN_DB + HOP_UP_EXTRA_DB) * 10 && snr_margin_x10 >= UP_SNR_MARGIN_DB * 10) {
+      const uint8_t prev = h.hop_mode;
+      setHopMode(h, next, frame, fr(UP_HOLD_FRAMES * 1000UL));
+      h.hop_trial_left = TRIAL_FRAMES; h.hop_trial_prev = prev;
     }
   }
 
@@ -344,11 +454,23 @@ class ChaletPlanner {
     uint8_t allow = (cfg.test_mode != TEST_OFF) ? cfg.test_allowance : cfg.allowance;
     uint8_t focus = (cfg.focus_hub != ID_NONE && cfg.focus_allowance > allow) ? cfg.focus_allowance : allow;
     bool dropped = false;
+    // D81 (5.4): extras are counted from the front (the caller packs them); once one was dropped the plan does not try
+    // it again for EXTRA_HOLD_MS, so a plan at the limit does not flicker between 2 and 3 streams every beacon
+    uint8_t want_extras = 0;
+    for (uint8_t k = 0; k < EXTRA_FOCUS && cfg.extra_hubs[k] != ID_NONE; k++) want_extras = static_cast<uint8_t>(k + 1);
+    if (allow_out == nullptr) { extras_kept_ = want_extras; }   // a probe: never touches the hold
+    else if (seqDiff(frame, extras_retry_) < 0 && extras_cap_ < want_extras) extras_kept_ = extras_cap_;
+    else extras_kept_ = want_extras;
     for (;;) {
       fill(frame, bc, allow, focus);
       const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
       const bool fits = planFits(bc.slots, bc.n_slots, fus, blen);
       if (fits && !full_) break;
+      if (extras_kept_ > 0) {                                                            // D81: extra streamed holes go first
+        extras_kept_--;
+        if (allow_out != nullptr) { extras_cap_ = extras_kept_; extras_retry_ = static_cast<uint16_t>(frame + fr(EXTRA_HOLD_MS)); }
+        continue;
+      }
       if (fits && full_) { dropped = true; break; }  // fits, but a hub found no slot (beacon full: MAX_SLOTS)
       if (focus > allow + 16) { focus = static_cast<uint8_t>(focus - 16); continue; }   // shrink FOCUS first
       if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); focus = allow; continue; }
@@ -365,6 +487,12 @@ class ChaletPlanner {
     return !dropped && allow >= KEEP_ALLOWANCE && focus_ok;
   }
 
+  // streamed holes this hub reports (the first focus plus the extras the current plan keeps)
+  uint8_t focusCount(uint8_t hub) const {
+    uint8_t n = (cfg.focus_hub != ID_NONE && hub == cfg.focus_hub) ? 1 : 0;
+    for (uint8_t k = 0; k < extras_kept_ && k < EXTRA_FOCUS; k++) if (cfg.extra_hubs[k] == hub) n++;
+    return n;
+  }
   static bool hubScheduled(const Beacon& bc, uint8_t id) {
     for (uint8_t s = 0; s < bc.n_slots; s++) if (bc.slots[s].kind == SLOT_HUB && bc.slots[s].owner == id) return true;
     return false;
@@ -392,23 +520,41 @@ class ChaletPlanner {
       for (uint8_t k = 0; k < n_relays; k++) if (relays[k] == h.via) relay_ok = true;
       // a remote FOCUS hub: its relay must carry it too, keep the sum under one packet
       uint8_t a = allow;
-      if (h.id == cfg.focus_hub && focus > allow) {
+      const uint8_t nf = focusCount(h.id);
+      if (nf && focus > allow) {
+        const uint16_t want = static_cast<uint16_t>(allow + nf * (focus - allow));
         const uint16_t room = static_cast<uint16_t>(MAX_PACKET - allow);
-        a = static_cast<uint8_t>(focus < room ? focus : room);
+        a = static_cast<uint8_t>(want < room ? want : room);
         if (a < allow) a = allow;
       }
-      if (relay_ok) push(bc, SLOT_HUB, h.id, MODE_SF9_BW500, a, h.via);
+      if (relay_ok) push(bc, SLOT_HUB, h.id, hopModeFor(h), a, h.via);
     }
-    // 4. direct hubs
+    // 4. direct hubs. D81 (5.4): a hub streaming n holes wants allow + n x (focus - allow); past one packet it gets a
+    // second slot (5.3) when the plan has room (the shrink order drops the extra holes first)
     uint8_t idx = 0;
     for (uint8_t i = 0; i < MAX_HUBS && bc.n_slots < MAX_SLOTS; i++) {
       const HubInfo& h = hubs_[i];
       if (!h.used || h.via != 0) continue;
-      uint16_t a = (h.id == cfg.focus_hub) ? focus : allow;
+      const uint8_t nf = focusCount(h.id);
+      uint16_t a = allow;
+      if (nf && focus > allow) a = static_cast<uint16_t>(allow + nf * (focus - allow));
       for (uint8_t s = 0; s < bc.n_slots; s++)       // relay carries its remote hubs' packets
         if (bc.slots[s].kind == SLOT_HUB && bc.slots[s].via == h.id) a = static_cast<uint16_t>(a + bc.slots[s].allowance - 2);
-      if (a > MAX_PACKET) a = MAX_PACKET;
-      push(bc, SLOT_HUB, h.id, directModeFor(h, idx++, frame), static_cast<uint8_t>(a), 0);
+      const uint8_t mode = directModeFor(h, idx++, frame);
+      if (a > MAX_PACKET && h.id != cfg.range_hub && bc.n_slots + 1 < MAX_SLOTS) {   // two turns: the first one must still hold the relayed packets
+        if (a > 2 * MAX_PACKET) a = 2 * MAX_PACKET;
+        uint16_t need = allow;
+        for (uint8_t s = 0; s < bc.n_slots; s++) if (bc.slots[s].kind == SLOT_HUB && bc.slots[s].via == h.id) need = static_cast<uint16_t>(need + bc.slots[s].allowance - 2);
+        uint16_t f1 = static_cast<uint16_t>((a + 1) / 2); if (f1 < need) f1 = need; if (f1 > MAX_PACKET) f1 = MAX_PACKET;
+        if (a - f1 > MAX_PACKET) f1 = static_cast<uint16_t>(a - MAX_PACKET);
+        const uint8_t first = static_cast<uint8_t>(f1);
+        push(bc, SLOT_HUB, h.id, mode, first, 0);
+        push(bc, SLOT_HUB, h.id, mode, static_cast<uint8_t>(a - first), 0);
+      } else if (a > MAX_PACKET) {
+        push(bc, SLOT_HUB, h.id, mode, MAX_PACKET, 0);
+      } else {
+        push(bc, SLOT_HUB, h.id, mode, static_cast<uint8_t>(a), 0);
+      }
     }
     // any known hub left without a slot because the beacon is full?
     full_ = false;
@@ -447,7 +593,7 @@ class ChaletPlanner {
     const int16_t snr_margin_x10 = static_cast<int16_t>((sn * 10) / 4 - modeInfo(next).snr_limit_x10);
     if (margin_x10 >= UP_MARGIN_DB * 10 && snr_margin_x10 >= UP_SNR_MARGIN_DB * 10) {
       const uint8_t prev = h.mode;
-      setMode(h, next, frame, UP_HOLD_FRAMES);
+      setMode(h, next, frame, fr(UP_HOLD_FRAMES * 1000UL));
       h.trial_left = TRIAL_FRAMES; h.trial_prev = prev;
     }
   }
@@ -458,6 +604,8 @@ class ChaletPlanner {
   uint8_t last_allowance_ = 0;
   uint16_t frame_ms_ = 0;
   uint16_t down_streak_ = 0;
+  uint8_t extras_kept_ = 0, extras_cap_ = 0;
+  uint16_t extras_retry_ = 0;
   bool full_ = false;
   uint32_t dropped_slots_ = 0;
 };

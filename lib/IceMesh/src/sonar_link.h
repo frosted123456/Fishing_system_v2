@@ -17,6 +17,7 @@ namespace sonar {
 class SonarOutbox {
  public:
   enum { CAP = 12, MAX_AGE_FRAMES = 4 };   // a block older than ~4 s is stale for the display (est.)
+  uint16_t max_age_frames = MAX_AGE_FRAMES;   // D81 (5.1): set by the hub from the frame length (4 s)
   // D48: no ACK on sonar blocks, so a DATA or BASE block goes out a second time in the NEXT frame when the
   // slot has room left after everything new (the chalet drops duplicate pings). Through a relay at 20 %
   // loss per hop this takes focus pings from ~50 % to ~80 % delivered (test_tdma_sim). BG segments are
@@ -97,7 +98,7 @@ class SonarOutbox {
 
   void expire(uint16_t frame) {   // from the frame it was pushed in (the repeat is bounded by MAX_AGE too)
     for (uint8_t i = 0; i < CAP; i++)
-      if (items_[i].used && seqDiff(frame, items_[i].frame) > static_cast<int16_t>(MAX_AGE_FRAMES)) { items_[i].used = false; expired++; }
+      if (items_[i].used && seqDiff(frame, items_[i].frame) > static_cast<int16_t>(max_age_frames)) { items_[i].used = false; expired++; }
   }
   // A block already sent once first (its repeat is the least valuable); then the oldest block of the
   // least useful type: BG, then DATA, then BASE.

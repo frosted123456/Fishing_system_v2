@@ -5,7 +5,7 @@ shows everything on its screen and on a phone or PC web page.
 
 | | |
 |---|---|
-| Firmware | v2, D80 (2026-10-20) |
+| Firmware | v2, D81 (2026-10-22) |
 | Branch | `v2/phase1-mesh-core` |
 | Boards | Heltec WiFi LoRa 32 V3, ESP32 WROOM DevKit V1 (30-pin), ESP32-C3 Super Mini (v1 head) |
 
@@ -404,7 +404,7 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 
 | Item | Does |
 |---|---|
-| Follow the action | On by default. The live view goes to the hole with the most action. FISH ON wins for 2 min |
+| Follow the action | On by default. The live view goes to the hole with the most action. FISH ON wins for 2 min. Up to 2 more holes stream at the same time when the radio has room ("LIVE too") |
 | Tap a hole | Watch it live. Your pick stays 5 min, then Follow takes over again |
 | Flasher | Live, about 1 s behind. Pause to freeze |
 | Last 60 seconds | Waterfall, 4 pings per second |
@@ -481,8 +481,9 @@ CSV columns: `t_s, utc, lat, lon, sats, hdop, dist_m, frame, mode, ok, crc, rssi
 
 ## 8. How the LoRa airtime is shared
 
-One LoRa channel, one frame of 1 s. The chalet sends a beacon at the start of each frame with the turn of every
-hub: when, how long, how many bytes, at what speed. Hubs only transmit in their turn. WROOM tip-ups use ESP-NOW
+One LoRa channel, one frame of 0.5 s (it stretches to 1, 1.5 or 2 s by itself when the turns don't fit). The chalet
+sends a beacon at the start of each frame with the turn of every hub: when, how long, how many bytes, at what
+speed. Hubs only transmit in their turn. WROOM tip-ups use ESP-NOW
 to their hub, which costs no LoRa time: the hub packs its whole pocket into its own turn.
 
 | Part of the frame | What it is |
@@ -490,7 +491,7 @@ to their hub, which costs no LoRa time: the hub packs its whole pocket into its 
 | beacon | Chalet → everyone. The plan for this frame, the watched hole, commands |
 | echo | A hub repeats the beacon for the hubs the chalet can't reach |
 | join | Free slot for a hub that just switched on |
-| hub turns | One per hub, sized by the bytes it may send (96 B normal, 180 B for the watched hole) and its speed |
+| hub turns | One per hub, sized by the bytes it may send (96 B normal, 180 B per streamed hole, up to a full 255 B packet when there is room) and its speed. A hub streaming several holes can get two turns |
 | free | Left over. The chalet uses it to give bigger turns, or shortens the frame later |
 
 Speed: every hub starts at SF9 (slow, long range). When its signal has margin, the chalet steps it up to SF8, SF7,
@@ -499,7 +500,9 @@ behind another hub (one hop) costs twice: its turn, then again inside the relay'
 
 ![LoRa airtime, 3 pockets](images/lora_airtime.png)
 
-If the turns don't fit in 1 s, the frame stretches to 1.5 or 2 s on its own. Nothing is lost, updates are slower.
+Follow the action streams up to 3 holes at once when the room is there (the extra ones show "LIVE too" on the Sonar
+tab); they are the first thing dropped when the frame gets tight. If the turns still don't fit, the frame stretches.
+Nothing is lost, updates are slower.
 
 ## 9. Troubleshooting
 

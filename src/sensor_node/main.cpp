@@ -1077,9 +1077,11 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   }
 
   // v2 sonar control from the hub (test mode switch + FOCUS node)
-  if (msgType == MSG_SONAR_CTRL && len >= (int)sizeof(SonarCtrlMessage)) {
+  if (msgType == MSG_SONAR_CTRL && len >= (int)offsetof(SonarCtrlMessage, focus_extra)) {   // D81: the extras are optional (a hub on older firmware sends 2 B less)
     const SonarCtrlMessage* c = (const SonarCtrlMessage*)data;
-    sonarCtrlFocus = c->focus_node;
+    const bool extras = len >= (int)sizeof(SonarCtrlMessage);
+    // D81 (5.4): up to three holes stream at once; this node only needs to know whether it is one of them
+    sonarCtrlFocus = (c->focus_node == NODE_ID || (extras && (c->focus_extra[0] == NODE_ID || c->focus_extra[1] == NODE_ID))) ? NODE_ID : c->focus_node;
     sonarCtrlSim = (c->sim_on != 0);
     if (c->n_params > 0 && c->n_params <= SONAR_CTRL_PARAMS) {
       memcpy(sonarKnobsBuf, c->params, c->n_params); sonarKnobsN = c->n_params; sonarKnobsNew = true;

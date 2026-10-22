@@ -30,6 +30,7 @@ class ChaletRole {
   uint8_t cmd_seq = 0;
   uint8_t silence_10s = 0;
   uint8_t focus_node = 0;
+  uint8_t focus_extra[2] = {0, 0};   // D81 (5.4): more streamed holes, kept while the plan has room
   uint8_t cmd_target = 0, cmd_value = 0;
   uint8_t net_cfg = 0;                       // makeNetCfg(transport, ESP-NOW LR, LoRa channel)
   sonar::SonarSink* sonar_sink = nullptr;   // gets every SEC_SONAR block (direct or relayed)
@@ -39,6 +40,7 @@ class ChaletRole {
   struct EbHub { uint8_t id; uint16_t last_frame; uint32_t rx; uint8_t hops; };
   EbHub eb_hubs[MAX_HUBS];
   uint32_t eb_rx = 0;
+  uint8_t extra_slot_[2] = {0, 0};   // D81: the hole behind each packed extra hub
 
   ChaletRole() { memset(&beacon, 0, sizeof(beacon)); memset(eb_hubs, 0, sizeof(eb_hubs)); }
 
@@ -48,7 +50,11 @@ class ChaletRole {
     // the hub that reports the focus node gets the bigger FOCUS allowance
     const NodeView* fv = focus_node ? nodes.find(focus_node) : nullptr;
     planner.cfg.focus_hub = fv != nullptr ? fv->owner : ID_NONE;
+    { uint8_t n = 0; planner.cfg.extra_hubs[0] = planner.cfg.extra_hubs[1] = ID_NONE; extra_slot_[0] = extra_slot_[1] = 0;   // packed from the front
+      for (uint8_t k = 0; k < 2; k++) { const NodeView* ev = focus_extra[k] ? nodes.find(focus_extra[k]) : nullptr; if (ev != nullptr) { planner.cfg.extra_hubs[n] = ev->owner; extra_slot_[n] = focus_extra[k]; n++; } } }
     planner.buildBeacon(frame, beacon);
+    nodes.setFrameMs(planner.frameMs());
+    for (uint8_t k = 0; k < 2; k++) beacon.focus_extra[k] = (planner.cfg.extra_hubs[k] != ID_NONE && planner.extraKept(k)) ? extra_slot_[k] : 0;
     beacon.flags = static_cast<uint8_t>((flags & ~(BF_TEST | BF_ADAPTIVE)) |
                                         (planner.cfg.test_mode != TEST_OFF ? BF_TEST : 0) |
                                         (planner.cfg.adaptive ? BF_ADAPTIVE : 0));
@@ -69,7 +75,7 @@ class ChaletRole {
     packets_rx++;
     if (h.type == PT_JOIN) { planner.onJoin(h.src, 0, rssi, frame); return false; }   // JOIN slot or random
     if (h.type != PT_HUB) return false;
-    planner.onDirectPacket(h.src, frame, rssi, snr_q4, s.mode, s.kind == SLOT_HUB && s.owner == h.src);
+    planner.onDirectPacket(h.src, frame, rssi, snr_q4, s.mode, s.kind == SLOT_HUB && s.owner == h.src && primarySlot(i));
     if (range_ring != nullptr && s.kind == SLOT_HUB && s.via == 0 && s.owner == h.src && h.src == planner.cfg.range_hub) {
       RangeSample rs; rs.frame = frame; rs.mode = s.mode; rs.ok = true; rs.crc = false; rs.rssi = rssi; rs.snr_q4 = snr_q4;
       range_ring->push(rs);
@@ -92,7 +98,7 @@ class ChaletRole {
   void onSlotEmpty(uint8_t i, bool crc_error) {
     if (i >= beacon.n_slots) return;
     const Slot& s = beacon.slots[i];
-    if (s.kind == SLOT_HUB && s.via == 0) planner.onSlotMissed(s.owner, frame, s.mode, crc_error);
+    if (s.kind == SLOT_HUB && s.via == 0 && primarySlot(i)) planner.onSlotMissed(s.owner, frame, s.mode, crc_error);
     if (range_ring != nullptr && s.kind == SLOT_HUB && s.via == 0 && s.owner != ID_NONE && s.owner == planner.cfg.range_hub) {
       RangeSample rs; rs.frame = frame; rs.mode = s.mode; rs.ok = false; rs.crc = crc_error; rs.rssi = 0; rs.snr_q4 = 0;
       range_ring->push(rs);
@@ -100,6 +106,13 @@ class ChaletRole {
   }
 
   uint8_t expireNodes(NodeChange* out, uint8_t max) { return nodes.expire(frame, out, max); }
+  // D81 (5.3): a hub with two turns in a frame: only the first one feeds its adaptive statistics
+  bool primarySlot(uint8_t i) const {
+    for (uint8_t k = 0; k < i; k++) if (beacon.slots[k].kind == SLOT_HUB && beacon.slots[k].owner == beacon.slots[i].owner) return false;
+    return true;
+  }
+  // D81: the streamed holes of this frame's beacon (first + extras kept), 0 = none
+  uint8_t streamedHoles(uint8_t* out) const { uint8_t n = 0; if (beacon.focus_node) out[n++] = beacon.focus_node; for (uint8_t k = 0; k < 2; k++) if (beacon.focus_extra[k]) out[n++] = beacon.focus_extra[k]; return n; }
 
   // ESP-NOW backbone beacon: this frame's beacon without slots (acks, flags, commands, network config).
   size_t buildEbBeacon(uint8_t* buf, size_t cap) const {

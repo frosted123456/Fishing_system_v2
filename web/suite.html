@@ -179,6 +179,7 @@ details.adv{margin-top:6px}details.adv h3{font-size:.9rem;margin:14px 0 6px;colo
 .rl{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.rl .sm{color:var(--muted);font-size:.86rem}
 .node.low .bat .bar i{background:#E0A43A}
 .gl{display:block;width:100%;height:64px;border-radius:8px;background:var(--chip);margin-top:6px}
+.hole.live2{border-color:rgba(0,179,214,.6)}.badge.on2{background:rgba(0,179,214,.18);color:#0b6a80}.hole .gl{height:44px;margin-top:4px}
 .glt{display:grid;gap:1px;font-size:.86rem}.glt small{color:var(--muted)}
 .badge.sim{background:#E0A43A;color:#1b1b1b}
 .simt{width:100%;border-collapse:collapse;font-size:.92rem}.simt td,.simt th{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left}.simt th{color:var(--muted);font-weight:600}
@@ -557,20 +558,25 @@ function renderHoles() {
   let h = '';
   nodes.forEach(n => {
     const ln = lines[n.node] || {}, fish = !!ln.fish, off = ln.online === false || n.age > 30, foc = n.node === L.focus;
-    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : '';
-    h += `<button type="button" class="hole${fish ? ' fish' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
+    const live = !foc && (L.live || []).indexOf(n.node) >= 0;   // D81: streamed too (follow the action, when the radio has room)
+    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : live ? '<span class="badge on2">LIVE too</span>' : '';
+    h += `<button type="button" class="hole${fish ? ' fish' : ''}${live ? ' live2' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
       `<span class="hd"><span>${nameOf(n.node)}</span>${badge}</span>` +
       `<span class="big">${n.fish ? `<i class="sw" style="background:${palCss(RV[n.lvl] || 0.5)}"></i>${n.fish} fish` : 'No fish'}</span>` +
       `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
       `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
-      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span></button>`;
+      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span>` +
+      (live ? `<canvas class="gl" data-glance="${n.node}" title="live: one column per frame (about a minute)"></canvas>` : '') + `</button>`;
   });
+  if ((L.live || []).length > 1 && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D81: the extra streams draw their strip here too
   if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
   $('holes').innerHTML = h;
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
   { const fo = L.follow !== false; $('follow').setAttribute('aria-pressed', String(fo));   // D80
     $('followWhy').textContent = !fo ? 'off: you pick the hole' : L.trip_s ? `FISH ON — back to following in ${Math.ceil(L.trip_s / 10) * 10} s` :
-      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish'); }
+      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish');
+    const extra = (L.live || []).filter(x => x !== L.focus);   // D81: more holes stream when the radio has room
+    if (extra.length) $('followWhy').textContent += ` · also live: ${extra.map(nameOf).join(', ')}`; }
   const f = nodes.find(n => n.node === focus);
   if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
 }
@@ -1914,6 +1920,7 @@ syncSound();
 showTab(initialTab());
 loadStatus();
 const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance), pRange = poll('range', loadRange);
+window.suiteGlance = pGlance;
 setInterval(pStatus, 2000);
 setInterval(() => { if (tab === 'radio') { pRadio(); pRange(); } }, 2000);
 setInterval(() => { if (tab === 'settings') { pRadio(); pSim(); } }, 5000);

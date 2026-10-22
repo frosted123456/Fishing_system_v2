@@ -28,7 +28,11 @@ static const uint8_t STATE_UNKNOWN = 0xFF;
 template <uint8_t MAX_NODES = 32>
 class ChaletNodes {
  public:
-  enum { OWNER_TIMEOUT_FRAMES = 10, OFFLINE_TIMEOUT_FRAMES = 90 };   // 1 frame ≈ 1 s (est. values)
+  enum { OWNER_TIMEOUT_FRAMES = 10, OFFLINE_TIMEOUT_FRAMES = 90 };   // seconds (their value in frames at a 1 s frame)
+  // D81 (5.1): the frame is 0.5-2 s; timeouts are seconds turned into frames at the length in use
+  void setFrameMs(uint16_t ms) { frame_ms_ = ms ? ms : 1000; }
+  uint16_t ownerTimeout() const { const uint32_t n = OWNER_TIMEOUT_FRAMES * 1000UL / frame_ms_; return n < 1 ? 1 : static_cast<uint16_t>(n); }
+  uint16_t offlineTimeout() const { const uint32_t n = OFFLINE_TIMEOUT_FRAMES * 1000UL / frame_ms_; return n < 1 ? 1 : static_cast<uint16_t>(n); }
 
   ChaletNodes() { clear(); }
   void clear() { for (uint8_t i = 0; i < MAX_NODES; i++) v_[i].used = false; }
@@ -45,13 +49,13 @@ class ChaletNodes {
     }
     if (v->owner != hub) {
       if (r.state != LS_OFFLINE) { v->alt_hub = hub; v->alt_state = r.state; v->alt_turns = r.turns; v->alt_flags = r.flags; v->alt_frame = frame; }
-      const bool owner_stale = seqDiff(frame, v->owner_frame) > static_cast<int16_t>(OWNER_TIMEOUT_FRAMES);
+      const bool owner_stale = seqDiff(frame, v->owner_frame) > static_cast<int16_t>(ownerTimeout());
       const bool take = r.state != LS_OFFLINE && (owner_stale || v->state == LS_OFFLINE);   // D79: OFFLINE never takes over
       if (!take) return false;
       return apply(v, hub, r.state, r.turns, r.flags, frame, ch);
     }
     // the owner says OFFLINE but another hub heard the node alive just now: that hub takes over, no OFFLINE blip
-    if (r.state == LS_OFFLINE && v->alt_hub != ID_NONE && v->alt_hub != hub && seqDiff(frame, v->alt_frame) <= static_cast<int16_t>(OWNER_TIMEOUT_FRAMES)) {
+    if (r.state == LS_OFFLINE && v->alt_hub != ID_NONE && v->alt_hub != hub && seqDiff(frame, v->alt_frame) <= static_cast<int16_t>(ownerTimeout())) {
       // replay the alt record unless it would ring a trip the owner already walked through (TRIPPED -> IDLE): then the
       // alt hub just becomes the owner with the current displayed state and reports from now on
       const bool trip = v->alt_state == LS_TRIPPED || v->alt_state == LS_RUNNING || v->alt_state == LS_TRIP_SEEN;
@@ -78,7 +82,7 @@ class ChaletNodes {
     for (uint8_t i = 0; i < MAX_NODES && n < max; i++) {
       NodeView& v = v_[i];
       if (!v.used || v.state == LS_OFFLINE) continue;
-      if (seqDiff(frame, v.owner_frame) > static_cast<int16_t>(OFFLINE_TIMEOUT_FRAMES)) {
+      if (seqDiff(frame, v.owner_frame) > static_cast<int16_t>(offlineTimeout())) {
         out[n].node = v.node; out[n].owner = v.owner; out[n].old_state = v.state; out[n].new_state = LS_OFFLINE;
         out[n].turns = v.turns; out[n].flags = v.flags;
         v.state = LS_OFFLINE;
@@ -119,6 +123,7 @@ class ChaletNodes {
     return victim;
   }
   NodeView v_[MAX_NODES];
+  uint16_t frame_ms_ = 1000;
 };
 
 }  // namespace tdma

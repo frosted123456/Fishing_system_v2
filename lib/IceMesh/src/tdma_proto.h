@@ -5,7 +5,7 @@
 // BEACON / ECHO (chalet, or a relay hub repeating it for hubs that cannot hear the chalet):
 //   [6] flags  [7] cmd  [8] cmd_seq  [9] silence (x10 s)  [10] focus node  [11] frame length (x10 ms)
 //   [12] test mode  [13] cmd target  [14] cmd value  [15] network config (transport, ESP-NOW LR, LoRa channel)
-//   [16] n_slots, n x 5 B {kind, owner, mode, allowance, via}
+//   [16] [17] two more streamed holes (D81, 0 = none)  [18] n_slots, n x 5 B {kind, owner, mode, allowance, via}
 //   then n_acks, n x 3 B {hub, node, seq}
 // HUB packet: [6] flags, then sections {type u8, len u8, value[len]} until the end.
 // JOIN packet: [6] firmware version.
@@ -100,6 +100,7 @@ struct Beacon {
   uint8_t cmd_seq;
   uint8_t silence_10s;
   uint8_t focus_node;
+  uint8_t focus_extra[2];   // D81 (5.4): up to two more streamed holes (0 = none)
   uint8_t frame_10ms;
   uint8_t test_mode;
   uint8_t cmd_target;
@@ -126,7 +127,7 @@ inline bool readHeader(const uint8_t* b, size_t len, uint8_t net, Header& h) {
   return h.src != ID_NONE;
 }
 
-static const uint8_t BEACON_FIXED = 17;
+static const uint8_t BEACON_FIXED = 19;
 inline size_t beaconSize(uint8_t n_slots, uint8_t n_acks) { return BEACON_FIXED + 5u * n_slots + 1u + 3u * n_acks; }
 
 inline size_t encodeBeacon(const Beacon& bc, PacketType type, uint8_t* b, size_t cap) {
@@ -136,7 +137,7 @@ inline size_t encodeBeacon(const Beacon& bc, PacketType type, uint8_t* b, size_t
   putHeader(b, bc.network_id, type, bc.src, bc.frame);
   b[6] = bc.flags; b[7] = bc.cmd; b[8] = bc.cmd_seq; b[9] = bc.silence_10s;
   b[10] = bc.focus_node; b[11] = bc.frame_10ms; b[12] = bc.test_mode;
-  b[13] = bc.cmd_target; b[14] = bc.cmd_value; b[15] = bc.net_cfg; b[16] = bc.n_slots;
+  b[13] = bc.cmd_target; b[14] = bc.cmd_value; b[15] = bc.net_cfg; b[16] = bc.focus_extra[0]; b[17] = bc.focus_extra[1]; b[18] = bc.n_slots;
   size_t o = BEACON_FIXED;
   for (uint8_t i = 0; i < bc.n_slots; i++) {
     const Slot& s = bc.slots[i];
@@ -155,7 +156,7 @@ inline bool decodeBeacon(const uint8_t* b, size_t len, uint8_t net, Beacon& bc, 
   bc.network_id = h.network_id; bc.src = h.src; bc.frame = h.frame;
   bc.flags = b[6]; bc.cmd = b[7]; bc.cmd_seq = b[8]; bc.silence_10s = b[9];
   bc.focus_node = b[10]; bc.frame_10ms = b[11]; bc.test_mode = b[12];
-  bc.cmd_target = b[13]; bc.cmd_value = b[14]; bc.net_cfg = b[15]; bc.n_slots = b[16];
+  bc.cmd_target = b[13]; bc.cmd_value = b[14]; bc.net_cfg = b[15]; bc.focus_extra[0] = b[16]; bc.focus_extra[1] = b[17]; bc.n_slots = b[18];
   if (bc.n_slots > MAX_SLOTS || bc.frame_10ms == 0) return false;
   size_t o = BEACON_FIXED;
   if (len < o + 5u * bc.n_slots + 1u) return false;

@@ -50,6 +50,7 @@ class HubRole {
   // Chalet state from the latest beacon, LoRa or ESP-NOW backbone (whichever came last)
   bool have_info = false;
   uint8_t info_flags = 0, info_focus = 0, info_net_cfg = 0, info_test = 0;
+  uint8_t info_focus_extra[2] = {0, 0};   // D81 (5.4): more streamed holes
   uint16_t info_frame = 0;
   uint32_t eb_beacons_rx = 0;
   // LoRa channel switch announced by the chalet (CMD_SET_CHANNEL)
@@ -58,6 +59,10 @@ class HubRole {
   uint16_t channel_switch_frame = 0;   // first frame on the new channel
 
   uint8_t focusNode() const { return have_info ? info_focus : 0; }
+  uint8_t focusExtra(uint8_t k) const { return (have_info && k < 2) ? info_focus_extra[k] : 0; }
+  bool isFocus(uint8_t node) const { return node != 0 && have_info && (node == info_focus || node == info_focus_extra[0] || node == info_focus_extra[1]); }
+  // D81 (5.1): frames for `ms` at the frame length the beacon announces (at least 1)
+  uint16_t framesFor(uint32_t ms) const { const uint32_t f = plan.frame_10ms ? plan.frame_10ms * 10UL : 1000UL; const uint32_t n = ms / f; return n < 1 ? 1 : static_cast<uint16_t>(n); }
   bool sonarSim() const { return have_info && (info_flags & BF_SONAR_SIM) != 0; }
   bool silenced() const { return have_info && (info_flags & BF_SILENCED) != 0; }
   uint8_t transport() const { return have_info ? netTransport(info_net_cfg) : static_cast<uint8_t>(TR_AUTO); }
@@ -99,6 +104,8 @@ class HubRole {
     echo_src = (t == PT_ECHO) ? b.src : 0;
     beacon_rssi = rssi; beacon_snr_q4 = snr_q4;
     applyInfo(plan, cmd_out);
+    sonar.max_age_frames = framesFor(4000UL);   // D81 (5.1): ~4 s whatever the frame length
+    sync.max_freerun = framesFor(3000UL);
     resetFrameScratch();
     return true;
   }
@@ -119,6 +126,7 @@ class HubRole {
     sync.onMissedBeacon();
     if (!sync.synced()) have_plan = false;
     if (have_plan) plan.frame = sync.frame();
+    sonar.max_age_frames = framesFor(4000UL);   // D81 (5.1): ~4 s whatever the frame length
     resetFrameScratch();
   }
 
@@ -160,13 +168,18 @@ class HubRole {
     return w.size();
   }
   // health: pass the current battery etc.; neighbours and beacon stats are filled here.
+  // `slot` = the slot this packet goes out in (D81 5.3: a hub may own two slots in a frame; each has its own
+  // allowance, the relayed packets go in the first one only, counters that are "per frame" count once); -1 = the first own slot
   size_t buildHub(uint8_t* buf, size_t cap, uint8_t flags, uint16_t battery_mv, uint16_t uptime_min,
-                  bool test, uint16_t test_counter, HubBuildResult* res = nullptr) {
-    const int idx = ownSlotIndex();
+                  bool test, uint16_t test_counter, HubBuildResult* res = nullptr, int slot = -1) {
+    const int first = ownSlotIndex();
+    const int idx = (slot >= 0 && slot < plan.n_slots && plan.slots[slot].kind == SLOT_HUB && plan.slots[slot].owner == self) ? slot : first;
     if (idx < 0) return 0;
+    const bool primary = idx == first;
     Health h;
     memset(&h, 0, sizeof(h));
-    const bool with_health = (plan.frame % HEALTH_EVERY) == (self % HEALTH_EVERY);
+    const uint16_t every = framesFor(HEALTH_EVERY * 1000UL);   // D81: health every ~8 s whatever the frame length
+    const bool with_health = primary && (plan.frame % every) == (self % every);
     if (with_health) {
       h.battery_mv = battery_mv; h.uptime_min = uptime_min; h.fw = fw;
       h.beacon_rssi = beacon_rssi; h.beacon_snr_q4 = beacon_snr_q4; h.beacon_lost = sync.lostLast64();
@@ -180,15 +193,16 @@ class HubRole {
     in.network_id = network_id; in.self = self; in.frame = plan.frame; in.flags = flags;
     in.allowance = plan.slots[idx].allowance;
     in.health = with_health ? &h : nullptr;
-    in.relayed = relayed_; in.n_relayed = n_relayed_;
-    in.joins = joins_; in.n_joins = n_joins_;
+    in.relayed = relayed_; in.n_relayed = primary ? n_relayed_ : 0;
+    in.joins = joins_; in.n_joins = primary ? n_joins_ : 0;
     in.nodeinfo_start = nodeinfo_idx_;
     in.line_rot = line_rot_;
     in.test = test; in.test_counter = test_counter; in.test_mode_seen = plan.test_mode;
     in.sonar = &sonar; in.sonar_path = sonar::SonarOutbox::PATH_LORA;
-    in.selftest = selftest_frames ? selftest : nullptr;
+    in.selftest = (selftest_frames && primary) ? selftest : nullptr;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
-    if (r.selftest_sent && selftest_frames) selftest_frames--;
+    if (r.selftest_sent && selftest_frames && primary) selftest_frames--;
+    if (r.len > 0 && primary) n_relayed_ = 0;   // D81: the relayed packets went out; a second turn carries fresh data only
     nodeinfo_idx_ = r.nodeinfo_next;
     line_rot_ = r.line_rot_next;
     if (r.len > 0) n_joins_ = 0;   // joins reported (repeated by the joiner if lost)
@@ -264,7 +278,8 @@ class HubRole {
   void applyInfo(const Beacon& b, uint8_t& cmd_out) {
     applyAcks(b, self, table);
     have_info = true;
-    info_flags = b.flags; info_focus = b.focus_node; info_net_cfg = b.net_cfg; info_test = b.test_mode; info_frame = b.frame;
+    info_flags = b.flags; info_focus = b.focus_node; info_focus_extra[0] = b.focus_extra[0]; info_focus_extra[1] = b.focus_extra[1];
+    info_net_cfg = b.net_cfg; info_test = b.test_mode; info_frame = b.frame;
     if (b.cmd != CMD_NONE && b.cmd_seq != last_cmd_seq) {
       last_cmd_seq = b.cmd_seq; cmd_out = b.cmd; last_cmd_target = b.cmd_target; last_cmd_value = b.cmd_value;
       if (b.cmd == CMD_SET_CHANNEL) {

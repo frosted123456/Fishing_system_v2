@@ -183,6 +183,7 @@ details.adv{margin-top:6px}details.adv h3{font-size:.9rem;margin:14px 0 6px;colo
 .rl{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.rl .sm{color:var(--muted);font-size:.86rem}
 .node.low .bat .bar i{background:#E0A43A}
 .gl{display:block;width:100%;height:64px;border-radius:8px;background:var(--chip);margin-top:6px}
+.hole.live2{border-color:rgba(0,179,214,.6)}.badge.on2{background:rgba(0,179,214,.18);color:#0b6a80}.hole .gl{height:44px;margin-top:4px}
 .glt{display:grid;gap:1px;font-size:.86rem}.glt small{color:var(--muted)}
 .badge.sim{background:#E0A43A;color:#1b1b1b}
 .simt{width:100%;border-collapse:collapse;font-size:.92rem}.simt td,.simt th{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left}.simt th{color:var(--muted);font-weight:600}
@@ -561,20 +562,25 @@ function renderHoles() {
   let h = '';
   nodes.forEach(n => {
     const ln = lines[n.node] || {}, fish = !!ln.fish, off = ln.online === false || n.age > 30, foc = n.node === L.focus;
-    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : '';
-    h += `<button type="button" class="hole${fish ? ' fish' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
+    const live = !foc && (L.live || []).indexOf(n.node) >= 0;   // D81: streamed too (follow the action, when the radio has room)
+    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : live ? '<span class="badge on2">LIVE too</span>' : '';
+    h += `<button type="button" class="hole${fish ? ' fish' : ''}${live ? ' live2' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
       `<span class="hd"><span>${nameOf(n.node)}</span>${badge}</span>` +
       `<span class="big">${n.fish ? `<i class="sw" style="background:${palCss(RV[n.lvl] || 0.5)}"></i>${n.fish} fish` : 'No fish'}</span>` +
       `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
       `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
-      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span></button>`;
+      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span>` +
+      (live ? `<canvas class="gl" data-glance="${n.node}" title="live: one column per frame (about a minute)"></canvas>` : '') + `</button>`;
   });
+  if ((L.live || []).length > 1 && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D81: the extra streams draw their strip here too
   if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
   $('holes').innerHTML = h;
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
   { const fo = L.follow !== false; $('follow').setAttribute('aria-pressed', String(fo));   // D80
     $('followWhy').textContent = !fo ? 'off: you pick the hole' : L.trip_s ? `FISH ON — back to following in ${Math.ceil(L.trip_s / 10) * 10} s` :
-      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish'); }
+      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish');
+    const extra = (L.live || []).filter(x => x !== L.focus);   // D81: more holes stream when the radio has room
+    if (extra.length) $('followWhy').textContent += ` · also live: ${extra.map(nameOf).join(', ')}`; }
   const f = nodes.find(n => n.node === focus);
   if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
 }
@@ -714,7 +720,8 @@ function drawOverlay() {
   }
   if (opts.dz) {   // D57: shade the band just above the bottom where a fish merges with the bottom echo
     const cw = w / HIST + 0.5; g.fillStyle = 'rgba(230,240,242,0.10)';
-    recs.forEach((r, k) => { if (r.b == null) return; const y0 = yOf(Math.max(0, r.b - deadZone(r.b))), y1 = yOf(r.b); g.fillRect(xOf(k) - cw / 2, y0, cw, y1 - y0); });
+    recs.forEach((r, k) => { if (r.b == null) return; const y0 = yOf(Math.max(0, r.)rawliteral"
+R"rawliteral(b - deadZone(r.b))), y1 = yOf(r.b); g.fillRect(xOf(k) - cw / 2, y0, cw, y1 - y0); });
   }
   g.beginPath(); let started = false;
   recs.forEach((r, k) => { if (r.b == null) return; const x = xOf(k), y = yOf(r.b); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true; });
@@ -725,8 +732,7 @@ function drawOverlay() {
     g.beginPath(); let pk = -9;
     for (const p of pts) { if (p.k - pk > 1) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); pk = p.k; }
     const last = pts[pts.length - 1];
-    g.strokeStyle = palCss(clamp(Math.max(0.5, las)rawliteral"
-R"rawliteral(t.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
+    g.strokeStyle = palCss(clamp(Math.max(0.5, last.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
   }
   const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'At bait depth') && t.s > 0.08).sort((a, b) => a.d - b.d);
   let lastY = -1e9;
@@ -1431,14 +1437,14 @@ function pmSheetRender() {
       `<p class="hint" style="margin:6px 0 0">The origin is where the chalet sits on the map (0, 0). Set it once with a fix; hole positions are metres from it, so moving the origin moves every hole with it.</p>`;
     sh.hidden = false; return;
   }
-  const n = (st && st.nodes || []).find(x => x.id === pm.sel); if (!n) { sh.hidden = true; return; }
+  const n = (st && st.nodes || []).find(x => x.id === pm.sel); if (!n) { sh.hidden = true; return;)rawliteral"
+R"rawliteral( }
   const L = son ? son.list() : { nodes: [] }, s = (L.nodes || []).find(x => x.node === n.id), hh = pmHoles().find(x => x.id === n.id);
   const off = n.online === false, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
   const state = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : n.line ? '<span class="badge al">FLAG UP</span>' : n.lowbat ? '<span class="badge warn">LOW BATT</span>' : '<span class="badge on">OK</span>';
   const seen = n.last_seen_sec == null ? '–' : (n.last_seen_sec < 60 ? n.last_seen_sec + ' s ago' : Math.round(n.last_seen_sec / 60) + ' min ago');
   const q = n.turns || 0, cmt = st.cm_per_turn || 0, HARDT = ['hard', 'medium', 'soft', ''];
-  const dist = hh && hh.placed ? (Math.hypot(hh.x, hh.y) >= 1000 ? (Math.hypot(hh.x, hh.y) / 100)rawliteral"
-R"rawliteral(0).toFixed(2) + ' km' : Math.round(Math.hypot(hh.x, hh.y)) + ' m') + ' · ' + Math.round((Math.atan2(hh.x, hh.y) * 180 / Math.PI + 360) % 360) + '° from the chalet' : 'not on the map';
+  const dist = hh && hh.placed ? (Math.hypot(hh.x, hh.y) >= 1000 ? (Math.hypot(hh.x, hh.y) / 1000).toFixed(2) + ' km' : Math.round(Math.hypot(hh.x, hh.y)) + ' m') + ' · ' + Math.round((Math.atan2(hh.x, hh.y) * 180 / Math.PI + 360) % 360) + '° from the chalet' : 'not on the map';
   sh.innerHTML = `<div class="hd"><span class="nm">${esc(nodeName(n))} <span class="sm">#${n.id}</span></span><span>${n.disarmed ? '<span class="badge">DISARMED</span>' : ''}${state}</span></div>` +
     `<div class="kv"><div><span>Bottom</span>${s && s.bottom < 2047 ? fmt(s.bottom / 100) + ' ' + (HARDT[s.hard] || '') : 'no sonar'}</div><div><span>Fish</span>${s && s.fish ? s.fish + ' · nearest ' + fmt(s.near / 100) : (s ? 'none' : '–')}</div>` +
     `<div><span>Bait</span>${n.bait ? fmt(n.bait / 100) : 'not set'}</div><div><span>Line</span>${q ? (q / 4).toFixed(q % 4 ? 2 : 0) + ' turn' + (q > 4 ? 's' : '') + (cmt ? ' ≈ ' + (q / 4 * cmt / 100).toFixed(1) + ' m out' : '') : '–'}</div>` +
@@ -1920,6 +1926,7 @@ syncSound();
 showTab(initialTab());
 loadStatus();
 const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance), pRange = poll('range', loadRange);
+window.suiteGlance = pGlance;
 setInterval(pStatus, 2000);
 setInterval(() => { if (tab === 'radio') { pRadio(); pRange(); } }, 2000);
 setInterval(() => { if (tab === 'settings') { pRadio(); pSim(); } }, 5000);

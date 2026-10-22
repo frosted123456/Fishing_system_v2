@@ -67,6 +67,14 @@ static volatile uint8_t g_cfg_test = TEST_OFF;
 static volatile bool g_cfg_adaptive = false;
 static volatile bool g_cfg_reset_stats = false;
 static volatile uint8_t g_cfg_focus = 0;
+// D81 (5.1): frames are 0.5-2 s long: ages for people and the follower are in seconds
+static uint16_t frameAgeS(uint16_t frame_then);
+static uint16_t frameAgeS(uint16_t frame_then) {
+  const uint16_t fm = (g_chalet && g_ch != nullptr && g_ch->planner.frameMs()) ? g_ch->planner.frameMs() : 1000;
+  const uint32_t frames = static_cast<uint16_t>(g_frame - frame_then);
+  const uint32_t ms = frames * fm;
+  return ms > 65535000UL ? 65535 : static_cast<uint16_t>(ms / 1000UL);
+}
 static volatile uint8_t g_cfg_range_hub = 0;          // D80 range test hub (0 = off)
 static RangeRing<64> g_range_ring;                     // D80 slot results of that hub (radio task -> loop)
 static sonar::FollowAction g_follow;                   // D80 follow the action (chalet, loop() only)
@@ -400,6 +408,7 @@ static void chaletApplyConfig() {   // under lock
   c.adaptive = g_cfg_adaptive;
   if (g_cfg_reset_stats) { g_ch->planner.resetStats(); g_cfg_reset_stats = false; }
   g_ch->focus_node = g_cfg_focus;
+  for (uint8_t k = 0; k < 2; k++) g_ch->focus_extra[k] = (g_follow.on && g_follow.extra[k] != g_cfg_focus) ? g_follow.extra[k] : 0;   // D81 (5.4)
   c.range_hub = g_cfg_range_hub;   // D80
   if (g_cfg_reset_all) { g_cfg_reset_all = false; cmdQueue(CMD_RESET_ALL, 0, 0); }
   // one command at a time, each in CMD_BEACONS beacons (also sent on the backbone)
@@ -720,10 +729,11 @@ static void hubFrame() {
         {
           Lock l;
           uint8_t flags = static_cast<uint8_t>((g_eb_relay ? HF_EB_RELAY : 0) | (g_hub_eb_on ? HF_EB_PATH : 0));
-          if (g_silence_req_frames > 0) { flags |= g_silence_req; g_silence_req_frames = g_silence_req_frames - 1; }
+          static uint16_t silence_frame = 0xFFFF;   // D81 (5.3): the silence request counts frames, not packets (a hub may own two turns)
+          if (g_silence_req_frames > 0) { flags |= g_silence_req; if (silence_frame != plan.frame) { silence_frame = plan.frame; g_silence_req_frames = g_silence_req_frames - 1; } }
           const bool test = plan.test_mode != TEST_OFF;
           n = g_hub->buildHub(buf, sizeof(buf), flags, g_battery_mv, static_cast<uint16_t>(millis() / 60000UL),
-                              test, static_cast<uint16_t>(g_test_counter));
+                              test, static_cast<uint16_t>(g_test_counter), nullptr, i);
           g_test_counter++;
         }
         txAt(buf, n, slotMode(s), ref + times[i].tx, end);
@@ -832,7 +842,7 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
     g_ch->sonar_sink = g_sonar;
     g_ch->range_ring = &g_range_ring;   // D80
     PlannerConfig& c = g_ch->planner.cfg;
-    c.network_id = network_id; c.self_id = self_id; c.frame_ms = 1000;
+    c.network_id = network_id; c.self_id = self_id; c.frame_ms = 500;   // D81 (5.1): 500 ms base, steps 500/1000/1500/2000 by itself
     c.allowance = 96; c.test_allowance = 160;          // est. budgets, see docs/protocol_v2.md
     c.test_mode = g_cfg_test; c.adaptive = g_cfg_adaptive;
   } else {
@@ -983,7 +993,7 @@ void meshAutoFocusTick() {
           if (ns == nullptr || !ns->has_sum) continue;
           in[n].node = ns->node; in[n].activity = ns->sum.activity; in[n].n_fish = ns->sum.n_targets;
           in[n].near_bait = (ns->sum.status & sonar::ST_NEAR_BAIT) != 0;
-          in[n].age_frames = static_cast<uint16_t>(static_cast<uint16_t>(g_frame - ns->frame));
+          in[n].age_s = frameAgeS(ns->frame);
           n++;
         }
       }
@@ -1443,6 +1453,26 @@ bool meshSonarSim() {
   return g_hub->sonarSim();
 }
 
+// D81 (5.4): the streamed holes: the watched one first, then up to two more (0 = none). Returns the count.
+uint8_t meshFocusNodes(uint8_t* out) {
+  uint8_t n = 0;
+  if (g_chalet) {
+    if (g_ch == nullptr) return 0;
+    Lock l;
+    return g_ch->streamedHoles(out);   // what this frame's beacon says (extras only while they fit)
+  }
+  if (g_hub == nullptr) return 0;
+  Lock l;
+  if (g_hub->focusNode()) out[n++] = g_hub->focusNode();
+  for (uint8_t k = 0; k < 2; k++) if (g_hub->focusExtra(k)) out[n++] = g_hub->focusExtra(k);
+  return n;
+}
+bool meshIsFocus(uint8_t node) {
+  if (node == 0) return false;
+  uint8_t f[3]; const uint8_t n = meshFocusNodes(f);
+  for (uint8_t i = 0; i < n; i++) if (f[i] == node) return true;
+  return false;
+}
 uint8_t meshFocusNode() {
   if (g_chalet) return g_cfg_focus;
   if (g_hub == nullptr) return 0;
@@ -1461,6 +1491,8 @@ String meshSonarListJson() {
   s.reserve(1600);
   s = "{\"sim\":"; s += g_cfg_sonar_sim ? "true" : "false";
   s += ",\"focus\":"; s += g_cfg_focus;
+  { uint8_t f[3]; const uint8_t n = meshFocusNodes(f); s += ",\"live\":[";   // D81: every streamed hole (the beacon's view)
+    for (uint8_t i = 0; i < n; i++) { if (i) s += ","; s += f[i]; } s += "]"; }
   s += ",\"frame\":"; s += g_frame;
   { const uint32_t now = millis();   // D80 follow the action
     s += ",\"follow\":"; s += g_follow.on ? "true" : "false";
@@ -1484,7 +1516,7 @@ String meshSonarListJson() {
       char b[240];
       snprintf(b, sizeof(b),
                "%s{\"node\":%u,\"hub\":%u,\"age\":%d,\"ping\":%u,\"bottom\":%u,\"hard\":%u,\"fish\":%u,\"near\":%u,\"lvl\":%u,\"act\":%u,\"bgver\":%u,\"bgmask\":%u,\"sum\":%s,\"st\":%u,\"bsnr\":%u}",
-               i ? "," : "", ns.node, ns.hub, static_cast<int>(static_cast<int16_t>(g_frame - ns.frame)), ns.sum.ping,
+               i ? "," : "", ns.node, ns.hub, static_cast<int>(frameAgeS(ns.frame)), ns.sum.ping,
                ns.sum.bottom_cm, ns.sum.hard, ns.sum.n_targets, ns.sum.nearest_cm, ns.sum.nearest_level, ns.sum.activity,
                ns.bg_ver, ns.bg_mask, ns.has_sum ? "true" : "false", ns.sum.status, ns.sum.bottom_snr);
       s += b;
@@ -1625,7 +1657,7 @@ bool meshSonarSummary(uint8_t node, MeshSonarLite& out) {
   out.hard = ns->sum.hard; out.activity = ns->sum.activity; out.n = ns->sum.n_list;
   out.status = ns->sum.status; out.bottom_snr = ns->sum.bottom_snr;
   for (uint8_t k = 0; k < out.n && k < 5; k++) out.t[k] = sonar::packTarget(ns->sum.list[k]);
-  out.age_frames = static_cast<uint16_t>(g_frame - ns->frame);
+  out.age_frames = static_cast<uint16_t>(g_frame - ns->frame); out.age_s = frameAgeS(ns->frame);
   return true;
 }
 

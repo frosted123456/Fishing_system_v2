@@ -22,25 +22,27 @@ struct FollowIn {
   uint8_t activity;     // Summary.activity: pings with a fish over the last window, 0-15
   uint8_t n_fish;       // Summary.n_targets (the bait is not counted)
   bool near_bait;       // Summary.status & ST_NEAR_BAIT
-  uint16_t age_frames;  // frames since its last summary
+  uint16_t age_s;       // seconds since its last summary (D81: was frames; the frame is 0.5-2 s now)
 };
 
 class FollowAction {
  public:
   enum : uint32_t { DWELL_MS = 20000, PIN_MS = 300000, TRIP_MS = 120000 };
-  enum : int { MARGIN = 5, MIN_SCORE = 4, QUIET_SCORE = 2, MAX_AGE = 10 };
+  enum : int { MARGIN = 5, MIN_SCORE = 4, QUIET_SCORE = 2, MAX_AGE = 10 };   // MAX_AGE in seconds (a quiet hole sends every 8 s)
+  enum : uint8_t { EXTRAS = 2 };   // D81 (5.4): more holes streamed beside the watched one, when the radio has room
 
   bool on = true;
   uint8_t focus = 0;    // current pick (0 = none)
+  uint8_t extra[EXTRAS] = {0, 0};   // D81: next busiest holes (0 = none); re-ranked every DWELL_MS, never the watched hole
   char why[28] = "";    // short reason for the page / OLED
 
   static int score(const FollowIn& c) {
-    if (c.age_frames > MAX_AGE) return 0;   // stale summary: the hole may be gone
+    if (c.age_s > MAX_AGE) return 0;   // stale summary: the hole may be gone
     const int fish = c.n_fish > 3 ? 3 : c.n_fish;
     return c.activity + 4 * fish + (c.near_bait ? 10 : 0);
   }
 
-  void setOn(bool v, uint32_t now) { on = v; pin_until_ = 0; trip_until_ = 0; since_ = now; }
+  void setOn(bool v, uint32_t now) { on = v; pin_until_ = 0; trip_until_ = 0; since_ = now; if (!v) { extra[0] = extra[1] = 0; } }
   // The user picked a hole (0 = stopped the stream): keep it for PIN_MS.
   void manual(uint8_t node, uint32_t now) {
     focus = node; since_ = now; trip_until_ = 0;
@@ -60,6 +62,13 @@ class FollowAction {
   // Call about once a second with every hole that has a summary. True when `focus` changed.
   bool update(const FollowIn* c, uint8_t n, uint32_t now) {
     if (!on) return false;
+    const uint8_t was = focus;
+    const bool changed = updatePrimary(c, n, now);
+    if (focus != was) extra_since_ = 0;   // the watched hole moved: rank the extras again now
+    updateExtras(c, n, now);
+    return changed;
+  }
+  bool updatePrimary(const FollowIn* c, uint8_t n, uint32_t now) {
     if (pin_until_) { if ((int32_t)(now - pin_until_) < 0) return false; pin_until_ = 0; since_ = now - DWELL_MS; }
     if (trip_until_) { if ((int32_t)(now - trip_until_) < 0) return false; trip_until_ = 0; }
     int best = -1, best_score = 0, cur_score = 0;
@@ -83,7 +92,32 @@ class FollowAction {
     else if (c.n_fish) snprintf(why, sizeof(why), "%u fish under it", c.n_fish);
     else snprintf(why, sizeof(why), "activity");
   }
-  uint32_t since_ = 0, pin_until_ = 0, trip_until_ = 0;
+  // D81 (5.4): the extras follow the fish too, with their own dwell: re-ranked every DWELL_MS, kept while they stay
+  // busy enough (QUIET_SCORE) and nothing clearly busier (MARGIN) waits. Follow on only; a manual pick does not pin them.
+  void updateExtras(const FollowIn* c, uint8_t n, uint32_t now) {
+    for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == focus) extra[k] = 0;
+    if (extra_since_ != 0 && now - extra_since_ < DWELL_MS) return;
+    extra_since_ = now ? now : 1;
+    int sc[EXTRAS]; for (uint8_t k = 0; k < EXTRAS; k++) sc[k] = -1;
+    for (uint8_t i = 0; i < n; i++) for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] && c[i].node == extra[k]) sc[k] = score(c[i]);
+    for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] && sc[k] < QUIET_SCORE) { extra[k] = 0; sc[k] = -1; }   // gone or quiet
+    for (;;) {   // best remaining candidate beats the weakest kept extra by MARGIN (or fills an empty place)
+      int best = -1, bs = MIN_SCORE - 1;
+      for (uint8_t i = 0; i < n; i++) {
+        if (c[i].node == focus || c[i].node == 0) continue;
+        bool kept = false; for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == c[i].node) kept = true;
+        if (kept) continue;
+        const int sv = score(c[i]);
+        if (sv > bs) { bs = sv; best = i; }
+      }
+      if (best < 0) break;
+      int w = -1;
+      for (uint8_t k = 0; k < EXTRAS; k++) if (extra[k] == 0) { w = k; break; }
+      if (w < 0) { w = 0; for (uint8_t k = 1; k < EXTRAS; k++) if (sc[k] < sc[w]) w = k; if (bs < sc[w] + MARGIN) break; }
+      extra[w] = c[best].node; sc[w] = bs;
+    }
+  }
+  uint32_t since_ = 0, pin_until_ = 0, trip_until_ = 0, extra_since_ = 0;
 };
 
 }  // namespace sonar
