@@ -18,10 +18,11 @@ shows everything on its screen and on a phone or PC web page.
 5. [Setting up on the ice](#5-setting-up-on-the-ice)
 6. [Functions](#6-functions)
 7. [Range test](#7-range-test)
-8. [Troubleshooting](#8-troubleshooting)
-9. [Serial commands](#9-serial-commands)
-10. [Repository layout](#10-repository-layout)
-11. [Credits](#11-credits)
+8. [How the LoRa airtime is shared](#8-how-the-lora-airtime-is-shared)
+9. [Troubleshooting](#9-troubleshooting)
+10. [Serial commands](#10-serial-commands)
+11. [Repository layout](#11-repository-layout)
+12. [Credits](#12-credits)
 
 ---
 
@@ -478,7 +479,29 @@ and delete old ones. The other hubs keep working during the test.
 
 CSV columns: `t_s, utc, lat, lon, sats, hdop, dist_m, frame, mode, ok, crc, rssi_dbm, snr_db, hub_beacon_rssi, hub_beacon_snr, hub_beacon_lost64`.
 
-## 8. Troubleshooting
+## 8. How the LoRa airtime is shared
+
+One LoRa channel, one frame of 1 s. The chalet sends a beacon at the start of each frame with the turn of every
+hub: when, how long, how many bytes, at what speed. Hubs only transmit in their turn. WROOM tip-ups use ESP-NOW
+to their hub, which costs no LoRa time: the hub packs its whole pocket into its own turn.
+
+| Part of the frame | What it is |
+|---|---|
+| beacon | Chalet → everyone. The plan for this frame, the watched hole, commands |
+| echo | A hub repeats the beacon for the hubs the chalet can't reach |
+| join | Free slot for a hub that just switched on |
+| hub turns | One per hub, sized by the bytes it may send (96 B normal, 180 B for the watched hole) and its speed |
+| free | Left over. The chalet uses it to give bigger turns, or shortens the frame later |
+
+Speed: every hub starts at SF9 (slow, long range). When its signal has margin, the chalet steps it up to SF8, SF7,
+SF6, SF5. Each step roughly halves the time of its turn. A hub that misses packets is stepped back down. A hub
+behind another hub (one hop) costs twice: its turn, then again inside the relay's turn.
+
+![LoRa airtime, 3 pockets](images/lora_airtime.png)
+
+If the turns don't fit in 1 s, the frame stretches to 1.5 or 2 s on its own. Nothing is lost, updates are slower.
+
+## 9. Troubleshooting
 
 | You see | Do |
 |---|---|
@@ -498,7 +521,7 @@ CSV columns: `t_s, utc, lat, lon, sats, hdop, dist_m, frame, mode, ok, crc, rssi
 | Forgot the PIN | Serial `PIN CLEAR` |
 | Everything acts weird | Hold PRG 10 s on the chalet (network reset) |
 
-## 9. Serial commands
+## 10. Serial commands
 
 115200 baud. Type in capitals. Chalet unless noted.
 
@@ -525,7 +548,7 @@ CSV columns: `t_s, utc, lat, lon, sats, hdop, dist_m, frame, mode, ok, crc, rssi
 | `HOTSPOT ON\|OFF` | Hub: hotspot |
 | `MAP` / `MAP CLEAR` | Depth pack size / remove it (saved tiles stay) |
 
-## 10. Repository layout
+## 11. Repository layout
 
 ```
 platformio.ini      build environments, one per role; devices.ini = your boards
@@ -539,7 +562,7 @@ tools/              flash.html, flash.py, gen_web.py, lake_prep.py, web_preview.
 images/             pictures for this README
 ```
 
-## 11. Credits
+## 12. Credits
 
 The sonar side started from **open_echo** by Jan Neumann: the TUSS4470 shield 002 and the register sequence
 that works in water. The firmware here (driver, processing, mesh, web page) is our own, not a fork.
