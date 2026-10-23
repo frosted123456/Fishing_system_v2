@@ -17,8 +17,8 @@ namespace icemesh {
 namespace tdma {
 
 static const uint32_t BEACON_GAP_US = 6000;    // hubs decode the beacon and switch mode (est.)
-static const uint32_t LEAD_US = 3000;          // receivers listening before TX starts (est.)
-static const uint32_t TAIL_US = 3000;          // timing error / RxDone latency margin (est.)
+static const uint32_t LEAD_US = 6000;          // receivers listening before TX starts (est.)
+static const uint32_t TAIL_US = 6000;          // timing error / RxDone latency margin (est.)
 static const uint32_t FRAME_MARGIN_US = 40000; // free time before the next beacon (est.)
 static const uint32_t BEACON_WINDOW_US = 25000;// a hub listens this long before/after the expected beacon (est.)
 

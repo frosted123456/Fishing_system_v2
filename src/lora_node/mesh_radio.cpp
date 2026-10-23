@@ -27,7 +27,7 @@ using namespace icemesh::tdma;
 // ---------------------------------------------------------------------------------------------
 // Radio + shared state
 // ---------------------------------------------------------------------------------------------
-static SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY);
+static SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY, SPI, SPISettings(8000000, MSBFIRST, SPI_MODE0));   // radio review: 8 MHz halves the per-byte cost of a 255 B packet
 
 static TaskHandle_t g_task = nullptr;
 static SemaphoreHandle_t g_mx = nullptr;
@@ -220,7 +220,7 @@ static bool setMode(RadioMode m) {
 }
 
 static volatile uint32_t g_tx_late_skips = 0;
-static const uint32_t MAX_TX_LATE_US = 1000;   // est.: later than this, the packet would overrun its slot
+static const uint32_t MAX_TX_LATE_US = 2000;   // est.: later than this, the packet would overrun its slot (LEAD is 6 ms)
 // D62: radio state for the sonar capture on the hub (meshLoraQuiet): a transmit on the air, when the last one
 // ended, and when the next own transmission is planned (hubFrame / hubSearch; 0 = none known)
 static volatile bool g_tx_busy = false;
@@ -408,7 +408,7 @@ static void chaletApplyConfig() {   // under lock
   c.adaptive = g_cfg_adaptive;
   if (g_cfg_reset_stats) { g_ch->planner.resetStats(); g_cfg_reset_stats = false; }
   g_ch->focus_node = g_cfg_focus;
-  for (uint8_t k = 0; k < 2; k++) g_ch->focus_extra[k] = (g_follow.on && g_follow.extra[k] != g_cfg_focus) ? g_follow.extra[k] : 0;   // D81 (5.4)
+  for (uint8_t k = 0; k < 2; k++) g_ch->focus_extra[k] = (g_follow.extra[k] != g_cfg_focus) ? g_follow.extra[k] : 0;   // D81 (5.4); D82: with follow off too
   c.range_hub = g_cfg_range_hub;   // D80
   if (g_cfg_reset_all) { g_cfg_reset_all = false; cmdQueue(CMD_RESET_ALL, 0, 0); }
   // one command at a time, each in CMD_BEACONS beacons (also sent on the backbone)
@@ -687,8 +687,13 @@ static void hubSearch(uint32_t& next_join_us) {
     size_t n;
     { Lock l; n = g_hub->buildJoin(jb, sizeof(jb)); }
     uint32_t end;
-    txAt(jb, n, MODE_SF9_BW500, nowUs(), end, false);
-    next_join_us = nowUs() + 1500000 + (esp_random() % 3000000);   // ALOHA: 1.5-4.5 s (est.)
+    setMode(MODE_SF9_BW500);
+    if (radio.scanChannel() == RADIOLIB_LORA_DETECTED) {   // radio review: a JOIN on top of someone's turn costs that turn: listen first (~2 ms CAD)
+      next_join_us = nowUs() + 200000 + (esp_random() % 300000);   // busy: try again in 0.2-0.5 s
+    } else {
+      txAt(jb, n, MODE_SF9_BW500, nowUs(), end, false);
+      next_join_us = nowUs() + 1500000 + (esp_random() % 3000000);   // ALOHA: 1.5-4.5 s (est.)
+    }
   }
   g_next_tx_us = next_join_us;
 }
@@ -770,7 +775,9 @@ static void hubFrame() {
   if (listenFor(ref_next - BEACON_WINDOW_US, beaconListenCloseUs(ref_next, g_last_beacon_len))) return;   // D79 (E1): room for a grown beacon
   for (uint8_t i = 0; i < plan.n_slots && plan.slots[i].kind == SLOT_ECHO; i++) {
     if (plan.slots[i].owner == g_hub->self) continue;
-    if (listenFor(ref_next + times[i].start - 10000, ref_next + times[i].end + BEACON_WINDOW_US)) return;
+    // radio review: a grown beacon both shifts the echo and makes it longer: close at twice the growth plus the window
+    const uint32_t growth = modeAirtimeUs(MODE_SF9_BW500, static_cast<uint16_t>(g_last_beacon_len + BEACON_GROW_MAX)) - modeAirtimeUs(MODE_SF9_BW500, g_last_beacon_len);
+    if (listenFor(ref_next + times[i].start - 10000, ref_next + times[i].end + 2 * growth + BEACON_WINDOW_US)) return;
   }
   Lock l;
   g_hub->onBeaconMissed();
@@ -817,9 +824,16 @@ static bool radioInit() {
   digitalWrite(VEXT_PIN, LOW);
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
   const ModeInfo& mi = modeInfo(MODE_SF9_BW500);
+  radio.standbyXOSC = true;   // radio review: keep the TCXO running in standby and as the RX/TX fallback mode; otherwise every
+                              // startReceive / startTransmit waits ~5 ms for the TCXO = the receiver misses SF5-SF7 preambles
   int st = radio.begin(LORA_FREQUENCY, static_cast<float>(mi.bw_khz), mi.sf, LORA_CODING_RATE,
                        LORA_SYNC_WORD, LORA_TX_POWER, LORA_PREAMBLE);
   if (st != RADIOLIB_ERR_NONE) return false;
+  {   // radio review: measure what the slot LEAD / TAIL have to cover on this board, once, at boot
+    uint8_t probe[255]; memset(probe, 0x55, sizeof(probe));
+    const uint32_t t0 = micros(); radio.startReceive(); const uint32_t t1 = micros(); standbyXosc(); const uint32_t t2 = micros();
+    Serial.printf("LoRa timing: startReceive %lu us, standby %lu us (LEAD/TAIL %lu/%lu us)\n", (unsigned long)(t1 - t0), (unsigned long)(t2 - t1), (unsigned long)LEAD_US, (unsigned long)TAIL_US);
+  }
   radio.setCRC(2);                       // hardware CRC on (explicit, protocol relies on it)
   radio.setDio1Action(onDio1);
   g_cur_mode = MODE_SF9_BW500;
@@ -980,7 +994,7 @@ void meshAutoFocus(uint8_t node) {
   if (g_autoFocusUntil == 0) g_autoFocusUntil = 1;
 }
 void meshAutoFocusTick() {
-  if (g_follow.on && g_chalet && g_sonar != nullptr) {   // D80: once a second, from the summaries every hole sends
+  if (g_chalet && g_sonar != nullptr) {   // D80: once a second, from the summaries every hole sends (follow off: the extras only, D82)
     static uint32_t last = 0;
     const uint32_t now = millis();
     if (now - last >= 1000) {
@@ -997,9 +1011,10 @@ void meshAutoFocusTick() {
           n++;
         }
       }
+      if (!g_follow.on) g_follow.focus = g_cfg_focus;   // D82: the extras never double the hole the user picked
       if (g_follow.update(in, n, now)) g_cfg_focus = g_follow.focus;
     }
-    return;
+    if (g_follow.on) return;
   }
   if (g_autoFocusUntil == 0 || (int32_t)(millis() - g_autoFocusUntil) < 0) return;
   g_autoFocusUntil = 0; g_cfg_focus = g_autoFocusPrev;
@@ -1489,7 +1504,7 @@ bool meshHubPushSonar(const uint8_t* blk, uint8_t len) {
 
 String meshSonarListJson() {
   String s;
-  s.reserve(1600);
+  s.reserve(400 + 16 * 160);
   s = "{\"sim\":"; s += g_cfg_sonar_sim ? "true" : "false";
   s += ",\"focus\":"; s += g_cfg_focus;
   { uint8_t f[3]; const uint8_t n = meshFocusNodes(f); s += ",\"live\":[";   // D81: every streamed hole (the beacon's view)
@@ -1541,14 +1556,14 @@ String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool 
   uint32_t last;
   {
     Lock l;
-    const sonar::StoredPing* ptr[64];
-    n = g_sonar->pingsSince(node, since, ptr, 64);
+    const sonar::StoredPing* ptr[128];   // review: the whole ring, so the NEWEST max_pings are returned (not the newest of the oldest 64)
+    n = g_sonar->pingsSince(node, since, ptr, 128);
     const uint16_t skip = n > max_pings ? static_cast<uint16_t>(n - max_pings) : 0;   // newest ones
     for (uint16_t i = skip; i < n; i++) copy[i - skip] = *ptr[i];
     n = static_cast<uint16_t>(n - skip);
     last = g_sonar->lastSeq();
   }
-  s.reserve(80 + n * 110);
+  s.reserve(80 + n * (lite ? 130 : 260));
   s = "{\"node\":"; s += node; s += ",\"last\":"; s += last; s += ",\"pings\":[";
   for (uint16_t i = 0; i < n; i++) {
     const sonar::Ping& p = copy[i].p;

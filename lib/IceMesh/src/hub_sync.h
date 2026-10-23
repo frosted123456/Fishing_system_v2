@@ -46,7 +46,9 @@ class HubSync {
 
   bool synced() const { return synced_; }
   // Transmit only on a fresh beacon or after a single miss: the slot plan may have changed.
-  bool mayTransmit() const { return synced_ && lost_streak_ <= 1; }
+  // radio review: with a one-frame-old plan the slot times may have moved (acks, a mode change, the range test rotates
+  // every frame): no transmit without this frame's beacon (or echo)
+  bool mayTransmit() const { return synced_ && lost_streak_ == 0; }
   uint32_t ref() const { return ref_; }
   uint16_t frame() const { return frame_; }
   uint32_t frameUs() const { return frame_us_; }

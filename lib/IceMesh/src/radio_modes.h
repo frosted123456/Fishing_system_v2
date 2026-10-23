@@ -20,18 +20,18 @@ enum RadioMode : uint8_t {
 struct ModeInfo {
   uint8_t sf;
   uint16_t bw_khz;
-  int16_t sens_dbm_x10;  // ESTIMATE: -174 + 10log10(BW) + NF 6 dB + SNR limit (theory, not measured)
+  int16_t sens_dbm_x10;  // SX1262 datasheet typical sensitivity at 500 kHz (not measured on this board)
   int16_t snr_limit_x10; // ESTIMATE: demodulation SNR limit (SF12 -20 dB ... SF5 -2.5 dB, 2.5 dB per step)
   const char* name;
 };
 
 inline const ModeInfo& modeInfo(RadioMode m) {
   static const ModeInfo table[MODE_COUNT] = {
-      {9, 500, -1235, -125, "SF9/500"},
-      {8, 500, -1210, -100, "SF8/500"},
-      {7, 500, -1185, -75, "SF7/500"},
-      {6, 500, -1160, -50, "SF6/500"},
-      {5, 500, -1135, -25, "SF5/500"},
+      {9, 500, -1210, -125, "SF9/500"},   // sensitivity: SX1262 datasheet typ. at 500 kHz (radio review 2026-10-22; the
+      {8, 500, -1180, -100, "SF8/500"},   // theory values were ~2.5 dB optimistic)
+      {7, 500, -1160, -75, "SF7/500"},
+      {6, 500, -1130, -50, "SF6/500"},
+      {5, 500, -1110, -25, "SF5/500"},
   };
   return table[m < MODE_COUNT ? m : MODE_SF9_BW500];
 }

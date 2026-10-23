@@ -82,7 +82,6 @@ class ChaletPlanner {
     RELAY_CAND_TIMEOUT = 10,
     RELAY_KEEP_FRAMES = 60,
     EXTRA_FOCUS = 2,          // D81: streamed holes beyond the first (follow the action watches the top 3)
-    EXTRA_HOLD_MS = 10000,    // D81: a dropped extra is not tried again for this long
     ACK_REPEAT = 3,
     MAX_RELAYS = 3,
     MIN_ALLOWANCE = 40,
@@ -264,11 +263,11 @@ class ChaletPlanner {
     const uint32_t fus = static_cast<uint32_t>(fm) * 1000UL;
     if (fus <= GROW_KEEP_US) return;
     const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
-    for (uint8_t m = MODE_COUNT; m-- > 0;) for (uint8_t pass = 0; pass < 2; pass++) {   // fastest mode first; streaming hubs before the others
+    for (uint8_t m = MODE_COUNT; m-- > 0;) {   // fastest mode first
       for (uint8_t s = 0; s < bc.n_slots; s++) {
         Slot& sl = bc.slots[s];
         if (sl.kind != SLOT_HUB || sl.via != 0 || sl.mode != m || sl.allowance >= MAX_PACKET || sl.owner == cfg.range_hub) continue;
-        if (focusCount(sl.owner) == 0 || pass == 1) continue;
+        if (focusCount(sl.owner) == 0) continue;   // only hubs that stream
         { uint8_t own = 0; for (uint8_t k = 0; k < bc.n_slots; k++) if (bc.slots[k].kind == SLOT_HUB && bc.slots[k].owner == sl.owner) own++; if (own > 1) continue; }   // two turns already: it asked for what it needs
         const uint8_t keep = sl.allowance;
         sl.allowance = MAX_PACKET;
@@ -454,23 +453,18 @@ class ChaletPlanner {
     uint8_t allow = (cfg.test_mode != TEST_OFF) ? cfg.test_allowance : cfg.allowance;
     uint8_t focus = (cfg.focus_hub != ID_NONE && cfg.focus_allowance > allow) ? cfg.focus_allowance : allow;
     bool dropped = false;
-    // D81 (5.4): extras are counted from the front (the caller packs them); once one was dropped the plan does not try
-    // it again for EXTRA_HOLD_MS, so a plan at the limit does not flicker between 2 and 3 streams every beacon
+    // D81 (5.4): extras are counted from the front (the caller packs them). A plan that has to drop one does not "fit":
+    // the frame steps up for them like it does for the watched hole, and the frame-length hysteresis (DOWN_FRAMES)
+    // keeps the stream count from flickering at the limit.
     uint8_t want_extras = 0;
     for (uint8_t k = 0; k < EXTRA_FOCUS && cfg.extra_hubs[k] != ID_NONE; k++) want_extras = static_cast<uint8_t>(k + 1);
-    if (allow_out == nullptr) { extras_kept_ = want_extras; }   // a probe: never touches the hold
-    else if (seqDiff(frame, extras_retry_) < 0 && extras_cap_ < want_extras) extras_kept_ = extras_cap_;
-    else extras_kept_ = want_extras;
+    extras_kept_ = want_extras;
     for (;;) {
       fill(frame, bc, allow, focus);
       const uint16_t blen = static_cast<uint16_t>(beaconSize(bc.n_slots, bc.n_acks));
       const bool fits = planFits(bc.slots, bc.n_slots, fus, blen);
       if (fits && !full_) break;
-      if (extras_kept_ > 0) {                                                            // D81: extra streamed holes go first
-        extras_kept_--;
-        if (allow_out != nullptr) { extras_cap_ = extras_kept_; extras_retry_ = static_cast<uint16_t>(frame + fr(EXTRA_HOLD_MS)); }
-        continue;
-      }
+      if (extras_kept_ > 0) { extras_kept_--; continue; }                               // D81: extra streamed holes go first
       if (fits && full_) { dropped = true; break; }  // fits, but a hub found no slot (beacon full: MAX_SLOTS)
       if (focus > allow + 16) { focus = static_cast<uint8_t>(focus - 16); continue; }   // shrink FOCUS first
       if (allow > MIN_ALLOWANCE + 8) { allow = static_cast<uint8_t>(allow - 8); focus = allow; continue; }
@@ -484,7 +478,8 @@ class ChaletPlanner {
     if (allow_out) *allow_out = allow;
     const bool focus_ok = cfg.focus_hub == ID_NONE || cfg.focus_allowance <= allow ||
                           focus + FOCUS_KEEP_MARGIN >= cfg.focus_allowance || !hubScheduled(bc, cfg.focus_hub);
-    return !dropped && allow >= KEEP_ALLOWANCE && focus_ok;
+    const bool extras_ok = extras_kept_ >= want_extras;   // review: the user asked for N holes: a longer frame is worth it
+    return !dropped && allow >= KEEP_ALLOWANCE && focus_ok && extras_ok;
   }
 
   // streamed holes this hub reports (the first focus plus the extras the current plan keeps)
@@ -604,8 +599,7 @@ class ChaletPlanner {
   uint8_t last_allowance_ = 0;
   uint16_t frame_ms_ = 0;
   uint16_t down_streak_ = 0;
-  uint8_t extras_kept_ = 0, extras_cap_ = 0;
-  uint16_t extras_retry_ = 0;
+  uint8_t extras_kept_ = 0;
   bool full_ = false;
   uint32_t dropped_slots_ = 0;
 };

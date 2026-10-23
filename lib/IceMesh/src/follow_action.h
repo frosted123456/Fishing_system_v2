@@ -44,17 +44,18 @@ class FollowAction {
   }
 
   void setMaxExtra(uint8_t n) { max_extra = n > EXTRAS ? static_cast<uint8_t>(EXTRAS) : n; extra_since_ = 0; }   // ranks again at once
-  void setOn(bool v, uint32_t now) { on = v; pin_until_ = 0; trip_until_ = 0; since_ = now; if (!v) { extra[0] = extra[1] = 0; } }
+  // Follow off: the user picks the watched hole; the extra places (the 1 / 2 / 3 picker) are still filled by the busiest holes
+  void setOn(bool v, uint32_t now) { on = v; pin_until_ = 0; trip_until_ = 0; since_ = now; extra_since_ = 0; }
   // The user picked a hole (0 = stopped the stream): keep it for PIN_MS.
   void manual(uint8_t node, uint32_t now) {
-    focus = node; since_ = now; trip_until_ = 0;
+    focus = node; since_ = now; trip_until_ = 0; extra_since_ = 0;   // D82: an extra that became the watched hole is replaced at once
     pin_until_ = now + PIN_MS; if (pin_until_ == 0) pin_until_ = 1;
     snprintf(why, sizeof(why), "%s", node ? "picked by hand" : "stopped by hand");
   }
   // FISH ON on a hole: watch it now.
   void trip(uint8_t node, uint32_t now) {
     if (!on || node == 0) return;
-    focus = node; since_ = now; pin_until_ = 0;
+    focus = node; since_ = now; pin_until_ = 0; extra_since_ = 0;
     trip_until_ = now + TRIP_MS; if (trip_until_ == 0) trip_until_ = 1;
     snprintf(why, sizeof(why), "FISH ON");
   }
@@ -63,7 +64,7 @@ class FollowAction {
 
   // Call about once a second with every hole that has a summary. True when `focus` changed.
   bool update(const FollowIn* c, uint8_t n, uint32_t now) {
-    if (!on) return false;
+    if (!on) { updateExtras(c, n, now); return false; }
     const uint8_t was = focus;
     const bool changed = updatePrimary(c, n, now);
     if (focus != was) extra_since_ = 0;   // the watched hole moved: rank the extras again now
@@ -79,7 +80,7 @@ class FollowAction {
       if (c[i].node == focus) cur_score = s;
       if (s > best_score || (s == best_score && best >= 0 && c[i].node == focus)) { best = i; best_score = s; }
     }
-    if (best < 0 || best_score < MIN_SCORE) return false;          // nothing going on: stay
+    if (best < 0 || (best_score < MIN_SCORE && focus != 0)) return false;   // nothing going on: stay (no hole yet: take the best fresh one)
     if (c[best].node == focus) { describe(c[best]); return false; }
     if (focus != 0 && now - since_ < DWELL_MS) return false;        // give the current hole its time
     if (focus != 0 && best_score < cur_score + MARGIN && cur_score >= QUIET_SCORE) return false;

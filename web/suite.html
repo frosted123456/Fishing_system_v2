@@ -564,6 +564,7 @@ function loadPings() {
   pingBusy = true;
   sfetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
     if (n !== focus) return;
+    if (d.last != null && d.last < since) { since = 0; queue = []; }   // D82: the chalet restarted (its counter went back)
     (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
   }).catch(() => {}).then(() => { pingBusy = false; });
 }
@@ -586,7 +587,7 @@ function renderHoles() {
       `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span>` +
       `<canvas class="gl" data-glance="${n.node}" title="${live || foc ? 'live: one column per frame' : 'last minutes: one column per summary'}"></canvas></button>`;
   });
-  if (window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: every card carries its water-column preview
+  if (window.suiteTab === 'sonar' && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: the Sonar tab cards carry the preview (the Holes tab has its own 2 s poll)
   if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
   $('holes').innerHTML = h;
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
@@ -607,7 +608,7 @@ $('followN').addEventListener('click', e => { const b = e.target.closest('[data-
 
 /* ---------- D82: live panels on the Holes tab: the whole water column of every streamed hole ---------- */
 const LP = { nodes: {}, busy: false, order: [] };   // per node: since, recs (last 240 pings), el
-function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0); }
+function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0).slice(0, 3); }
 function lpPoll() {
   if (window.suiteTab !== 'holes' || document.hidden || LP.busy) return;
   const ids = lpNodes(); if (!ids.length) return;
@@ -617,6 +618,7 @@ function lpPoll() {
   sfetch('/api/sonar/pings?nodes=' + ids.join(',') + '&since=' + ids.map(n => LP.nodes[n].since).join(',') + '&max=24&lite=1').then(r => r.json()).then(d => {
     (d.nodes || []).forEach(x => {
       const st = LP.nodes[x.node]; if (!st) return;
+      if (x.last != null && x.last < st.since) { st.since = 0; st.recs = []; }   // D82: the chalet restarted
       (x.pings || []).forEach(p => { st.since = Math.max(st.since, p[0]); const b = p[2] < 2047 ? p[2] / 100 : null;
         st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); });
       if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
@@ -634,6 +636,7 @@ function lpRender() {
   if (ids.join(',') !== LP.order.join(',')) {   // rebuild the panels only when the set changes
     g.innerHTML = ids.map(n => `<button type="button" class="lp${n === L.focus ? ' main' : ''}" data-lp="${n}"><span class="hd"><span class="nm">${nameOf(n)}</span><span class="st" data-lpst="${n}"></span></span><canvas data-lpc="${n}" aria-label="live water column"></canvas></button>`).join('');
     LP.order = ids.slice();
+    Object.keys(LP.nodes).forEach(k => { if (ids.indexOf(+k) < 0) delete LP.nodes[k]; });   // a hole that comes back later starts fresh
   }
   const acc = '#00B3D6', al = '#C2412D';
   ids.forEach(n => {

@@ -568,6 +568,7 @@ function loadPings() {
   pingBusy = true;
   sfetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
     if (n !== focus) return;
+    if (d.last != null && d.last < since) { since = 0; queue = []; }   // D82: the chalet restarted (its counter went back)
     (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
   }).catch(() => {}).then(() => { pingBusy = false; });
 }
@@ -590,7 +591,7 @@ function renderHoles() {
       `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span>` +
       `<canvas class="gl" data-glance="${n.node}" title="${live || foc ? 'live: one column per frame' : 'last minutes: one column per summary'}"></canvas></button>`;
   });
-  if (window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: every card carries its water-column preview
+  if (window.suiteTab === 'sonar' && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: the Sonar tab cards carry the preview (the Holes tab has its own 2 s poll)
   if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
   $('holes').innerHTML = h;
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
@@ -611,7 +612,7 @@ $('followN').addEventListener('click', e => { const b = e.target.closest('[data-
 
 /* ---------- D82: live panels on the Holes tab: the whole water column of every streamed hole ---------- */
 const LP = { nodes: {}, busy: false, order: [] };   // per node: since, recs (last 240 pings), el
-function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0); }
+function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0).slice(0, 3); }
 function lpPoll() {
   if (window.suiteTab !== 'holes' || document.hidden || LP.busy) return;
   const ids = lpNodes(); if (!ids.length) return;
@@ -621,6 +622,7 @@ function lpPoll() {
   sfetch('/api/sonar/pings?nodes=' + ids.join(',') + '&since=' + ids.map(n => LP.nodes[n].since).join(',') + '&max=24&lite=1').then(r => r.json()).then(d => {
     (d.nodes || []).forEach(x => {
       const st = LP.nodes[x.node]; if (!st) return;
+      if (x.last != null && x.last < st.since) { st.since = 0; st.recs = []; }   // D82: the chalet restarted
       (x.pings || []).forEach(p => { st.since = Math.max(st.since, p[0]); const b = p[2] < 2047 ? p[2] / 100 : null;
         st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); });
       if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
@@ -638,6 +640,7 @@ function lpRender() {
   if (ids.join(',') !== LP.order.join(',')) {   // rebuild the panels only when the set changes
     g.innerHTML = ids.map(n => `<button type="button" class="lp${n === L.focus ? ' main' : ''}" data-lp="${n}"><span class="hd"><span class="nm">${nameOf(n)}</span><span class="st" data-lpst="${n}"></span></span><canvas data-lpc="${n}" aria-label="live water column"></canvas></button>`).join('');
     LP.order = ids.slice();
+    Object.keys(LP.nodes).forEach(k => { if (ids.indexOf(+k) < 0) delete LP.nodes[k]; });   // a hole that comes back later starts fresh
   }
   const acc = '#00B3D6', al = '#C2412D';
   ids.forEach(n => {
@@ -674,7 +677,8 @@ setInterval(() => { if (window.suiteTab === 'holes' && !document.hidden) loadLis
 $('stop').addEventListener('click', () => post({ focus: 0 }));
 
 function setFocus(n) {
-  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
+  focus = n; since = 0; )rawliteral"
+R"rawliteral(queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
   $('main').classList.toggle('nofocus', !n);
   $('ttl').textContent = n ? nameOf(n) : 'Sonar';
   $('sub').textContent = n ? 'Live sonar, about 1 s behind' + (L.sim ? ' · simulated pings' : '') : 'Pick a hole to stream it';
@@ -682,8 +686,7 @@ function setFocus(n) {
 }
 
 /* ---------- Pings -> display records ---------- */
-// p = [seq, index, bottom_cm, [[slot)rawliteral"
-R"rawliteral(, depth_cm, strength, width]], [[bin, level]], hard, nf_neg, [[slot, flick, spread, elen, mature]]]
+// p = [seq, index, bottom_cm, [[slot, depth_cm, strength, width]], [[bin, level]], hard, nf_neg, [[slot, flick, spread, elen, mature]]]
 function addPing(p) {
   const prev = recs.length ? recs[recs.length - 1] : null;
   const b = p[2] < 2047 ? p[2] / 100 : (prev ? prev.b : null);
@@ -1420,11 +1423,11 @@ function drawPmap() {
   }
   // legend line, chips, hint
   const S = pm.src, srcTxt = !org ? 'no tiles until the chalet has its GPS origin (OLED: GPS / pin holes → Chalet here)' :
-    (bg ? (S.net ? 'online' : '') + (S.idb ? (S.net ? ' + ' : '') + 'phone cache' : '') + (S.chalet ? ((S.net || S.idb) ? ' + ' : '') + 'chalet store' : '') + (S.miss ? ` · ${S.miss} tile${S.miss > 1 ? 's' : ''} missing offline` : '') : (pmOnline() ? 'loading…' : 'offline: no tile of this area saved'));
+    (bg ? (S.net ? 'online' : '') + (S.idb ? (S.net ? ' + ' : '') + 'phone cache' : '') + (S.chalet ? ((S.net || S.idb) ? ' + ' : '') + 'chalet store' : '') + (S.miss ? ` · ${S.miss} tile${S.miss > 1 ? 's' : ''} missing offline` : ''))rawliteral"
+R"rawliteral( : (pmOnline() ? 'loading…' : 'offline: no tile of this area saved'));
   $('pmBg').textContent = (pm.layer === 'sat' ? 'satellite' : 'map') + (pm.depth ? ' + depth' : '') + (srcTxt ? ' · ' + srcTxt : '') + (ctr ? ' · depth contours' : '');
   const un = holes.filter(x => !x.placed);
-  $('pmChips').innerHTML = un.map(x => `<button class="btn ghost" type="button" data-pm="${x.id}" aria-pressed="${pm.sel === x.id}">${esc(x.name)} · not on map</b)rawliteral"
-R"rawliteral(utton>`).join('');
+  $('pmChips').innerHTML = un.map(x => `<button class="btn ghost" type="button" data-pm="${x.id}" aria-pressed="${pm.sel === x.id}">${esc(x.name)} · not on map</button>`).join('');
   const plc = pm.placing != null ? holes.find(x => x.id === pm.placing) : null;
   $('pmHint').textContent = pm.msg ? pm.msg : (plc ? `Tap the map where ${plc.name} is` + (plc.placed ? ', or drag its marker.' : '.') : (pm.saving ? pm.saving : (un.length ? `${un.length} hole${un.length > 1 ? 's' : ''} not on the map: tap its name, then "Pin here" (box at the hole) or "Tap the map".` : (known.length < 3 ? 'Depth shading between holes needs 3 holes with a sonar bottom.' : ''))));
   pmSheetRender();

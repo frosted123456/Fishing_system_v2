@@ -367,7 +367,8 @@ void networkPage(u8g2_t* u, const ScreenModel& m) {
   else snprintf(s, sizeof(s), "Link: %s", trName(m.transport));
   u8g2_DrawStr(u, 0, 22, s);
   char busy[8]; if (m.busy_pct <= 100) snprintf(busy, sizeof(busy), "%u%%", m.busy_pct); else snprintf(busy, sizeof(busy), "-");
-  snprintf(s, sizeof(s), "LoRa ch%u %u.%uMHz %s %s", m.lora_ch, m.lora_mhz_x10 / 10, m.lora_mhz_x10 % 10, m.ch_auto ? "Auto" : "fixed", m.chalet ? busy : "");
+  if (m.chalet) snprintf(s, sizeof(s), "LoRa ch%u %u.%u %s %s", m.lora_ch, m.lora_mhz_x10 / 10, m.lora_mhz_x10 % 10, m.ch_auto ? "Auto" : "fixed", busy);   // review: "MHz" dropped so the activity % fits 128 px
+  else snprintf(s, sizeof(s), "LoRa ch%u %u.%uMHz %s", m.lora_ch, m.lora_mhz_x10 / 10, m.lora_mhz_x10 % 10, m.ch_auto ? "Auto" : "fixed");
   u8g2_DrawStr(u, 0, 31, s);
   if (m.chalet) {
     int x = 0, y = 41;

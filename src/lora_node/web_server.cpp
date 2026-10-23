@@ -896,7 +896,7 @@ void handleWebApiSonarPings() {
   const uint8_t m = (uint8_t)(mx < 1 ? 1 : (mx > 64 ? 64 : mx));
   const bool lite = server.arg("lite") == "1";   // D82: bottom + targets only (the Live card), ~1/3 of the bytes
   if (server.hasArg("nodes")) {   // D82: several holes in one request: nodes=a,b,c & since=s1,s2,s3
-    String ns = server.arg("nodes"), ss = server.arg("since"), out; out.reserve(600 * 3); out = "{\"nodes\":[";
+    String ns = server.arg("nodes"), ss = server.arg("since"), out; out.reserve(3 * (100 + m * 130)); out = "{\"nodes\":[";
     int pn = 0, ps = 0, k = 0;
     while (pn < (int)ns.length() && k < 3) {
       int en = ns.indexOf(',', pn); if (en < 0) en = ns.length();

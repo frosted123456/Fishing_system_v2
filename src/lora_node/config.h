@@ -25,7 +25,7 @@
 // Not legal advice.
 #define LORA_FREQUENCY      915.0       // MHz, channel centre (914.75-915.25 MHz at 500 kHz)
 #define LORA_CODING_RATE    5           // 4/5 (must match radio_modes.h airtime: cr_denom = 5)
-#define LORA_SYNC_WORD      0x34        // Private sync (default 0x12 is public)
+#define LORA_SYNC_WORD      0x34        // 0x34 = the LoRaWAN public sync word, 0x12 = private (comment was reversed; kept at 0x34: every board must match)
 #define LORA_TX_POWER       20          // Higher power (was 17, max 22)
 #define LORA_PREAMBLE       8           // 8 symbols minimum reliable (saves ~40ms)
 
@@ -212,6 +212,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #ifndef SONAR_BENCH
 #define SONAR_BENCH         0           // 1 = bucket test: a BENCH line on Serial every 2 s (env hub_sonar_bench)
 #endif
+#define SONAR_PING_FOCUS_EST_US 90000UL   // est.: focus ping = avg 1, 3 captures
 #define SONAR_PING_EST_US   160000UL    // est.: one ping = up to 6 captures x ~21 ms + settle + jitter (3 freqs, avg 2); the capture is pushed
                                         // to the next tick when a LoRa transmit is planned inside this window
 #define SONAR_RF_GUARD_US   2000UL      // quiet time after the last transmit before a capture (as the WROOM, D54)

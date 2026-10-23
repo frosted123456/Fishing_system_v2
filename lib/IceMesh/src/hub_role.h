@@ -117,6 +117,7 @@ class HubRole {
     if (!decodeBeacon(p, len, network_id, b, t) || t != PT_BEACON) return false;
     eb_beacons_rx++;
     applyInfo(b, cmd_out);
+    { const uint32_t f = b.frame_10ms ? b.frame_10ms * 10UL : 1000UL; const uint32_t n = 4000UL / f; sonar.max_age_frames = n < 1 ? 1 : static_cast<uint16_t>(n); }   // review: backbone-only hubs follow the frame length too
     return true;
   }
 

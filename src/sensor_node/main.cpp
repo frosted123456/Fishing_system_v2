@@ -521,7 +521,8 @@ void loop() {
 
   // Check reed switch
   bool currentReed = readReedSwitch();
-  static bool lastReed = false;
+  static bool lastReed = false; static bool lastReedInit = false;
+  if (!lastReedInit) { lastReedInit = true; lastReed = HAS_FLAG(currentFlags, FLAG_FISH_ON); }   // review: a trip already alerted in setup() (EXT0 wake) is not alerted again here
   
   if (currentReed != lastReed) {
     lastReed = currentReed;
@@ -1884,6 +1885,7 @@ void sonarLoop() {
   if (sonarSimOn && !started) {
     src.begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());
     started = true; lastTick = millis(); lastCtrl = millis();
+    focus = sonarCtrlFocus;   // review: the control that started the sonar already said whether this hole is streamed
   }
   if (!sonarSimOn) {
     if (started) {
@@ -1903,7 +1905,8 @@ void sonarLoop() {
     return;
   }
   if (millis() - lastTick > 1000UL) lastTick = millis() - 250UL;           // don't burst after a stall
-  while (millis() - lastTick >= 250UL) {                                     // 4 pings/s
+  uint8_t tickBudget = 2;                                                    // review: a ping slower than the tick must not keep loop() here
+  while (tickBudget-- && millis() - lastTick >= 250UL) {                     // 4 pings/s
     lastTick += 250UL;
     icemesh::sonar::Block out[2];
     static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0;
