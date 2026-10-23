@@ -462,7 +462,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <h3>LoRa &amp; relays</h3>
       <div class="form">
         <label class="f">LoRa channel<select id="nCh"><option value="auto">Auto (moves when busy)</option><option value="1">1 · 915.0 MHz</option><option value="2">2 · 904.0 MHz</option><option value="3">3 · 907.0 MHz</option><option value="4">4 · 910.0 MHz</option><option value="5">5 · 913.0 MHz</option><option value="6">6 · 918.0 MHz</option><option value="7">7 · 921.0 MHz</option><option value="8">8 · 924.0 MHz</option></select><small id="nChInfo"></small></label>
-        <div><span class="hint">Activity heard by the chalet per channel (other LoRa users, %)</span><div class="busy" id="nBusy"></div></div>
+        <div><span class="hint">Activity heard by the chalet per channel (% of the time a signal is 8 dB above that channel's noise floor)</span><div class="busy" id="nBusy"></div></div>
         <div><button class="btn" id="nScan" type="button">Check channels now</button></div>
         <div><span class="hint">ESP-NOW relays (rebroadcast between hubs and the chalet, max 2 in a row)</span><div id="nRelays"></div></div>
         <p class="hint" style="margin:0">Hubs follow these settings through the beacon: nothing to reprogram on the ice. A channel change is announced 6 beacons ahead.</p>

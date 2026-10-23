@@ -104,7 +104,7 @@ static uint8_t g_self = 0;
 
 // ---- v2 network config: LoRa channel, transport, ESP-NOW backbone (docs/protocol_v2.md §6c) ----
 // Values marked est. come from the simulation (docs/SIM_RESULTS.md), not from field measurements.
-static const float BUSY_DBM = -100.0f;          // est.: RSSI above this on a channel counts as foreign activity
+static const int16_t BUSY_ABOVE_X10 = 80;       // est.: a sample 8 dB above the channel's own noise floor counts as activity (D84h)
 static const uint8_t CH_BUSY_PCT = 25;          // est.: Auto moves away from a channel busier than this...
 static const uint8_t CH_BETTER_PCT = 15;        // ...when another one is quieter by at least this much
 static const uint32_t CH_EVAL_MS = 60000;
@@ -130,6 +130,10 @@ static volatile uint8_t g_cfg_channel = MESH_CH_AUTO;
 static volatile bool g_cfg_rescan = false;
 static volatile uint8_t g_busy_pct[LORA_CHANNELS] = {255, 255, 255, 255, 255, 255, 255, 255};
 static uint32_t g_busy_n[LORA_CHANNELS], g_busy_hit[LORA_CHANNELS];   // radio task only
+// D84h: noise floor per channel, dBm x10, the lowest sample seen (0 = none yet); raised 1 dB at each publish so it
+// follows a floor that goes up, pulled straight down by any quieter sample. A fixed -100 dBm threshold read
+// 70-98 % on every channel indoors: the BW500 floor sits near -105 and the Heltec's own noise peaks above -100.
+static volatile int16_t g_floor_x10[LORA_CHANNELS];
 static uint8_t g_scan_rr = 0;
 static uint32_t g_ch_eval_ms = 0;
 static volatile uint16_t g_ch_moves = 0;
@@ -266,8 +270,10 @@ static void tune(uint8_t ch) {
 // One instantaneous RSSI sample (radio in RX) for the activity meter of channel ch.
 static inline void busySample(uint8_t ch) {
   if (ch >= LORA_CHANNELS) return;
+  const int16_t x = static_cast<int16_t>(radio.getRSSI(false) * 10.0f);
+  if (g_floor_x10[ch] == 0 || x < g_floor_x10[ch]) { g_floor_x10[ch] = x; return; }   // a new floor is never "busy"
   g_busy_n[ch]++;
-  if (radio.getRSSI(false) > BUSY_DBM) g_busy_hit[ch]++;
+  if (x > g_floor_x10[ch] + BUSY_ABOVE_X10) g_busy_hit[ch]++;
 }
 
 // waitIrq() that also samples the RSSI about once per ms (FreeRTOS tick) while waiting.
@@ -305,6 +311,7 @@ static void busyPublish() {
   for (uint8_t c = 0; c < LORA_CHANNELS; c++) {
     if (g_busy_n[c] >= 50) g_busy_pct[c] = static_cast<uint8_t>((g_busy_hit[c] * 100UL + g_busy_n[c] / 2) / g_busy_n[c]);
     g_busy_n[c] /= 2; g_busy_hit[c] /= 2;
+    if (g_floor_x10[c] != 0) g_floor_x10[c] = g_floor_x10[c] + 10;   // 1 dB per eval; the next quieter sample pulls it down
   }
 }
 
@@ -1448,7 +1455,9 @@ void meshPrintStatus(Print& out) {
       if (g_busy_pct[c] == 255) out.printf(" %.0f:-", loraChannelMHz(c));
       else out.printf(" %.0f:%u", loraChannelMHz(c), g_busy_pct[c]);
     }
-    out.printf(" | moves %u\n", g_ch_moves);
+    out.printf(" | moves %u\n[net] noise floor dBm:", g_ch_moves);
+    for (uint8_t c = 0; c < LORA_CHANNELS; c++) { if (g_floor_x10[c] == 0) out.print(" -"); else out.printf(" %d", g_floor_x10[c] / 10); }
+    out.println();
   }
 }
 

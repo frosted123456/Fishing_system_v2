@@ -33,6 +33,8 @@ static uint32_t g_tileCount = 0, g_tileBytes = 0;   // counted at boot, kept up 
 static const size_t FS_RESERVE = 96UL * 1024UL;     // LittleFS needs free blocks to stay healthy
 
 static void packRecount();
+static void fsUsedRecount();
+static size_t g_fsUsed = 0; static uint32_t g_fsUsedAt = 0;
 static void tileRecount() {
   g_tileCount = 0; g_tileBytes = 0;
   File d = LittleFS.open("/t"); if (!d || !d.isDirectory()) return;
@@ -45,12 +47,22 @@ bool mapPackSetup() {
   if (!g_fsOk) { Serial.println(F("MAP: LittleFS mount failed (no map pack storage)")); return false; }
   MAP_MAX_BYTES = LittleFS.totalBytes() > 160UL * 1024UL ? LittleFS.totalBytes() - 128UL * 1024UL : 32UL * 1024UL;
   if (!LittleFS.exists("/t")) LittleFS.mkdir("/t");
-  tileRecount(); packRecount();
-  Serial.printf("MAP: LittleFS %u KB used of %u KB, pack %u bytes, %lu tiles (%lu KB)\n", (unsigned)(LittleFS.usedBytes() / 1024), (unsigned)(LittleFS.totalBytes() / 1024), (unsigned)mapPackBytes(), (unsigned long)g_tileCount, (unsigned long)(g_tileBytes / 1024));
+  tileRecount(); packRecount(); fsUsedRecount();
+  Serial.printf("MAP: LittleFS %u KB used of %u KB, pack %u bytes, %lu tiles (%lu KB)\n", (unsigned)(g_fsUsed / 1024), (unsigned)(LittleFS.totalBytes() / 1024), (unsigned)mapPackBytes(), (unsigned long)g_tileCount, (unsigned long)(g_tileBytes / 1024));
   return true;
 }
 
-size_t mapFree() { return !g_fsOk || LittleFS.totalBytes() < LittleFS.usedBytes() + FS_RESERVE ? 0 : LittleFS.totalBytes() - LittleFS.usedBytes() - FS_RESERVE; }
+// D84g: LittleFS.usedBytes() walks the whole partition (4.8 MB: ~600 ms, seen as /api/tiles in the PERF line, and it
+// ran twice per tile upload and every 10 s of a range test). The used count is cached: exact after a mount or a
+// clear, each store adds its bytes rounded up to the 4 KB block, and a count older than a minute is redone when
+// asked (so the range-test log, written elsewhere, is seen within a minute).
+static void fsUsedRecount() { g_fsUsed = g_fsOk ? LittleFS.usedBytes() : 0; g_fsUsedAt = millis(); }
+static void fsUsedAdd(size_t bytes) { g_fsUsed += ((bytes + 4095) / 4096) * 4096 + 4096; }
+size_t mapFree() {
+  if (!g_fsOk) return 0;
+  if (millis() - g_fsUsedAt > 60000) fsUsedRecount();
+  return LittleFS.totalBytes() < g_fsUsed + FS_RESERVE ? 0 : LittleFS.totalBytes() - g_fsUsed - FS_RESERVE;
+}
 
 // ---- tiles ------------------------------------------------------------------------------------------------
 static bool tilePath(char* out, size_t n) {   // from the request's l/z/x/y; false = bad request
@@ -89,7 +101,7 @@ void handleWebApiTileUpload() {
     if (g_up) g_up.close();
     if (!g_tileFail && g_tileUpBytes > 0) {
       if (LittleFS.exists(g_tilePath)) { File o = LittleFS.open(g_tilePath, "r"); if (o) { g_tileBytes -= o.size(); g_tileCount--; o.close(); } LittleFS.remove(g_tilePath); }
-      LittleFS.rename("/t/_up", g_tilePath); g_tileCount++; g_tileBytes += g_tileUpBytes;
+      LittleFS.rename("/t/_up", g_tilePath); g_tileCount++; g_tileBytes += g_tileUpBytes; fsUsedAdd(g_tileUpBytes);
     } else { LittleFS.remove("/t/_up"); if (!g_tileFail) { g_tileFail = true; g_tileErr = "empty"; } }
   } else { if (g_up) g_up.close(); LittleFS.remove("/t/_up"); g_tileFail = true; g_tileErr = "aborted"; }
 }
@@ -112,7 +124,7 @@ void handleWebApiTilesClear() {
         for (File f = d.openNextFile(); f; f = d.openNextFile()) { if (f.isDirectory()) continue; if (n < 64) names[n++] = f.path(); else more = true; }
         for (int i = 0; i < n; i++) LittleFS.remove(names[i]); }
     }
-    tileRecount();
+    tileRecount(); fsUsedRecount();
   }
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -128,7 +140,7 @@ static void packRecount() {
 }
 size_t mapPackBytes() { return g_packBytes; }
 
-bool mapPackClear() { if (!g_fsOk) return false; if (LittleFS.exists(MAP_PATH)) LittleFS.remove(MAP_PATH); g_packBytes = 0; return true; }
+bool mapPackClear() { if (!g_fsOk) return false; if (LittleFS.exists(MAP_PATH)) LittleFS.remove(MAP_PATH); g_packBytes = 0; fsUsedRecount(); return true; }
 
 // ---- PIN ----------------------------------------------------------------------------------------------------
 bool webPinOk() {
@@ -165,7 +177,7 @@ void handleWebApiMapPackUpload() {   // multipart body of POST /api/map/pack: ru
     g_upBytes += up.currentSize;
   } else if (up.status == UPLOAD_FILE_END) {
     if (g_up) g_up.close();
-    if (!g_upFail && g_upBytes > 0) { LittleFS.remove(MAP_PATH); LittleFS.rename("/map_pack.tmp", MAP_PATH); g_packBytes = g_upBytes; Serial.printf("MAP: pack stored, %u bytes\n", (unsigned)g_upBytes); }
+    if (!g_upFail && g_upBytes > 0) { LittleFS.remove(MAP_PATH); LittleFS.rename("/map_pack.tmp", MAP_PATH); g_packBytes = g_upBytes; fsUsedAdd(g_upBytes); Serial.printf("MAP: pack stored, %u bytes\n", (unsigned)g_upBytes); }
     else { LittleFS.remove("/map_pack.tmp"); if (!g_upFail) { g_upFail = true; g_upErr = "empty"; } }
   } else {   // UPLOAD_FILE_ABORTED
     if (g_up) g_up.close(); LittleFS.remove("/map_pack.tmp"); g_upFail = true; g_upErr = "aborted";
