@@ -130,9 +130,11 @@ static volatile uint8_t g_cfg_channel = MESH_CH_AUTO;
 static volatile bool g_cfg_rescan = false;
 static volatile uint8_t g_busy_pct[LORA_CHANNELS] = {255, 255, 255, 255, 255, 255, 255, 255};
 static uint32_t g_busy_n[LORA_CHANNELS], g_busy_hit[LORA_CHANNELS];   // radio task only
-// D84h: noise floor per channel, dBm x10, the lowest sample seen (0 = none yet); raised 1 dB at each publish so it
-// follows a floor that goes up, pulled straight down by any quieter sample. A fixed -100 dBm threshold read
-// 70-98 % on every channel indoors: the BW500 floor sits near -105 and the Heltec's own noise peaks above -100.
+// D84h/i: noise floor per channel = the running MEDIAN of the RSSI samples, dBm x10 (0 = none yet): each sample
+// moves it 0.1 dB towards itself, so it settles where half the samples are below. (D84h tracked the lowest sample:
+// the SX1262 instantaneous RSSI jitters ±10 dB, one low outlier became the floor and everything read 99 %.) A fixed
+// -100 dBm threshold read 70-98 % on every channel indoors: the BW500 floor sits near -105 and the board's own
+// noise peaks above -100. With the median, quiet noise gives a few %, a real transmitter on the channel much more.
 static volatile int16_t g_floor_x10[LORA_CHANNELS];
 static uint8_t g_scan_rr = 0;
 static uint32_t g_ch_eval_ms = 0;
@@ -271,7 +273,8 @@ static void tune(uint8_t ch) {
 static inline void busySample(uint8_t ch) {
   if (ch >= LORA_CHANNELS) return;
   const int16_t x = static_cast<int16_t>(radio.getRSSI(false) * 10.0f);
-  if (g_floor_x10[ch] == 0 || x < g_floor_x10[ch]) { g_floor_x10[ch] = x; return; }   // a new floor is never "busy"
+  if (g_floor_x10[ch] == 0) { g_floor_x10[ch] = x; return; }
+  g_floor_x10[ch] = g_floor_x10[ch] + (x < g_floor_x10[ch] ? -1 : 1);
   g_busy_n[ch]++;
   if (x > g_floor_x10[ch] + BUSY_ABOVE_X10) g_busy_hit[ch]++;
 }
@@ -311,7 +314,6 @@ static void busyPublish() {
   for (uint8_t c = 0; c < LORA_CHANNELS; c++) {
     if (g_busy_n[c] >= 50) g_busy_pct[c] = static_cast<uint8_t>((g_busy_hit[c] * 100UL + g_busy_n[c] / 2) / g_busy_n[c]);
     g_busy_n[c] /= 2; g_busy_hit[c] /= 2;
-    if (g_floor_x10[c] != 0) g_floor_x10[c] = g_floor_x10[c] + 10;   // 1 dB per eval; the next quieter sample pulls it down
   }
 }
 

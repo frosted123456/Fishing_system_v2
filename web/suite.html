@@ -555,7 +555,8 @@ function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Cont
 // v2: one request of each kind at a time (the ESP32 serves one request at a time; overlapping polls piled up)
 let listBusy = false, pingBusy = false;
 const sfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
-function loadList() { if (listBusy) return; listBusy = true; sfetch('/api/sonar').then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}).then(() => { listBusy = false; }); }
+function applyList(d) { L = d; renderHoles(); }
+function loadList() { if (listBusy) return; listBusy = true; sfetch('/api/sonar').then(r => r.json()).then(applyList).catch(() => {}).then(() => { listBusy = false; }); }
 function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }
 function setBeam(deg) { if (deg >= 5 && deg <= 60 && deg !== beamDeg) { beamDeg = deg; if (recs.length && visible()) drawOverlay(); } }   // called by the suite with /api/status
 function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
@@ -593,7 +594,7 @@ function renderHoles() {
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
   { const fo = L.follow !== false; $('follow').setAttribute('aria-pressed', String(fo));   // D80
     $('followWhy').textContent = !fo ? 'off: you pick the hole' : L.trip_s ? `FISH ON — back to following in ${Math.ceil(L.trip_s / 10) * 10} s` :
-      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish');
+      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min (tap Follow to resume now)` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish');
     const extra = (L.live || []).filter(x => x !== L.focus);   // D81: more holes stream when the radio has room
     if (extra.length) $('followWhy').textContent += ` · also live: ${extra.map(nameOf).join(', ')}`; }
   if (window.suiteTab === 'holes') lpRender();   // D82
@@ -602,28 +603,31 @@ function renderHoles() {
 }
 $('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
 $('sim').addEventListener('click', () => post({ sim: !L.sim }));
-$('follow').addEventListener('click', () => post({ follow: !(L.follow !== false) }));   // D80
-$('follow2').addEventListener('click', () => post({ follow: !(L.follow !== false) }));  // D82: same button on the Holes tab
+// D80 / D85: a tap while a hand pick is holding the watched hole hands it back to Follow at once, instead of turning Follow off
+const followTap = () => post({ follow: (L.follow !== false && L.pin_s > 0) ? true : !(L.follow !== false) });
+$('follow').addEventListener('click', followTap);
+$('follow2').addEventListener('click', followTap);   // D82: same button on the Holes tab
 $('followN').addEventListener('click', e => { const b = e.target.closest('[data-fn]'); if (b) post({ follow_n: +b.dataset.fn }); });
 
 /* ---------- D82: live panels on the Holes tab: the whole water column of every streamed hole ---------- */
 const LP = { nodes: {}, busy: false, order: [] };   // per node: since, recs (last 240 pings), el
 function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0).slice(0, 3); }
-function lpPoll() {
-  if (window.suiteTab !== 'holes' || document.hidden || LP.busy) return;
-  const ids = lpNodes(); if (!ids.length) return;
-  LP.busy = true;
+// D85: the Live card is fed by the suite's merged Holes-tab poll (/api/poll, every second): lpArgs() gives the
+// query part (every streaming hole, bottom + targets only), lpApply() takes the "pings" part of the answer.
+function lpArgs() {
+  const ids = lpNodes(); if (!ids.length) return '';
   ids.forEach(n => { if (!LP.nodes[n]) LP.nodes[n] = { since: 0, recs: [] }; });
-  // one request for every streaming hole, bottom + targets only (the chalet serves one request at a time)
-  sfetch('/api/sonar/pings?nodes=' + ids.join(',') + '&since=' + ids.map(n => LP.nodes[n].since).join(',') + '&max=24&lite=1').then(r => r.json()).then(d => {
-    (d.nodes || []).forEach(x => {
-      const st = LP.nodes[x.node]; if (!st) return;
-      if (x.last != null && x.last < st.since) { st.since = 0; st.recs = []; }   // D82: the chalet restarted
-      (x.pings || []).forEach(p => { st.since = Math.max(st.since, p[0]); const b = p[2] < 2047 ? p[2] / 100 : null;
-        st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); });
-      if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
-    });
-  }).catch(() => {}).then(() => { LP.busy = false; lpRender(); });
+  return '&nodes=' + ids.join(',') + '&since=' + ids.map(n => LP.nodes[n].since).join(',') + '&max=24&lite=1';
+}
+function lpApply(d) {
+  ((d && d.nodes) || []).forEach(x => {
+    const st = LP.nodes[x.node]; if (!st) return;
+    if (x.last != null && x.last < st.since) { st.since = 0; st.recs = []; }   // D82: the chalet restarted
+    (x.pings || []).forEach(p => { st.since = Math.max(st.since, p[0]); const b = p[2] < 2047 ? p[2] / 100 : null;
+      st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); });
+    if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
+  });
+  lpRender();
 }
 function lpRender() {
   const ids = lpNodes(), g = $('lpgrid');
@@ -668,8 +672,6 @@ function lpRender() {
   });
 }
 $('lpgrid').addEventListener('click', e => { const b = e.target.closest('[data-lp]'); if (!b) return; post({ focus: +b.dataset.lp }).then(() => { if (window.suiteShowTab) window.suiteShowTab('sonar'); }); });
-setInterval(lpPoll, 2000);
-setInterval(() => { if (window.suiteTab === 'holes' && !document.hidden) loadList(); }, 3000);   // D82: the live card needs the list on the Holes tab too
 $('stop').addEventListener('click', () => post({ focus: 0 }));
 
 function setFocus(n) {
@@ -1021,7 +1023,8 @@ new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(
 window.sonarApi = {
   list: () => L, fmtD: m => fmtD(m), HARD, onStatus, setBeam,
   focus: n => post({ focus: n }), setSim: on => post({ sim: on }),
-  show: () => { loadList(); requestAnimationFrame(() => { if (focus) { loadPings(); render(); } }); }
+  show: () => { loadList(); requestAnimationFrame(() => { if (focus) { loadPings(); render(); } }); },
+  lpArgs, lpApply, applyList   // D85: for the merged Holes-tab poll
 };
 syncControls(); loadList();
 })();
@@ -1121,8 +1124,9 @@ function armButton(n) {
   }
   return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="D61: same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>`;
 }
+function applyStatus(d) { st = d; onStatus(); if (tab === 'settings') { renderNetwork(); stFillHoles(); } }
 function loadStatus() {
-  return api('/api/status').then(d => { st = d; onStatus(); if (tab === 'settings') { renderNetwork(); stFillHoles(); } }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+  return api('/api/status').then(applyStatus).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
 }
 function onStatus() {
   const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
@@ -1209,17 +1213,27 @@ function renderNodes() {
 
 /* ---------- Sonar at a glance: last ~3 min of every hole (summaries every 2 s) ---------- */
 const glance = { frame: 0, nodes: {} };
-function loadGlance() {
-  return api('/api/sonar/glance?since=' + glance.frame).then(d => {
-    if (glance.frame && ((d.frame - glance.frame) & 0xFFFF) > 0x8000) { glance.frame = 0; glance.nodes = {}; return; }   // chalet restarted
-    (d.nodes || []).forEach(x => {
-      const g = glance.nodes[x.node] || (glance.nodes[x.node] = { recs: [] });
-      g.hub = x.hub; g.hard = x.hard; g.act = x.act;
-      g.recs = g.recs.concat(x.recs || []).slice(-90);
-    });
-    glance.frame = d.frame;
-    drawGlances();
-  }).catch(() => {});
+function applyGlance(d) {
+  if (glance.frame && ((d.frame - glance.frame) & 0xFFFF) > 0x8000) { glance.frame = 0; glance.nodes = {}; return; }   // chalet restarted
+  (d.nodes || []).forEach(x => {
+    const g = glance.nodes[x.node] || (glance.nodes[x.node] = { recs: [] });
+    g.hub = x.hub; g.hard = x.hard; g.act = x.act;
+    g.recs = g.recs.concat(x.recs || []).slice(-90);
+  });
+  glance.frame = d.frame;
+  drawGlances();
+}
+function loadGlance() { return api('/api/sonar/glance?since=' + glance.frame).then(applyGlance).catch(() => {}); }
+// D85: the Holes tab asks for everything it shows in ONE request a second (status, hole list, glance delta, live
+// pings): the chalet serves one client at a time, and four separate 2 s polls landing together waited for each other.
+function loadHoles() {
+  const son = SON();
+  return api('/api/poll?glance=' + glance.frame + (son ? son.lpArgs() : '')).then(d => {
+    if (d.status) applyStatus(d.status);
+    if (son && d.sonar) son.applyList(d.sonar);
+    if (d.glance) applyGlance(d.glance);
+    if (son && d.pings) son.lpApply(d.pings);
+  }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
 }
 function cssVar(n, f) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || f; }
 // v2 (D42) depth scale of the hole cards: same auto scale for all, each hole its own auto scale, or fixed
@@ -2011,12 +2025,12 @@ $('rtStop').addEventListener('click', () => api('/api/rangetest', { stop: true }
 syncSound();
 showTab(initialTab());
 loadStatus();
-const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance), pRange = poll('range', loadRange);
+const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance), pRange = poll('range', loadRange), pHoles = poll('holes', loadHoles);
 window.suiteGlance = pGlance;
-setInterval(pStatus, 2000);
+setInterval(() => { if (tab !== 'holes' || document.hidden) pStatus(); }, 2000);   // D85: on the Holes tab the merged poll carries the status
 setInterval(() => { if (tab === 'radio') { pRadio(); pRange(); } }, 2000);
 setInterval(() => { if (tab === 'settings') { pRadio(); pSim(); } }, 5000);
-setInterval(() => { if (tab === 'holes') pGlance(); }, 2000);
+setInterval(() => { if (tab === 'holes' && !document.hidden) pHoles(); }, 1000);   // D85: status + list + glance + live pings, one request
 })();
 </script>
 </body>

@@ -1,6 +1,9 @@
 // Chalet / hub web server: routes, JSON API, remote config (split out of main.cpp, D49).
 #include "chalet.h"
 #include <ESPmDNS.h>
+static String statusJson();
+static String pingsMultiJson(const String& ns, const String& ss, uint8_t m, bool lite);
+static uint8_t pingsMax();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WEB SERVER
@@ -58,6 +61,19 @@ void setupWebServer() {
   POST_PIN("/api/sonar/knobs", handleWebApiKnobsPost);
   POST_PIN("/api/sim", handleWebApiSimPost);
   server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
+  // D85: the Holes tab's four polls in one request (the server takes one client at a time: four 2 s polls landing
+  // together queued behind each other). ?glance=<frame>&nodes=a,b&since=s1,s2&max=24&lite=1 ->
+  // {"status":{..},"sonar":{..},"glance":{..},"pings":{..}} (pings only when nodes= is given)
+  server.on("/api/poll", HTTP_GET, []() {
+    const uint16_t gs = (uint16_t)strtoul(server.arg("glance").c_str(), nullptr, 10);
+    String out; out.reserve(7000);
+    out = "{\"status\":"; out += statusJson();
+    out += ",\"sonar\":"; out += meshSonarListJson();
+    out += ",\"glance\":"; out += meshSonarGlanceJson(gs);
+    if (server.hasArg("nodes")) { out += ",\"pings\":"; out += pingsMultiJson(server.arg("nodes"), server.arg("since"), pingsMax(), server.arg("lite") == "1"); }
+    out += "}";
+    server.send(200, "application/json", out);
+  });
   server.on("/api/sonar/bg", HTTP_GET, handleWebApiSonarBg);
 
 #undef POST_PIN
@@ -70,11 +86,11 @@ void setupWebServer() {
 }
 
 // D84e/g: per-URI timing for the serial PERF line: every request handled (the pass of handleClient() that served it,
-// parse + handler + send), avg and max, up to 8 URIs (query string dropped). server.uri() is cleared once the request
+// parse + handler + send), avg and max, up to 12 URIs (query string dropped). server.uri() is cleared once the request
 // is done, so a spy handler registered first notes it: canHandle() is asked in registration order for every request
 // (it always says no, the real handlers follow).
 struct WebStat { char uri[28]; uint32_t sum_ms, max_ms, n; };
-static WebStat g_webStat[8];
+static WebStat g_webStat[12];
 static char g_webUri[28] = ""; static uint32_t g_webReqs = 0;
 struct WebUriSpy : public RequestHandler {
   bool canHandle(HTTPMethod, String uri) override { strlcpy(g_webUri, uri.c_str(), sizeof(g_webUri)); g_webReqs++; return false; }
@@ -87,13 +103,13 @@ void loopWebServer() {
   if (g_webReqs == r0) return;   // nothing served in this pass (the idle pass is a delay(1))
   const uint32_t d = millis() - t0;
   int k = -1;
-  for (int i = 0; i < 8; i++) { if (g_webStat[i].n && strcmp(g_webUri, g_webStat[i].uri) == 0) { k = i; break; } if (!g_webStat[i].n && k < 0) k = i; }
-  if (k < 0) return;   // more than 8 different URIs: the rest are not counted
+  for (int i = 0; i < 12; i++) { if (g_webStat[i].n && strcmp(g_webUri, g_webStat[i].uri) == 0) { k = i; break; } if (!g_webStat[i].n && k < 0) k = i; }
+  if (k < 0) return;   // more than 12 different URIs: the rest are not counted
   if (!g_webStat[k].n) { strlcpy(g_webStat[k].uri, g_webUri, sizeof(g_webStat[k].uri)); g_webStat[k].sum_ms = 0; g_webStat[k].max_ms = 0; }
   g_webStat[k].n++; g_webStat[k].sum_ms += d; if (d > g_webStat[k].max_ms) g_webStat[k].max_ms = d;
 }
 void webPerfPrint() {   // called by perfPrint(), then cleared
-  for (int i = 0; i < 8; i++) if (g_webStat[i].n)
+  for (int i = 0; i < 12; i++) if (g_webStat[i].n)
     Serial.printf("  web  %-26s x%-3lu avg %4lu ms  max %4lu ms\n", g_webStat[i].uri, (unsigned long)g_webStat[i].n, (unsigned long)(g_webStat[i].sum_ms / g_webStat[i].n), (unsigned long)g_webStat[i].max_ms);
   memset(g_webStat, 0, sizeof(g_webStat));
 }
@@ -114,7 +130,8 @@ void handleWebRoot() {
   server.send_P(200, "text/html", reinterpret_cast<PGM_P>(SUITE_PAGE_GZ), SUITE_PAGE_GZ_LEN);
 }
 
-void handleWebApi() {
+void handleWebApi() { server.send(200, "application/json", statusJson()); }
+static String statusJson() {
   // BUG FIX #10 / v2: sized for the node count (up to MAX_NODES = 48, ~240 B each incl. copied strings)
   DynamicJsonDocument doc(1664 + 352 * (size_t)network.node_count);   // D80: +follow   // D70 review: 16-19 members per node now
   doc["network_id"] = network.network_id;
@@ -205,7 +222,7 @@ void handleWebApi() {
 
   String json;
   serializeJson(doc, json);
-  server.send(200, "application/json", json);
+  return json;
 }
 
 /*
@@ -924,24 +941,25 @@ void handleWebApiSonarPost() {
   server.send(200, "application/json", meshSonarListJson());
 }
 
-void handleWebApiSonarPings() {
-  const int mx = server.hasArg("max") ? server.arg("max").toInt() : 40;
-  const uint8_t m = (uint8_t)(mx < 1 ? 1 : (mx > 64 ? 64 : mx));
-  const bool lite = server.arg("lite") == "1";   // D82: bottom + targets only (the Live card), ~1/3 of the bytes
-  if (server.hasArg("nodes")) {   // D82: several holes in one request: nodes=a,b,c & since=s1,s2,s3
-    String ns = server.arg("nodes"), ss = server.arg("since"), out; out.reserve(3 * (100 + m * 130)); out = "{\"nodes\":[";
-    int pn = 0, ps = 0, k = 0;
-    while (pn < (int)ns.length() && k < 3) {
-      int en = ns.indexOf(',', pn); if (en < 0) en = ns.length();
-      int es = ss.indexOf(',', ps); if (es < 0) es = ss.length();
-      const int node = ns.substring(pn, en).toInt(); const uint32_t since = strtoul(ss.substring(ps, es).c_str(), nullptr, 10);
-      if (node > 0 && node <= 255) { if (k) out += ","; out += meshSonarPingsJson((uint8_t)node, since, m, lite); k++; }
-      pn = en + 1; ps = es + 1;
-    }
-    out += "]}";
-    server.send(200, "application/json", out);
-    return;
+// D82: several holes in one answer: nodes=a,b,c & since=s1,s2,s3 -> {"nodes":[...]}
+static String pingsMultiJson(const String& ns, const String& ss, uint8_t m, bool lite) {
+  String out; out.reserve(3 * (100 + m * 130)); out = "{\"nodes\":[";
+  int pn = 0, ps = 0, k = 0;
+  while (pn < (int)ns.length() && k < 3) {
+    int en = ns.indexOf(',', pn); if (en < 0) en = ns.length();
+    int es = ss.indexOf(',', ps); if (es < 0) es = ss.length();
+    const int node = ns.substring(pn, en).toInt(); const uint32_t since = strtoul(ss.substring(ps, es).c_str(), nullptr, 10);
+    if (node > 0 && node <= 255) { if (k) out += ","; out += meshSonarPingsJson((uint8_t)node, since, m, lite); k++; }
+    pn = en + 1; ps = es + 1;
   }
+  out += "]}";
+  return out;
+}
+static uint8_t pingsMax() { const int mx = server.hasArg("max") ? server.arg("max").toInt() : 40; return (uint8_t)(mx < 1 ? 1 : (mx > 64 ? 64 : mx)); }
+void handleWebApiSonarPings() {
+  const uint8_t m = pingsMax();
+  const bool lite = server.arg("lite") == "1";   // D82: bottom + targets only (the Live card), ~1/3 of the bytes
+  if (server.hasArg("nodes")) { server.send(200, "application/json", pingsMultiJson(server.arg("nodes"), server.arg("since"), m, lite)); return; }
   const int node = server.arg("node").toInt();
   const uint32_t since = strtoul(server.arg("since").c_str(), nullptr, 10);
   if (node <= 0 || node > 255) { server.send(400, "application/json", "{\"error\":\"node\"}"); return; }

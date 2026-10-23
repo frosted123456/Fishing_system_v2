@@ -140,6 +140,16 @@ class H(BaseHTTPRequestHandler):
                "on": n["sim"], "virtual": n["id"] >= 128} for n in status()["nodes"]]
         return {"virtual": state["sim"], "rate": state["simrate"], "all": -1, "holes": hs}
 
+    def pings(self, node, since, mx):
+        """Pings of one hole newer than `since` (the preview streams the focus hole only; the others answer empty)."""
+        k = now_index(); out = []
+        if node == frames[0]["list"]["focus"]:
+            for f in frames[: k + 1]:
+                out += [p for p in f["pings"] if p[0] > since]
+            if k < 2: out = list(frames[k]["pings"])
+        out = out[-mx:]
+        return {"node": node, "last": out[-1][0] if out else since, "pings": out}
+
     def body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
         try:
@@ -156,16 +166,18 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/sonar":
             return self.send(200, self.listing())
         if u.path == "/api/sonar/pings":
-            node = int(q.get("node", ["0"])[0]); since = int(q.get("since", ["0"])[0]); mx = int(q.get("max", ["40"])[0])
-            k = now_index(); out = []
-            if node == frames[0]["list"]["focus"]:
-                for f in frames[: k + 1]:
-                    out += [p for p in f["pings"] if p[0] > since]
-                if k < 2: out = list(frames[k]["pings"])
-            out = out[-mx:]
-            return self.send(200, json.dumps({"node": node, "last": out[-1][0] if out else since, "pings": out}))
+            if "nodes" in q:   # D82: several holes in one answer
+                ns = [int(x) for x in q["nodes"][0].split(",") if x]; ss = [int(x) for x in q.get("since", [""])[0].split(",") if x]
+                return self.send(200, json.dumps({"nodes": [self.pings(n, ss[i] if i < len(ss) else 0, int(q.get("max", ["40"])[0])) for i, n in enumerate(ns[:3])]}))
+            return self.send(200, json.dumps(self.pings(int(q.get("node", ["0"])[0]), int(q.get("since", ["0"])[0]), int(q.get("max", ["40"])[0]))))
         if u.path == "/api/sonar/glance":
             return self.send(200, json.dumps(glance(int(q.get("since", ["0"])[0]))))
+        if u.path == "/api/poll":   # D85: the Holes tab's merged poll
+            d = {"status": status(), "sonar": json.loads(self.listing()), "glance": glance(int(q.get("glance", ["0"])[0]))}
+            if "nodes" in q:
+                ns = [int(x) for x in q["nodes"][0].split(",") if x]; ss = [int(x) for x in q.get("since", [""])[0].split(",") if x]
+                d["pings"] = {"nodes": [self.pings(n, ss[i] if i < len(ss) else 0, int(q.get("max", ["40"])[0])) for i, n in enumerate(ns[:3])]}
+            return self.send(200, json.dumps(d))
         if u.path == "/api/sim":
             return self.send(200, json.dumps(self.simj()))
         if u.path == "/api/sonar/bg":
