@@ -48,7 +48,7 @@ void setupWebServer() {
     const bool simReq = server.hasArg("plain") && server.arg("plain").indexOf("\"sim\"") >= 0;
     if (simReq && !webPinOk()) return;
     handleWebApiSonarPost(); });
-  server.on("/api/sonar/glance", HTTP_GET, []() {   // v2: every hole, ~3 min of sonar summaries (since = frame)
+  server.on("/api/sonar/glance", HTTP_GET, []() {   // v2: every hole, last ~2 min of sonar summaries kept on the chalet (since = frame; the page keeps 3 min)
     const uint16_t since = (uint16_t)strtoul(server.arg("since").c_str(), nullptr, 10);
     server.send(200, "application/json", meshSonarGlanceJson(since));
   });

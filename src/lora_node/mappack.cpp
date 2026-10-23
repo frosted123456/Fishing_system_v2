@@ -32,6 +32,7 @@ static const char* g_upErr = "";
 static uint32_t g_tileCount = 0, g_tileBytes = 0;   // counted at boot, kept up to date on store / clear
 static const size_t FS_RESERVE = 96UL * 1024UL;     // LittleFS needs free blocks to stay healthy
 
+static void packRecount();
 static void tileRecount() {
   g_tileCount = 0; g_tileBytes = 0;
   File d = LittleFS.open("/t"); if (!d || !d.isDirectory()) return;
@@ -44,7 +45,7 @@ bool mapPackSetup() {
   if (!g_fsOk) { Serial.println(F("MAP: LittleFS mount failed (no map pack storage)")); return false; }
   MAP_MAX_BYTES = LittleFS.totalBytes() > 160UL * 1024UL ? LittleFS.totalBytes() - 128UL * 1024UL : 32UL * 1024UL;
   if (!LittleFS.exists("/t")) LittleFS.mkdir("/t");
-  tileRecount();
+  tileRecount(); packRecount();
   Serial.printf("MAP: LittleFS %u KB used of %u KB, pack %u bytes, %lu tiles (%lu KB)\n", (unsigned)(LittleFS.usedBytes() / 1024), (unsigned)(LittleFS.totalBytes() / 1024), (unsigned)mapPackBytes(), (unsigned long)g_tileCount, (unsigned long)(g_tileBytes / 1024));
   return true;
 }
@@ -117,12 +118,17 @@ void handleWebApiTilesClear() {
 }
 
 size_t mapPackMax() { return g_fsOk ? MAP_MAX_BYTES : 0; }
-size_t mapPackBytes() {
-  if (!g_fsOk || !LittleFS.exists(MAP_PATH)) return 0;
-  File f = LittleFS.open(MAP_PATH, "r"); const size_t n = f ? f.size() : 0; if (f) f.close(); return n;
+// D84c: the size is cached. /api/status asked it every 2 s and each call opened LittleFS (an "open failed" line on the
+// serial each time when there is no pack, and a slow status reply). Refreshed at mount, after a store and after a clear.
+static size_t g_packBytes = 0;
+static void packRecount() {
+  g_packBytes = 0;
+  if (!g_fsOk || !LittleFS.exists(MAP_PATH)) return;
+  File f = LittleFS.open(MAP_PATH, "r"); if (f) { g_packBytes = f.size(); f.close(); }
 }
+size_t mapPackBytes() { return g_packBytes; }
 
-bool mapPackClear() { if (!g_fsOk) return false; if (LittleFS.exists(MAP_PATH)) LittleFS.remove(MAP_PATH); return true; }
+bool mapPackClear() { if (!g_fsOk) return false; if (LittleFS.exists(MAP_PATH)) LittleFS.remove(MAP_PATH); g_packBytes = 0; return true; }
 
 // ---- PIN ----------------------------------------------------------------------------------------------------
 bool webPinOk() {
@@ -159,7 +165,7 @@ void handleWebApiMapPackUpload() {   // multipart body of POST /api/map/pack: ru
     g_upBytes += up.currentSize;
   } else if (up.status == UPLOAD_FILE_END) {
     if (g_up) g_up.close();
-    if (!g_upFail && g_upBytes > 0) { LittleFS.remove(MAP_PATH); LittleFS.rename("/map_pack.tmp", MAP_PATH); Serial.printf("MAP: pack stored, %u bytes\n", (unsigned)g_upBytes); }
+    if (!g_upFail && g_upBytes > 0) { LittleFS.remove(MAP_PATH); LittleFS.rename("/map_pack.tmp", MAP_PATH); g_packBytes = g_upBytes; Serial.printf("MAP: pack stored, %u bytes\n", (unsigned)g_upBytes); }
     else { LittleFS.remove("/map_pack.tmp"); if (!g_upFail) { g_upFail = true; g_upErr = "empty"; } }
   } else {   // UPLOAD_FILE_ABORTED
     if (g_up) g_up.close(); LittleFS.remove("/map_pack.tmp"); g_upFail = true; g_upErr = "aborted";

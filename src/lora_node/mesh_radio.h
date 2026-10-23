@@ -144,7 +144,7 @@ bool meshHubPushSonar(const uint8_t* blk, uint8_t len);   // hub: queue one bloc
 String meshSonarListJson();                  // chalet: /api/sonar (one summary per sonar node)
 String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool lite = false);   // chalet: /api/sonar/pings (lite: no residual cells / track info)
 String meshSonarBgJson(uint8_t node);        // chalet: /api/sonar/bg (2-bit background profile)
-String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glance (every hole, ~3 min of summaries)
+String meshSonarGlanceJson(uint16_t since);           // chalet: /api/sonar/glance (every hole, the chalet keeps ~2 min of summaries; the page accumulates 3 min)
 
 // ---- raw views for the OLED screens (chalet) ----
 struct MeshSonarLite { uint16_t bottom_cm; uint8_t hard, activity, n; uint16_t t[5]; uint16_t age_frames; uint16_t age_s; uint8_t status, bottom_snr; };   // status: ST_* (D43)   // t: depth | level << 11 | bait << 13

@@ -85,7 +85,9 @@ static sonar::FollowAction g_follow;                   // D80 follow the action 
 static volatile bool g_cfg_reset_all = false;
 static volatile bool g_cfg_sonar_sim = false;
 // D70: the chalet keeps the last wiring-check result of each hole (SEC_SELFTEST), on top of the sonar store
-struct ChaletSink : public sonar::SonarStore<16, 128> {
+static constexpr uint16_t SONAR_RING = 96;   // D84c: pings kept (was 128); 3 streamed holes = 32 each, the page polls every 2 s
+static constexpr uint8_t SONAR_HIST = 60;    // D84c: summaries per hole for the glance views, 2 min at one per 2 s (was 90 = 3 min)
+struct ChaletSink : public sonar::SonarStore<16, SONAR_RING, SONAR_HIST> {
   struct R { uint8_t node; uint8_t r[12]; uint32_t at_ms; };
   R st[16]; uint8_t st_n = 0;
   void onSelfTest(uint8_t, uint8_t node, const uint8_t* r12, uint16_t) override {
@@ -95,7 +97,7 @@ struct ChaletSink : public sonar::SonarStore<16, 128> {
     p->node = node; memcpy(p->r, r12, 12); p->at_ms = millis() ? millis() : 1;
   }
 };
-static ChaletSink* g_sonar = nullptr;   // chalet only (~46 KB: ping ring 128 x 112 B, 16 holes x 564 B, history 16 x 90 x 16 B)
+static ChaletSink* g_sonar = nullptr;   // chalet only (~35 KB: ping ring 96 x 112 B, 16 holes x 564 B, history 16 x 60 x 16 B; D84c shrank it from 46 KB for heap room with the demo)
 static uint8_t g_cmd_seq = 0;
 static uint32_t g_silence_until_ms = 0;
 static uint8_t g_self = 0;
@@ -1621,11 +1623,11 @@ String meshSonarBgJson(uint8_t node) {
 }
 
 // Per-hole sonar history for the "at a glance" views: summaries newer than `since` (frame number,
-// 0 = everything kept, ~3 min). {"frame":F,"nodes":[{"node":n,"hub":h,"hard":x,"act":a,
+// 0 = everything kept, ~2 min). {"frame":F,"nodes":[{"node":n,"hub":h,"hard":x,"act":a,
 //   "recs":[[frame,bottom_cm,t,..],..]}]} with t = depth_cm | level << 11 | bait << 13 (sonar_link.h).
 String meshSonarGlanceJson(uint16_t since) {
   if (g_sonar == nullptr) return F("{\"frame\":0,\"nodes\":[]}");
-  static sonar::BaseRec recs[90];
+  static sonar::BaseRec recs[SONAR_HIST];
   uint8_t ids[16], hubs[16], hards[16], acts[16]; uint8_t nn = 0;
   {
     Lock l;
@@ -1637,13 +1639,13 @@ String meshSonarGlanceJson(uint16_t since) {
   }
   // D84: a first load (since = 0) sends the last 45 summaries per hole (1.5 min at one per 2 s), not 90: a 12-hole
   // demo was a 27 KB String on a heap that also holds three fake sonars; the page tops up every 2 s anyway
-  const uint8_t per = since ? 90 : 45;
+  const uint8_t per = since ? SONAR_HIST : 45;
   String s;
   s.reserve(256 + nn * (since ? 200 : 1100));
   s = "{\"frame\":"; s += g_frame; s += ",\"nodes\":[";
   for (uint8_t k = 0; k < nn; k++) {
     uint8_t n;
-    { Lock l; n = g_sonar->history(ids[k], recs, 90); }
+    { Lock l; n = g_sonar->history(ids[k], recs, SONAR_HIST); }
     const uint8_t r0 = n > per ? static_cast<uint8_t>(n - per) : 0;
     if (k) s += ",";
     s += "{\"node\":"; s += ids[k]; s += ",\"hub\":"; s += hubs[k]; s += ",\"hard\":"; s += hards[k];

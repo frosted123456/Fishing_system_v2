@@ -166,7 +166,7 @@ class SonarStore : public SonarSink {
   SonarStore() { clear(); }
   void clear() { memset(nodes_, 0, sizeof(nodes_)); head_ = 0; count_ = 0; seq_ = 0; memset(hn_, 0, sizeof(hn_)); memset(hh_, 0, sizeof(hh_)); }
 
-  // Summaries of `node`, oldest first (up to HIST, ~3 min at one per 2 s). Returns the count.
+  // Summaries of `node`, oldest first (up to HIST, one per 2 s). Returns the count.
   uint8_t history(uint8_t node, BaseRec* out, uint8_t max) const {
     for (uint8_t i = 0; i < MAXN; i++) {
       if (!nodes_[i].used || nodes_[i].node != node) continue;
