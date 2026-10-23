@@ -387,6 +387,7 @@ void loopOptions();
 void optBuild(ScrOptions* o);
 void menuBuild(ScrOptions* o);
 void loopWebServer();
+void webPerfPrint();   // D84e: slowest requests since the last PERF
 void loopBuzzer();
 void loopNodeTimeout();
 void checkWiFiStatus();

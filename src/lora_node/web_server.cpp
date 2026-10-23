@@ -11,6 +11,7 @@ void setupWebServer() {
 
   // D74: every change (POST) needs the PIN when one is set; GETs stay open. The header must be collected to be readable.
   { static const char* HDRS[] = {"X-Pin", "If-None-Match"}; server.collectHeaders(HDRS, 2); }
+  { extern RequestHandler& webUriSpy(); server.addHandler(&webUriSpy()); }   // D84e: first in line, notes the URI of every request for PERF
 #define POST_PIN(path, fn) server.on(path, HTTP_POST, []() { if (!webPinOk()) return; fn(); })
   server.on("/", HTTP_GET, handleWebRoot);
   server.on("/api/status", HTTP_GET, handleWebApi);
@@ -68,8 +69,35 @@ void setupWebServer() {
     if (MDNS.begin(host)) { MDNS.addService("http", "tcp", 80); Serial.printf("mDNS: http://%s.local\n", host); } }
 }
 
+// D84e: the slowest requests, for the serial PERF line (which URI the "web max" was). One handleClient() call
+// that takes over 20 ms served a request; server.uri() still names it afterwards.
+struct WebSlow { char uri[32]; uint32_t max_ms, n; };
+static WebSlow g_webSlow[4];
+static char g_webUri[32] = ""; static uint32_t g_webReqs = 0, g_webReqMs = 0;
+// The server clears uri() once the request is done, so a spy handler registered first notes it: canHandle() is
+// asked in registration order for every request (it always says no, the real handlers follow).
+struct WebUriSpy : public RequestHandler {
+  bool canHandle(HTTPMethod, String uri) override { strlcpy(g_webUri, uri.c_str(), sizeof(g_webUri)); g_webReqs++; return false; }
+};
+static WebUriSpy g_webSpy;
+RequestHandler& webUriSpy() { return g_webSpy; }
 void loopWebServer() {
+  const uint32_t t0 = millis();
   server.handleClient();
+  const uint32_t d = millis() - t0;
+  if (d >= 2) g_webReqMs += d;   // the idle pass is a delay(1)
+  if (d < 20) return;
+  const String u(g_webUri);
+  int k = -1, worst = 0;
+  for (int i = 0; i < 4; i++) { if (g_webSlow[i].n && u == g_webSlow[i].uri) { k = i; break; } if (!g_webSlow[i].n) { if (k < 0) k = i; } else if (g_webSlow[i].max_ms < g_webSlow[worst].max_ms) worst = i; }
+  if (k < 0) { if (d <= g_webSlow[worst].max_ms) return; k = worst; g_webSlow[k].n = 0; }
+  if (!g_webSlow[k].n) { strlcpy(g_webSlow[k].uri, u.c_str(), sizeof(g_webSlow[k].uri)); g_webSlow[k].max_ms = 0; }
+  g_webSlow[k].n++; if (d > g_webSlow[k].max_ms) g_webSlow[k].max_ms = d;
+}
+void webPerfPrint() {   // called by perfPrint(), then cleared
+  Serial.printf("  web reqs  %lu requests, %lu ms in handleClient\n", (unsigned long)g_webReqs, (unsigned long)g_webReqMs); g_webReqs = 0; g_webReqMs = 0;
+  for (int i = 0; i < 4; i++) if (g_webSlow[i].n) Serial.printf("  web slow  %-28s max %5lu ms  x%lu\n", g_webSlow[i].uri, (unsigned long)g_webSlow[i].max_ms, (unsigned long)g_webSlow[i].n);
+  memset(g_webSlow, 0, sizeof(g_webSlow));
 }
 
 // Chalet web suite: one page, tabs Holes / Sonar / Radio / Settings (theme and sonar views from Frank's

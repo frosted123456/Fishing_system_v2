@@ -335,6 +335,7 @@ void perfPrint() {
   }
   Serial.printf("  free heap %u B, min %u B, largest block %u B, loop stack left %u B\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+  if (settings.webServerEnabled) webPerfPrint();
   memset(perfAcc, 0, sizeof(perfAcc)); perfSince = millis();
 }
 
