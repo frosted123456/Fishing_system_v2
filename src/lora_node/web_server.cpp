@@ -10,7 +10,7 @@ void setupWebServer() {
   DEBUG_PRINTLN(F("Setting up web server..."));
 
   // D74: every change (POST) needs the PIN when one is set; GETs stay open. The header must be collected to be readable.
-  { static const char* HDRS[] = {"X-Pin"}; server.collectHeaders(HDRS, 1); }
+  { static const char* HDRS[] = {"X-Pin", "If-None-Match"}; server.collectHeaders(HDRS, 2); }
 #define POST_PIN(path, fn) server.on(path, HTTP_POST, []() { if (!webPinOk()) return; fn(); })
   server.on("/", HTTP_GET, handleWebRoot);
   server.on("/api/status", HTTP_GET, handleWebApi);
@@ -74,11 +74,18 @@ void loopWebServer() {
 
 // Chalet web suite: one page, tabs Holes / Sonar / Radio / Settings (theme and sonar views from Frank's
 // prototype, docs/prototype). The FISH ON bar, sound and silence work on every tab. /, /sonar, /radio and
-// /settings all serve it (the path picks the tab). Kept in flash (~58 KB), sent without a RAM copy.
-#include "web_suite.h"   // SUITE_PAGE: generated from web/suite.html by tools/gen_web.py (do not edit the .h)
+// /settings all serve it (the path picks the tab). Kept in flash gzipped (~54 KB), sent without a RAM copy.
+#include "web_suite.h"   // SUITE_PAGE_GZ: generated from web/suite.html by tools/gen_web.py (do not edit the .h)
 
 void handleWebRoot() {
-  server.send_P(200, "text/html", SUITE_PAGE);
+  // D84d: gzipped in flash (every browser accepts gzip) with an ETag: a reload of an unchanged page is a 304 with
+  // no body. Sending the page is the longest thing the loop does (the mesh runs on its own task, so it only
+  // delays the OLED and the other web requests): ~54 KB gzipped instead of 173 KB.
+  if (server.hasHeader("If-None-Match") && server.header("If-None-Match") == FPSTR(SUITE_PAGE_ETAG)) { server.sendHeader("ETag", FPSTR(SUITE_PAGE_ETAG)); server.send(304, "text/html", ""); return; }
+  server.sendHeader("ETag", FPSTR(SUITE_PAGE_ETAG));
+  server.sendHeader("Cache-Control", "no-cache");   // always ask, so a new firmware shows its new page at once
+  server.sendHeader("Content-Encoding", "gzip");
+  server.send_P(200, "text/html", reinterpret_cast<PGM_P>(SUITE_PAGE_GZ), SUITE_PAGE_GZ_LEN);
 }
 
 void handleWebApi() {
