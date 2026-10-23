@@ -428,6 +428,10 @@ void setupWiFiAP() {
   // Determine WiFi mode based on settings
   // Note: GATEWAY_ONSHORE already returned above (no hotspot by default)
   uint8_t effectiveWifiMode = settings.wifiModeSetting;
+  // D84: no modem sleep on the chalet. With it on (the default), the station radio dozes between beacons of the cabin
+  // router and every page request waits for it to wake: 100-300 ms per request, the page feels sluggish. Costs
+  // ~50-80 mA on the chalet (USB / LiPo), which the hubs on AA packs do not pay (they return above).
+  WiFi.setSleep(false);
 
   switch (effectiveWifiMode) {
     case 0:  // AP only

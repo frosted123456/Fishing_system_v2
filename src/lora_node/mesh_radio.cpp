@@ -29,7 +29,9 @@ using namespace icemesh::tdma;
 // ---------------------------------------------------------------------------------------------
 // Radio + shared state
 // ---------------------------------------------------------------------------------------------
-static SX1262 radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY, SPI, SPISettings(8000000, MSBFIRST, SPI_MODE0));   // radio review: 8 MHz halves the per-byte cost of a 255 B packet
+// D84: RadioLib keeps getMod() protected; the fallback-mode command after begin() needs it (see meshRadioBegin)
+struct Sx1262Radio : public SX1262 { using SX1262::SX1262; Module* module() { return getMod(); } };
+static Sx1262Radio radio = new Module(LORA_CS, LORA_DIO1, LORA_RST, LORA_BUSY, SPI, SPISettings(8000000, MSBFIRST, SPI_MODE0));   // radio review: 8 MHz halves the per-byte cost of a 255 B packet
 
 static TaskHandle_t g_task = nullptr;
 static SemaphoreHandle_t g_mx = nullptr;
@@ -826,11 +828,16 @@ static bool radioInit() {
   digitalWrite(VEXT_PIN, LOW);
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS);
   const ModeInfo& mi = modeInfo(MODE_SF9_BW500);
-  radio.standbyXOSC = true;   // radio review: keep the TCXO running in standby and as the RX/TX fallback mode; otherwise every
-                              // startReceive / startTransmit waits ~5 ms for the TCXO = the receiver misses SF5-SF7 preambles
   int st = radio.begin(LORA_FREQUENCY, static_cast<float>(mi.bw_khz), mi.sf, LORA_CODING_RATE,
                        LORA_SYNC_WORD, LORA_TX_POWER, LORA_PREAMBLE);
   if (st != RADIOLIB_ERR_NONE) return false;
+  // radio review / D84: keep the TCXO running in standby and as the RX/TX fallback mode, otherwise every startReceive /
+  // startTransmit waits ~5 ms for the TCXO and the receiver misses SF5-SF7 preambles. Set AFTER begin(): inside begin()
+  // the chip is reset and put in standby before the TCXO is enabled, and STANDBY_XOSC fails there ("RADIO INIT FAILED",
+  // D83 on the bench). begin() already programmed the fallback mode as STDBY_RC: rewrite it.
+  radio.standbyXOSC = true;
+  { uint8_t fb = RADIOLIB_SX126X_RX_TX_FALLBACK_MODE_STDBY_XOSC; radio.module()->SPIwriteStream(RADIOLIB_SX126X_CMD_SET_RX_TX_FALLBACK_MODE, &fb, 1); }
+  standbyXosc();
   {   // radio review: measure what the slot LEAD / TAIL have to cover on this board, once, at boot
     uint8_t probe[255]; memset(probe, 0x55, sizeof(probe));
     const uint32_t t0 = micros(); radio.startReceive(); const uint32_t t1 = micros(); standbyXosc(); const uint32_t t2 = micros();
