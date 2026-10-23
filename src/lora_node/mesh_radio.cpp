@@ -7,6 +7,8 @@
 // vTaskDelay + a short busy-wait. Values marked "est." are estimates for the radio test mode.
 #include "mesh_radio.h"
 #include <RadioLib.h>
+#include <new>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
@@ -91,7 +93,7 @@ struct ChaletSink : public sonar::SonarStore<16, 128> {
     p->node = node; memcpy(p->r, r12, 12); p->at_ms = millis() ? millis() : 1;
   }
 };
-static ChaletSink* g_sonar = nullptr;   // chalet only (~16 KB)
+static ChaletSink* g_sonar = nullptr;   // chalet only (~46 KB: ping ring 128 x 112 B, 16 holes x 564 B, history 16 x 90 x 16 B)
 static uint8_t g_cmd_seq = 0;
 static uint32_t g_silence_until_ms = 0;
 static uint8_t g_self = 0;
@@ -1626,17 +1628,21 @@ String meshSonarGlanceJson(uint16_t since) {
       ids[nn] = ns->node; hubs[nn] = ns->hub; hards[nn] = ns->sum.hard; acts[nn] = ns->sum.activity; nn++;
     }
   }
+  // D84: a first load (since = 0) sends the last 45 summaries per hole (1.5 min at one per 2 s), not 90: a 12-hole
+  // demo was a 27 KB String on a heap that also holds three fake sonars; the page tops up every 2 s anyway
+  const uint8_t per = since ? 90 : 45;
   String s;
-  s.reserve(256 + nn * (since ? 200 : 2200));
+  s.reserve(256 + nn * (since ? 200 : 1100));
   s = "{\"frame\":"; s += g_frame; s += ",\"nodes\":[";
   for (uint8_t k = 0; k < nn; k++) {
     uint8_t n;
     { Lock l; n = g_sonar->history(ids[k], recs, 90); }
+    const uint8_t r0 = n > per ? static_cast<uint8_t>(n - per) : 0;
     if (k) s += ",";
     s += "{\"node\":"; s += ids[k]; s += ",\"hub\":"; s += hubs[k]; s += ",\"hard\":"; s += hards[k];
     s += ",\"act\":"; s += acts[k]; s += ",\"recs\":[";
     bool first = true;
-    for (uint8_t r = 0; r < n; r++) {
+    for (uint8_t r = r0; r < n; r++) {
       if (since != 0 && seqDiff(recs[r].frame, since) <= 0) continue;
       if (!first) s += ",";
       first = false;
@@ -1920,7 +1926,7 @@ void meshDemoTick() {
   // 2. focus hole: the full fake fish finder (4 pings/s)
   DemoHole* fd = demoHole(focus);
   if (fd != nullptr && (fd->sim & MESH_SIM_SONAR)) {
-    if (g_demo_src == nullptr) { g_demo_src = new sonar::SonarSource(); g_demo_src->proc.prm = g_demo_prm; }
+    if (g_demo_src == nullptr) { g_demo_src = new (std::nothrow) sonar::SonarSource(); if (g_demo_src == nullptr) return; g_demo_src->proc.prm = g_demo_prm; }
     if (g_demo_src_node != focus) {
       g_demo_src->begin(focus, 7919UL * focus + 17UL, static_cast<uint16_t>(demoRand())); g_demo_src_node = focus;
       g_demo_src->proc.bait_m = fd->bait_cm / 100.0f; g_demo_src->scene.setBait(fd->bait_cm / 100.0f);   // this hole's bait
@@ -1933,11 +1939,17 @@ void meshDemoTick() {
           for (uint8_t i = 0; i < n; i++) g_demo[h].role->sonar.push(out[i].data, out[i].len, g_demo[h].role->frameNow());
   }
   // 2b. D82: the extra streamed holes (what the beacon says), each with its own fake fish finder
+  bool xlive[2] = {false, false};   // D84: an extra the heap could not afford keeps its 2 s summaries instead
   for (uint8_t x = 0; x < 2; x++) {
     const uint8_t id = xf[x];
     DemoHole* xd = id ? demoHole(id) : nullptr;
     if (xd == nullptr || !(xd->sim & MESH_SIM_SONAR) || id == focus) { g_demo_xnode[x] = 0; continue; }
-    if (g_demo_xsrc[x] == nullptr) { g_demo_xsrc[x] = new sonar::SonarSource(); g_demo_xsrc[x]->proc.prm = g_demo_prm; }
+    if (g_demo_xsrc[x] == nullptr) {   // D84: ~18 KB each; only when the heap can take it (the web server needs ~30 KB of room)
+      if (ESP.getFreeHeap() < 70000UL || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 24000UL) { g_demo_xnode[x] = 0; continue; }
+      g_demo_xsrc[x] = new (std::nothrow) sonar::SonarSource(); if (g_demo_xsrc[x] == nullptr) { g_demo_xnode[x] = 0; continue; }
+      g_demo_xsrc[x]->proc.prm = g_demo_prm;
+    }
+    xlive[x] = true;
     if (g_demo_xnode[x] != id) {
       g_demo_xsrc[x]->begin(id, 7919UL * id + 31UL, static_cast<uint16_t>(demoRand())); g_demo_xnode[x] = id;
       g_demo_xsrc[x]->proc.bait_m = xd->bait_cm / 100.0f; g_demo_xsrc[x]->scene.setBait(xd->bait_cm / 100.0f);
@@ -1961,7 +1973,7 @@ void meshDemoTick() {
       DemoHole& o = d.holes[k];
       const uint8_t st = demoTripped(o, now) ? MESH_LS_TRIPPED : MESH_LS_IDLE;
       r.table.observe(o.id, st, 0, MESH_LF_SIM, o.batt, now);
-      if (base && (o.sim & MESH_SIM_SONAR) && o.id != focus && o.id != xf[0] && o.id != xf[1]) demoSummary(o, r);
+      if (base && (o.sim & MESH_SIM_SONAR) && o.id != focus && !(xlive[0] && o.id == xf[0]) && !(xlive[1] && o.id == xf[1])) demoSummary(o, r);
     }
     const size_t n = r.buildHubFree(pl, sizeof(pl), 0, 3900, static_cast<uint16_t>(now / 60000UL), r.frameNow());
     if (n == 0) continue;

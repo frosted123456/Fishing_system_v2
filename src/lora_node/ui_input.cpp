@@ -191,7 +191,8 @@ enum OptItem : uint8_t {
   OI_S_ALL, OI_S_VIRTUAL, OI_S_RATE, OI_S_HOLE, OI_S_DEMO, OI_S_DEMOHOLES, OI_BUZZTEST, OI_BUZZTYPE,
   OI_DISPLAY, OI_D_UNITS, OI_D_SONDEPTH, OI_D_FOCDEPTH, OI_D_WEAK,
   OI_SONAR, OI_K_FILTER, OI_K_SNR, OI_K_CONFIRM, OI_K_DEAD, OI_K_GATE, OI_K_RESEND, OI_K_DEFAULTS, OI_NEARBEEP,
-  OI_GPS, OI_G_STATUS, OI_G_ORIGIN, OI_G_HOLE   // D73: Pin holes (GPS)
+  OI_GPS, OI_G_STATUS, OI_G_ORIGIN, OI_G_HOLE,   // D73: Pin holes (GPS)
+  OI_FOLLOW, OI_FOLLOWN   // D84: Follow the action on/off, holes streamed at once (1-3)
 };
 struct OptRow { uint8_t item, idx; };
 static const uint8_t OPT_MAX = 56;
@@ -252,6 +253,7 @@ static const char* optHint(uint8_t item) {
     case OI_NETRESET: case OI_REBOOT: case OI_W_FORGET: return "OK: ask to confirm";
     case OI_S_HOLE: return "OK: next mode";
     case OI_S_DEMO: return "OK: off/1/2/3/4 hubs";
+    case OI_FOLLOWN: return "OK: 1/2/3 holes";
     case OI_NONE: case OI_BUILT: case OI_W_STATUS: case OI_W_NAME: case OI_W_ADDR: case OI_W_CH: case OI_W_AP: case OI_W_APPASS:
       return "Esc: back";
     default: return "OK: change";
@@ -275,6 +277,8 @@ void optBuild(ScrOptions* o) {
     optRow(o, OI_BUZZTEST, 0, "Buzzer test", "");
     optRow(o, OI_BUZZTYPE, 0, "Buzzer type", settings.buzzerPassive ? "passive" : "active");
     if (chalet) optRow(o, OI_NEARBEEP, 0, "Near-bait beep", settings.nearBaitBeep ? "ON" : "OFF");
+    if (chalet) { optRow(o, OI_FOLLOW, 0, "Follow action", settings.followAction ? "ON" : "OFF");   // D84: same switches as the page
+      snprintf(v, sizeof(v), "%u", settings.followHoles); optRow(o, OI_FOLLOWN, 0, "Live holes", v); }
     if (settings.alarmHoldMin) snprintf(v, sizeof(v), "%u min", settings.alarmHoldMin); else snprintf(v, sizeof(v), "until silenced");
     optRow(o, OI_HOLD, 0, "Alarm", v);
     if (chalet) {
@@ -474,6 +478,8 @@ static void optActivate(const OptRow& row) {
     case OI_BUZZER: settings.buzzerEnabled = !settings.buzzerEnabled; saveSettings(); if (!settings.buzzerEnabled) buzzerStop(); break;
     case OI_BUZZTEST: buzzerTest(); break;
     case OI_NEARBEEP: settings.nearBaitBeep = !settings.nearBaitBeep; saveSettings(); break;
+    case OI_FOLLOW: settings.followAction = !settings.followAction; meshSetFollow(settings.followAction); saveSettings(); break;   // D84
+    case OI_FOLLOWN: settings.followHoles = (uint8_t)(settings.followHoles % 3 + 1); meshSetFollowHoles(settings.followHoles); saveSettings(); break;
     case OI_BUZZTYPE: settings.buzzerPassive = !settings.buzzerPassive; saveSettings(); buzzerApplyType(); buzzerTest(); break;
     case OI_HOLD: {
       uint8_t k = 0; while (k < 5 && HOLD_STEPS[k] != settings.alarmHoldMin) k++;
@@ -701,11 +707,16 @@ void scrDraw() {
   if (scrPage == PG_NETWORK && scr.radio_test) { drawRadioTest(); return; }   // radio test: detailed per-hub stats
   screenDraw(display.getU8g2(), scr, scrPage, scrSub, ((millis() / 500) % 2) == 0);
   // v2: send only when the picture changed (or every 2 s, or after another screen used the display)
+  static uint8_t lastPage = 255, lastHoles = 255;
   uint32_t h = 2166136261u;
   const uint8_t* b = display.getBufferPtr();
   for (int i = 0; i < 1024; i++) { h ^= b[i]; h *= 16777619u; }
   static uint32_t lastSent = 0, lastHash = 0;
-  if (h != lastHash || scrDirty || millis() - lastSent > 2000UL) {
+  // D84: a changed picture goes out at most ~3 times a second (1 KB over I2C ≈ 25 ms each; the Focus / Sonar pages
+  // change every frame and were eating 150 ms/s), a page change or an alert at once
+  const bool urgent = scrDirty || scrPage != lastPage || scr.n_holes != lastHoles;
+  lastPage = scrPage; lastHoles = scr.n_holes;
+  if ((h != lastHash && (urgent || millis() - lastSent >= 330UL)) || scrDirty || millis() - lastSent > 2000UL) {
     display.sendBuffer();
     lastHash = h; lastSent = millis(); scrDirty = false;
   }

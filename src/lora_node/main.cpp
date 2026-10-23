@@ -333,7 +333,8 @@ void perfPrint() {
     Serial.printf("  %-8s %6lu calls  %7.2f ms / %7.2f ms  %5.1f %%\n", NAMES[i], (unsigned long)a.n,
                   a.n ? (float)a.sum_us / 1000.0f / a.n : 0.0f, a.max_us / 1000.0f, ms ? (float)a.sum_us / 10.0f / ms : 0.0f);
   }
-  Serial.printf("  free heap %u B, min %u B\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+  Serial.printf("  free heap %u B, min %u B, largest block %u B, loop stack left %u B\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT), (unsigned)uxTaskGetStackHighWaterMark(NULL));
   memset(perfAcc, 0, sizeof(perfAcc)); perfSince = millis();
 }
 
