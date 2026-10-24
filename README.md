@@ -478,6 +478,11 @@ firmware D80; older hubs test SF9 to SF7 only.
 The run stops by itself after 2 h, if the hub is not heard for 5 min, or if storage is low. 30 runs max: download
 and delete old ones. The other hubs keep working during the test.
 
+During a run the hub-to-chalet link is forced to LoRa (the Radio tab shows it), then goes back to the setting at
+stop. Without that, a hub next to the chalet talks ESP-NOW, keeps its LoRa radio idle, and every row reads `ok 0`.
+A side-by-side check should show `ok 1` on all five speeds with an RSSI around -20 to -40 dBm within a minute of
+starting (the hub needs a few seconds to switch over).
+
 CSV columns: `t_s, utc, lat, lon, sats, hdop, dist_m, frame, mode, ok, crc, rssi_dbm, snr_db, hub_beacon_rssi, hub_beacon_snr, hub_beacon_lost64`.
 
 ## 8. How the LoRa airtime is shared

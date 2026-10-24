@@ -19,6 +19,7 @@ static const uint32_t RT_MAX_MS = 2UL * 60UL * 60UL * 1000UL;
 static const uint32_t RT_GONE_MS = 5UL * 60UL * 1000UL;
 static const size_t RT_MIN_FREE_START = 64UL * 1024UL, RT_MIN_FREE_RUN = 32UL * 1024UL;
 static const uint8_t RT_MAX_RUNS = 30;
+static uint8_t g_tr_saved = 3;   // D85c: transport before the run (put back at stop)
 
 static bool g_on = false;
 static uint8_t g_hub = 0, g_run = 0;
@@ -78,7 +79,7 @@ bool rangeStart(uint8_t hub, const char* note, String& err) {
   strlcpy(g_note, note ? note : "", sizeof(g_note));
   for (char* p = g_note; *p; p++) if ((uint8_t)*p < 0x20 || *p == ',' || *p == '"' || *p == '\\') *p = ' ';
   GpsStatus g; const bool gps = gpsStatus(g);
-  g_f.printf("# icefish range test run %u, hub %u, chalet %u, firmware D80, hub modes SF9..SF%u\n", n, hub, NODE_ID, max_sf);
+  g_f.printf("# icefish range test run %u, hub %u, chalet %u, firmware D85, hub modes SF9..SF%u\n", n, hub, NODE_ID, max_sf);
   g_f.printf("# note: %s\n", g_note);
   if (gps && g.origin_set && holePosDm[hub][0] != POS_UNSET)
     g_f.printf("# hub position: %.1f m east, %.1f m north of the map origin %.7f, %.7f\n",
@@ -87,6 +88,9 @@ bool rangeStart(uint8_t hub, const char* note, String& err) {
   g_f.print(rangeCsvHeader());
   g_f.flush();
   g_start_ms = g_last_ok_ms = g_last_flush_ms = millis();
+  // D85c: the backbone goes to LoRa for the run. With "ESP-NOW first" a hub next to the chalet talks ESP-NOW and keeps its
+  // LoRa radio idle: it never transmits in its slot and every row of the run reads "missed" (Frank's side-by-side run 1).
+  g_tr_saved = meshTransport(); meshSetTransport(MESH_TR_LORA);
   meshRangeStart(hub);
   g_on = true; g_runs_dirty = true;
   Serial.printf("RANGE: run %u started on hub %u (%s)\n", n, hub, path);
@@ -96,6 +100,7 @@ bool rangeStart(uint8_t hub, const char* note, String& err) {
 void rangeStop(const char* why) {
   if (!g_on) return;
   meshRangeStop();
+  meshSetTransport(g_tr_saved);   // D85c: the backbone goes back to the setting
   g_on = false;
   if (g_f) { g_f.printf("# stopped: %s, %lu rows, %lu samples lost (queue)\n", why, (unsigned long)g_rows, (unsigned long)meshRangeLost()); g_f.close(); }
   strlcpy(g_stop_why, why, sizeof(g_stop_why));
