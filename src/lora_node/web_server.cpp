@@ -1,0 +1,973 @@
+// Chalet / hub web server: routes, JSON API, remote config (split out of main.cpp, D49).
+#include "chalet.h"
+#include <ESPmDNS.h>
+static String statusJson();
+static String pingsMultiJson(const String& ns, const String& ss, uint8_t m, bool lite);
+static uint8_t pingsMax();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEB SERVER
+// ═══════════════════════════════════════════════════════════════════════════
+
+void setupWebServer() {
+  DEBUG_PRINTLN(F("Setting up web server..."));
+
+  // D74: every change (POST) needs the PIN when one is set; GETs stay open. The header must be collected to be readable.
+  { static const char* HDRS[] = {"X-Pin", "If-None-Match"}; server.collectHeaders(HDRS, 2); }
+  { extern RequestHandler& webUriSpy(); server.addHandler(&webUriSpy()); }   // D84e: first in line, notes the URI of every request for PERF
+#define POST_PIN(path, fn) server.on(path, HTTP_POST, []() { if (!webPinOk()) return; fn(); })
+  server.on("/", HTTP_GET, handleWebRoot);
+  server.on("/api/status", HTTP_GET, handleWebApi);
+  server.on("/api/map/pack", HTTP_GET, handleWebApiMapPack);                                // D74: offline contours
+  server.on("/api/map/pack", HTTP_POST, handleWebApiMapPackPost, handleWebApiMapPackUpload);  // (PIN checked inside)
+  POST_PIN("/api/map/clear", handleWebApiMapClear);
+  server.on("/api/tile", HTTP_GET, handleWebApiTile);                                        // D75: offline tile store
+  server.on("/api/tile", HTTP_POST, handleWebApiTilePost, handleWebApiTileUpload);
+  server.on("/api/tiles", HTTP_GET, handleWebApiTiles);
+  POST_PIN("/api/tiles/clear", handleWebApiTilesClear);
+  POST_PIN("/api/gps", handleWebApiGpsPost);
+  server.on("/api/rangetest", HTTP_GET, handleWebApiRange);         // D80 range test
+  POST_PIN("/api/rangetest", handleWebApiRangePost);
+  server.on("/api/rangetest/run", HTTP_GET, handleWebApiRangeRun);                                                  // D76: origin / pin / clear from the page
+  server.on("/api/silence", HTTP_POST, handleWebApiSilence);   // D78: no PIN: anyone at the chalet may silence the alarm
+  POST_PIN("/api/node/name", handleWebApiNodeName);
+  POST_PIN("/api/node/bait", handleWebApiNodeBait);    // v2 (D43): bait depth per hole
+  POST_PIN("/api/node/arm", handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
+  POST_PIN("/api/node/selftest", handleWebApiNodeSelfTest);   // D70: ask a hole for its wiring check
+  server.on("/api/selftest", HTTP_GET, handleWebApiSelfTest);               // D70: last result of ?id=
+  POST_PIN("/api/node/pos", handleWebApiNodePos);      // v2 (D51): position on the pocket map
+  server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
+  server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
+  server.on("/api/settings", HTTP_GET, handleWebApiSettingsGet);
+  POST_PIN("/api/settings", handleWebApiSettingsPost);
+  server.on("/remote-config", HTTP_GET, handleWebRemoteConfig);   // not linked from the suite: no remote config over the v2 mesh yet
+  POST_PIN("/api/remote-config", handleWebApiRemoteConfig);
+  server.on("/api/remote-config/status", HTTP_GET, handleWebApiRemoteConfigStatus);
+  server.on("/radio", HTTP_GET, handleWebRoot);
+  server.on("/api/radio", HTTP_GET, handleWebApiRadio);
+  POST_PIN("/api/radio", handleWebApiRadioPost);
+  server.on("/sonar", HTTP_GET, handleWebRoot);
+  server.on("/api/sonar", HTTP_GET, handleWebApiSonar);
+  server.on("/api/sonar", HTTP_POST, []() {   // D78: focus (Watch) needs no PIN; switching the test mode does
+    const bool simReq = server.hasArg("plain") && server.arg("plain").indexOf("\"sim\"") >= 0;
+    if (simReq && !webPinOk()) return;
+    handleWebApiSonarPost(); });
+  server.on("/api/sonar/glance", HTTP_GET, []() {   // v2: every hole, last ~2 min of sonar summaries kept on the chalet (since = frame; the page keeps 3 min)
+    const uint16_t since = (uint16_t)strtoul(server.arg("since").c_str(), nullptr, 10);
+    server.send(200, "application/json", meshSonarGlanceJson(since));
+  });
+  server.on("/api/sim", HTTP_GET, handleWebApiSim);
+  server.on("/api/sonar/knobs", HTTP_GET, handleWebApiKnobs);       // v2 (D42): sonar processing knobs
+  POST_PIN("/api/sonar/knobs", handleWebApiKnobsPost);
+  POST_PIN("/api/sim", handleWebApiSimPost);
+  server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
+  // D85: the Holes tab's four polls in one request (the server takes one client at a time: four 2 s polls landing
+  // together queued behind each other). ?glance=<frame>&nodes=a,b&since=s1,s2&max=24&lite=1 ->
+  // {"status":{..},"sonar":{..},"glance":{..},"pings":{..}} (pings only when nodes= is given)
+  server.on("/api/poll", HTTP_GET, []() {
+    const uint16_t gs = (uint16_t)strtoul(server.arg("glance").c_str(), nullptr, 10);
+    String out; out.reserve(7000);
+    out = "{\"status\":"; out += statusJson();
+    out += ",\"sonar\":"; out += meshSonarListJson();
+    out += ",\"glance\":"; out += meshSonarGlanceJson(gs);
+    if (server.hasArg("nodes")) { out += ",\"pings\":"; out += pingsMultiJson(server.arg("nodes"), server.arg("since"), pingsMax(), server.arg("lite") == "1"); }
+    out += "}";
+    server.send(200, "application/json", out);
+  });
+  server.on("/api/sonar/bg", HTTP_GET, handleWebApiSonarBg);
+
+#undef POST_PIN
+  server.begin();
+  DEBUG_PRINTLN(F("Web server ready on port 80"));
+  // D79: http://icefish.local on the hotspot and on the cabin router alike (the hub answers as icefish-hub<N>.local).
+  // Phones: iPhone resolves .local natively; Android since 12 (older Androids need the IP).
+  { char host[24]; if (currentRole == ROLE_GATEWAY_OFFSHORE) strcpy(host, "icefish"); else snprintf(host, sizeof(host), "icefish-hub%u", (unsigned)NODE_ID);
+    if (MDNS.begin(host)) { MDNS.addService("http", "tcp", 80); Serial.printf("mDNS: http://%s.local\n", host); } }
+}
+
+// D84e/g: per-URI timing for the serial PERF line: every request handled (the pass of handleClient() that served it,
+// parse + handler + send), avg and max, up to 12 URIs (query string dropped). server.uri() is cleared once the request
+// is done, so a spy handler registered first notes it: canHandle() is asked in registration order for every request
+// (it always says no, the real handlers follow).
+struct WebStat { char uri[28]; uint32_t sum_ms, max_ms, n; };
+static WebStat g_webStat[12];
+static char g_webUri[28] = ""; static uint32_t g_webReqs = 0;
+struct WebUriSpy : public RequestHandler {
+  bool canHandle(HTTPMethod, String uri) override { strlcpy(g_webUri, uri.c_str(), sizeof(g_webUri)); g_webReqs++; return false; }
+};
+static WebUriSpy g_webSpy;
+RequestHandler& webUriSpy() { return g_webSpy; }
+void loopWebServer() {
+  const uint32_t t0 = millis(), r0 = g_webReqs;
+  server.handleClient();
+  if (g_webReqs == r0) return;   // nothing served in this pass (the idle pass is a delay(1))
+  const uint32_t d = millis() - t0;
+  int k = -1;
+  for (int i = 0; i < 12; i++) { if (g_webStat[i].n && strcmp(g_webUri, g_webStat[i].uri) == 0) { k = i; break; } if (!g_webStat[i].n && k < 0) k = i; }
+  if (k < 0) return;   // more than 12 different URIs: the rest are not counted
+  if (!g_webStat[k].n) { strlcpy(g_webStat[k].uri, g_webUri, sizeof(g_webStat[k].uri)); g_webStat[k].sum_ms = 0; g_webStat[k].max_ms = 0; }
+  g_webStat[k].n++; g_webStat[k].sum_ms += d; if (d > g_webStat[k].max_ms) g_webStat[k].max_ms = d;
+}
+void webPerfPrint() {   // called by perfPrint(), then cleared
+  for (int i = 0; i < 12; i++) if (g_webStat[i].n)
+    Serial.printf("  web  %-26s x%-3lu avg %4lu ms  max %4lu ms\n", g_webStat[i].uri, (unsigned long)g_webStat[i].n, (unsigned long)(g_webStat[i].sum_ms / g_webStat[i].n), (unsigned long)g_webStat[i].max_ms);
+  memset(g_webStat, 0, sizeof(g_webStat));
+}
+
+// Chalet web suite: one page, tabs Holes / Sonar / Radio / Settings (theme and sonar views from Frank's
+// prototype, docs/prototype). The FISH ON bar, sound and silence work on every tab. /, /sonar, /radio and
+// /settings all serve it (the path picks the tab). Kept in flash gzipped (~54 KB), sent without a RAM copy.
+#include "web_suite.h"   // SUITE_PAGE_GZ: generated from web/suite.html by tools/gen_web.py (do not edit the .h)
+
+void handleWebRoot() {
+  // D84d: gzipped in flash (every browser accepts gzip) with an ETag: a reload of an unchanged page is a 304 with
+  // no body. Sending the page is the longest thing the loop does (the mesh runs on its own task, so it only
+  // delays the OLED and the other web requests): ~54 KB gzipped instead of 173 KB.
+  if (server.hasHeader("If-None-Match") && server.header("If-None-Match") == FPSTR(SUITE_PAGE_ETAG)) { server.sendHeader("ETag", FPSTR(SUITE_PAGE_ETAG)); server.send(304, "text/html", ""); return; }
+  server.sendHeader("ETag", FPSTR(SUITE_PAGE_ETAG));
+  server.sendHeader("Cache-Control", "no-cache");   // always ask, so a new firmware shows its new page at once
+  server.sendHeader("Content-Encoding", "gzip");
+  server.send_P(200, "text/html", reinterpret_cast<PGM_P>(SUITE_PAGE_GZ), SUITE_PAGE_GZ_LEN);
+}
+
+void handleWebApi() { server.send(200, "application/json", statusJson()); }
+static String statusJson() {
+  // BUG FIX #10 / v2: sized for the node count (up to MAX_NODES = 48, ~240 B each incl. copied strings)
+  DynamicJsonDocument doc(1664 + 352 * (size_t)network.node_count);   // D80: +follow   // D70 review: 16-19 members per node now
+  doc["network_id"] = network.network_id;
+  doc["node_count"] = network.node_count;
+  doc["uptime"] = millis() / 1000;
+  // v2 suite: state the page needs on every tab
+  doc["node_id"] = NODE_ID;
+  doc["role"] = currentRole == ROLE_GATEWAY_OFFSHORE ? "Chalet" : "Hub";
+  doc["fw"] = "v2";
+  doc["silenced"] = alertsSilenced;
+  doc["silence_left_sec"] = (alertsSilenced && silenceExpireTime > millis()) ? (silenceExpireTime - millis()) / 1000 : 0;
+  doc["sonar_sim"] = meshSonarSim();
+  doc["trips"] = tripCount;   // v2 (D43): trip recordings kept (download /api/trips)
+  doc["radio_test"] = meshTestModeName(meshTestMode());
+  // v2 network one-liner: setup phase countdown (0 = running), link, LoRa channel (1-8), master
+  doc["setup_arm_s"] = meshSetupArmInS();
+  doc["cm_per_turn"] = settings.cmPerTurn;   // D69: for the "line out" estimate
+  { static const char* const TRN[] = {"auto", "lora", "espnow", "ebfirst"}; const uint8_t t = meshTransport(); doc["transport"] = TRN[t <= 3 ? t : 0]; }
+  { GpsStatus g; if (gpsStatus(g)) { JsonObject gj = doc.createNestedObject("gps"); gj["fix"] = g.fix; gj["sats"] = g.sats; gj["hdop"] = g.hdop_x10 / 10.0; gj["data"] = g.sentences > 0; gj["origin"] = g.origin_set; if (g.origin_set) { gj["lat0"] = g.lat0_e7 / 1e7; gj["lon0"] = g.lon0_e7 / 1e7; } if (g.fix) { gj["lat"] = g.lat_e7 / 1e7; gj["lon"] = g.lon_e7 / 1e7; } } }   // D73
+  doc["lora_ch"] = meshLoraChannel() + 1;
+  doc["master"] = "chalet";
+  doc["map_bytes"] = (uint32_t)mapPackBytes();   // D74: offline contour pack stored (0 = none)
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) {   // D80: which hole the sonar view follows (map marker, every tab)
+    char why[28]; uint32_t pin_s = 0, trip_s = 0; meshFollowState(why, sizeof(why), pin_s, trip_s);
+    JsonObject fo = doc.createNestedObject("follow");
+    fo["on"] = meshFollowOn(); fo["node"] = meshFocusNode(); fo["why"] = (char*)why; fo["pin_s"] = pin_s; fo["trip_s"] = trip_s;
+  }
+  if (rangeRunning()) { char l[40]; rangeOledLine(l, sizeof(l)); JsonObject rt = doc.createNestedObject("rt"); rt["hub"] = meshRangeHub(); rt["line"] = l; }   // D80
+  doc["map_max"] = (uint32_t)mapPackMax();
+  doc["pin"] = settings.webPin[0] != 0;          // D74: changes need the PIN
+
+  // WiFi status
+  JsonObject wifi = doc.createNestedObject("wifi");
+  wifi["ap_active"] = wifiApActive;
+  wifi["ap_ip"] = apIpAddress;
+  wifi["sta_connected"] = wifiStaConnected;
+  wifi["sta_ip"] = staIpAddress;
+  { uint8_t pri = 0; wifi_second_chan_t sec; esp_wifi_get_channel(&pri, &sec); wifi["ch"] = pri; wifi["eb_ok"] = pri == ESPNOW_CHANNEL; }   // D78: router on another channel = hubs on LoRa only
+
+  // IMPROVEMENT 1: Include LoRa diagnostic counters
+  JsonObject lora = doc.createNestedObject("lora");
+  lora["ready"] = loraReady;
+  lora["rx_count"] = loraRxCount;
+  lora["tx_count"] = loraTxCount;
+  lora["rx_errors"] = loraRxErrors;
+  lora["tx_errors"] = loraTxErrors;
+  lora["checksum_fails"] = loraChecksumFails;
+  lora["watchdog_resets"] = loraWatchdogResets;
+
+  JsonArray nodes = doc.createNestedArray("nodes");
+  for (int i = 0; i < network.node_count; i++) {
+    if (i > 0 && !network.nodes[i].online && millis() - network.nodes[i].last_seen > 60UL * 60UL * 1000UL) continue;   // D79 (E6): off for an hour = not on the page (name / position stay saved)
+    JsonObject n = nodes.createNestedObject();
+    n["id"] = network.nodes[i].node_id;
+    n["name"] = network.nodes[i].name;
+    n["online"] = network.nodes[i].online;
+    n["fish"] = nodeAlarm(network.nodes[i]);   // v2: the alarm (latched), not only the line state
+    n["line"] = HAS_FLAG(network.nodes[i].flags, FLAG_FISH_ON);
+    n["bait"] = baitCm5[network.nodes[i].node_id] * 5;   // v2 (D43): cm, 0 = not set
+    if (holePosDm[network.nodes[i].node_id][0] != POS_UNSET) {   // v2 (D51): pocket map position, metres
+      n["px"] = holePosDm[network.nodes[i].node_id][0] / 10.0;
+      n["py"] = holePosDm[network.nodes[i].node_id][1] / 10.0;
+    }
+    n["lowbat"] = HAS_FLAG(network.nodes[i].flags, FLAG_LOW_BATTERY);
+    n["sim"] = HAS_FLAG(network.nodes[i].flags, FLAG_SIM) != 0;   // v2: this hole runs a simulation
+    n["disarmed"] = HAS_FLAG(network.nodes[i].flags, FLAG_DISARMED) != 0;   // v2 (D61): spool movement ignored
+    { const int8_t ap = armPendingFor(network.nodes[i].node_id); if (ap >= 0) n["arm_pending"] = ap; }   // D68: still in the beacon
+    n["turns"] = network.nodes[i].turns;   // D69: quarter turns since armed / cleared
+    n["battery"] = network.nodes[i].battery_mv;
+    n["rssi"] = network.nodes[i].rssi;
+    // IMPROVEMENT 2: Include via tracking
+    n["via_espnow"] = network.nodes[i].via_espnow;
+    n["via_lora"] = network.nodes[i].via_lora;
+    // IMPROVEMENT 2: Include last-seen timestamp
+    n["last_seen_sec"] = (millis() - network.nodes[i].last_seen) / 1000;
+    // Add role name for display
+    const char* roleName;
+    switch (network.nodes[i].role) {
+      case ROLE_SENSOR_ONLY:      roleName = "Sensor"; break;
+      case ROLE_SENSOR_LORA:      roleName = "Sensor+LoRa"; break;
+      case ROLE_RELAY_LORA:       roleName = "Relay"; break;
+      case ROLE_GATEWAY_ONSHORE:  roleName = "Gateway Ice"; break;
+      case ROLE_GATEWAY_OFFSHORE: roleName = "Gateway Remote"; break;
+      default:                    roleName = "Unknown"; break;
+    }
+    n["role"] = roleName;
+  }
+
+  String json;
+  serializeJson(doc, json);
+  return json;
+}
+
+/*
+ * API endpoint: POST /api/node/name
+ * Set a custom name for a node
+ * Body: {"nodeId": 2, "name": "Bob's Hole"}
+ */
+// v2 (D43) POST {"nodeId":n,"cm":depth}  (cm 0 = not set)
+void handleWebApiNodeBait() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0, cm = doc["cm"] | 0;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id >= 255 || cm < 0 || cm > 1275) { server.send(400, "application/json", "{\"error\":\"bad hole or depth\"}"); return; }
+  baitSet((uint8_t)id, (uint8_t)((cm + 2) / 5));
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// v2 (D61) POST {"nodeId":n,"armed":true|false}  (nodeId 255 = every hole). The hole answers with its LINE flag.
+void handleWebApiNodeArm() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id > 255 || !doc.containsKey("armed")) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  armSet((uint8_t)id, doc["armed"].as<bool>());
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+static SelfTestResult g_ownSelfTest; static uint32_t g_ownSelfTestAt = 0;   // D70: hub page: last own-hole result
+static String g_chaletSelfTest;   // D73: the chalet's own check, JSON, built on request
+static void chaletSelfTest() {
+  StaticJsonDocument<640> doc;
+  doc["have"] = true; doc["chalet"] = true; doc["id"] = NODE_ID; doc["age_s"] = 0;
+  GpsStatus g; const bool gps = gpsStatus(g);
+  doc["gps_built"] = gps;
+  if (gps) {
+    doc["gps_sentences"] = g.sentences; doc["gps_bad"] = g.bad; doc["gps_data_age_s"] = g.data_age_s == 0xFFFFFFFF ? -1 : (int)g.data_age_s;
+    doc["gps_swapped"] = g.swapped; doc["gps_fix"] = g.fix; doc["gps_sats"] = g.sats; doc["gps_hdop"] = g.hdop_x10 / 10.0; doc["gps_origin"] = g.origin_set;
+    doc["gps_rx_pin"] = g.rx_pin; doc["gps_scanning"] = g.scanning; doc["gps_baud"] = g.baud; doc["gps_levels"] = g.levels ? g.levels : "";
+    if (g.fix) { doc["gps_lat"] = g.lat_e7 / 1e7; doc["gps_lon"] = g.lon_e7 / 1e7; }
+  }
+  readBattery();
+  doc["battery_mv"] = localBatteryMv;
+  doc["lora_ready"] = loraReady;
+  doc["wifi_sta"] = wifiStaConnected; doc["wifi_ap"] = wifiApActive;
+  doc["cardkb"] = cardKbAvailable;
+  { MeshHubLink hl[12]; const uint8_t n = meshHubLinks(hl, 12); uint8_t live = 0; for (uint8_t i = 0; i < n; i++) if ((hl[i].lora_age_s >= 0 && hl[i].lora_age_s < 30) || (hl[i].eb_age_s >= 0 && hl[i].eb_age_s < 30)) live++; doc["hubs_heard"] = live; }
+  doc["heap"] = ESP.getFreeHeap();
+  g_chaletSelfTest = ""; serializeJson(doc, g_chaletSelfTest);
+}
+// D70 POST {"nodeId":n}: the chalet beacons CMD_SELFTEST (user priority); the hub runs it on its own hole or hands
+// DEVCMD_SELFTEST to the tip-up when it next talks; the result comes back in SEC_SELFTEST (GET /api/selftest?id=n)
+void handleWebApiNodeSelfTest() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  if (currentRole == ROLE_GATEWAY_OFFSHORE && id == NODE_ID) { GpsStatus g; if (gpsStatus(g) && !g.sentences && !g.scanning) gpsScanStart(); chaletSelfTest(); }   // D73: the box itself, answered at once; no NMEA yet = start the pin scan
+  else if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetSelfTest((uint8_t)id);
+  else if (id == NODE_ID) { holeSelfTest(g_ownSelfTest, true); g_ownSelfTestAt = millis() ? millis() : 1; meshHubSelfTestReport(NODE_ID, (const uint8_t*)&g_ownSelfTest); }
+  else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, 0);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handleWebApiSelfTest() {
+  const int id = server.hasArg("id") ? server.arg("id").toInt() : 0;
+  uint8_t b[12]; uint32_t age = 0;
+  bool have = false;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE && id == NODE_ID) { server.send(200, "application/json", g_chaletSelfTest.length() ? g_chaletSelfTest : String("{\"have\":false}")); return; }   // D73
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) have = id > 0 && meshSelfTestResult((uint8_t)id, b, age);
+  else if (id == NODE_ID && g_ownSelfTestAt) { memcpy(b, &g_ownSelfTest, 12); age = millis() - g_ownSelfTestAt; have = true; }   // hub hotspot page
+  if (!have) { server.send(200, "application/json", "{\"have\":false}"); return; }
+  const SelfTestResult* r = (const SelfTestResult*)b;
+  StaticJsonDocument<512> doc;
+  doc["have"] = true; doc["id"] = id; doc["age_s"] = age / 1000; doc["ver"] = r->ver;
+  doc["sensor_level"] = (r->sensor & ST_SENS_LEVEL) != 0; doc["sensor_flips"] = (r->sensor & ST_SENS_FLIPS) != 0; doc["sensor_hall"] = (r->sensor & ST_SENS_HALL) != 0; doc["flips"] = r->flips;
+  doc["pinged"] = (r->sensor & ST_SENS_PINGED) != 0;
+  doc["btn_none"] = (r->button & ST_BTN_NONE) != 0; doc["btn_released"] = (r->button & ST_BTN_RELEASED) != 0; doc["btn_pressed"] = (r->button & ST_BTN_PRESSED_SINCE_BOOT) != 0; doc["presses"] = r->presses;
+  doc["battery_mv"] = r->battery_mv;
+  doc["shield_built"] = (r->shield & ST_SH_NOT_BUILT) == 0; doc["spi_ok"] = (r->shield & ST_SH_SPI_OK) != 0; doc["pins_swapped"] = (r->shield & ST_SH_PINS_SWAPPED) != 0;
+  doc["vdrv_ready"] = (r->shield & ST_SH_VDRV_READY) != 0; doc["pulse_fault"] = (r->shield & ST_SH_PULSE_FLT) != 0; doc["drv_fault"] = (r->shield & ST_SH_DRV_FLT) != 0;
+  doc["ee_fault"] = (r->shield & ST_SH_EE_FLT) != 0; doc["leakage"] = (r->shield & ST_SH_LEAKAGE) != 0;
+  doc["raw_max"] = r->raw_max_16 * 16; doc["ring_bins"] = r->ring_bins; doc["noise_code"] = r->noise_code; doc["rssi"] = r->rssi_abs ? -(int)r->rssi_abs : 0;
+  String out; serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// v2 (D51) POST {"nodeId":n,"x":m,"y":m} metres from the chalet (x east, y north); {"nodeId":n} alone removes it
+void handleWebApiNodePos() {
+  StaticJsonDocument<128> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE || id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  if (doc.containsKey("x") && doc.containsKey("y")) {
+    const float x = doc["x"], y = doc["y"];
+    if (x < -3000 || x > 3000 || y < -3000 || y > 3000) { server.send(400, "application/json", "{\"error\":\"out of range\"}"); return; }
+    posSet((uint8_t)id, (int16_t)lroundf(x * 10), (int16_t)lroundf(y * 10));
+  } else posSet((uint8_t)id, POS_UNSET, POS_UNSET);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+// v2 (D43) trip recordings: ?download=1 sends a file. recs: [frame, bottom_cm, target...] (target = depth | level<<11 | bait<<13)
+void handleWebApiTrips() {
+  String s; s.reserve(256 + tripCount * 1100);
+  s = "{\"uptime\":"; s += millis() / 1000; s += ",\"trips\":[";
+  for (uint8_t k = 0; k < tripCount; k++) {
+    const TripRec& t = tripRecs[(tripHead + 8 - tripCount + k) % 8];
+    if (k) s += ",";
+    const int ix = findNodeIndexForMesh(t.node);
+    s += "{\"node\":"; s += t.node; s += ",\"name\":\"";
+    if (ix >= 0) for (const char* c = network.nodes[ix].name; *c; c++) if (*c != '"' && *c != '\\') s += *c;
+    s += "\",\"at_s\":"; s += t.at_s; s += ",\"bait_cm\":"; s += baitCm5[t.node] * 5; s += ",\"recs\":[";
+    for (uint8_t r = 0; r < t.n; r++) {
+      if (r) s += ",";
+      s += "["; s += t.r[r].frame; s += ","; s += t.r[r].bottom_cm;
+      for (uint8_t j = 0; j < t.r[r].n && j < 5; j++) { s += ","; s += t.r[r].t[j]; }
+      s += "]";
+    }
+    s += "]}";
+  }
+  s += "]}";
+  if (server.hasArg("download")) server.sendHeader("Content-Disposition", "attachment; filename=\"trip_recordings.json\"");
+  server.send(200, "application/json", s);
+}
+
+void handleWebApiNodeName() {
+  if (server.method() != HTTP_POST) {
+    server.send(405, "application/json", "{\"error\":\"POST required\"}");
+    return;
+  }
+
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"error\":\"No body\"}");
+    return;
+  }
+
+  StaticJsonDocument<128> doc;
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  uint8_t nodeId = doc["nodeId"] | 0;
+  const char* name = doc["name"] | "";
+
+  if (nodeId == 0 || strlen(name) > 15) {
+    server.send(400, "application/json", "{\"error\":\"Invalid nodeId or name (max 15 chars)\"}");
+    return;
+  }
+
+  saveNodeName(nodeId, name);
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+/*
+ * API endpoint: POST /api/silence
+ * Toggle silence state
+ */
+void handleWebApiSilence() {
+  silenceAlerts();
+
+  StaticJsonDocument<64> doc;
+  doc["silenced"] = alertsSilenced;
+
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+}
+
+
+void handleWebApiSettingsGet() {
+  StaticJsonDocument<320> doc;
+  doc["buzzerEnabled"] = settings.buzzerEnabled;
+  doc["alertHoldSec"] = settings.alertHoldSec;
+  doc["alarmHoldMin"] = settings.alarmHoldMin;
+  doc["cmPerTurn"] = settings.cmPerTurn;   // D69
+  doc["pinSet"] = settings.webPin[0] != 0;   // D74 (the PIN itself is never sent)
+  doc["nearBaitBeep"] = settings.nearBaitBeep;
+  doc["beamDeg"] = settings.beamDeg;   // v2 (D52)
+  doc["heartbeatSec"] = settings.heartbeatSec;
+  doc["reedActiveHigh"] = settings.reedActiveHigh;
+  doc["displayBrightness"] = settings.displayBrightness;
+  doc["webServerEnabled"] = settings.webServerEnabled;
+  doc["wifiModeSetting"] = settings.wifiModeSetting;
+  doc["nodeId"] = NODE_ID;
+  doc["role"] = (uint8_t)currentRole;
+
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+}
+
+void handleWebApiSettingsPost() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"error\":\"No body\"}");
+    return;
+  }
+
+  StaticJsonDocument<384> doc;   // D74: one more member (webPin)
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    DEBUG_PRINTF("JSON parse error: %s\n", error.c_str());
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  bool changed = false;
+
+  if (doc.containsKey("buzzerEnabled")) {
+    settings.buzzerEnabled = doc["buzzerEnabled"].as<bool>();
+    changed = true;
+  }
+  if (doc.containsKey("alertHoldSec")) {
+    int val = doc["alertHoldSec"].as<int>();
+    settings.alertHoldSec = constrain(val, 5, 300);
+    changed = true;
+  }
+  if (doc.containsKey("beamDeg")) { settings.beamDeg = (uint8_t)constrain(doc["beamDeg"].as<int>(), 5, 60); changed = true; }
+  if (doc.containsKey("nearBaitBeep")) { settings.nearBaitBeep = doc["nearBaitBeep"].as<bool>(); changed = true; }
+  if (doc.containsKey("cmPerTurn")) { settings.cmPerTurn = (uint8_t)constrain(doc["cmPerTurn"].as<int>(), 0, 60); changed = true; }   // D69
+  if (doc.containsKey("webPin")) {   // D74: "" = off, else 4-8 digits (this POST already passed the old PIN)
+    const char* p = doc["webPin"] | "";
+    const size_t n = strlen(p); bool digits = n == 0 || (n >= 4 && n <= 8);
+    for (size_t i = 0; digits && i < n; i++) if (p[i] < '0' || p[i] > '9') digits = false;
+    if (!digits) { server.send(400, "application/json", "{\"error\":\"PIN: 4 to 8 digits, or empty to turn it off\"}"); return; }
+    strlcpy(settings.webPin, p, sizeof(settings.webPin)); changed = true;
+  }
+  if (doc.containsKey("alarmHoldMin")) {   // v2: 0 = until silenced
+    settings.alarmHoldMin = (uint8_t)constrain(doc["alarmHoldMin"].as<int>(), 0, 120);
+    changed = true;
+  }
+  if (doc.containsKey("heartbeatSec")) {
+    int val = doc["heartbeatSec"].as<int>();
+    settings.heartbeatSec = constrain(val, 10, 600);
+    changed = true;
+  }
+  if (doc.containsKey("reedActiveHigh")) {
+    settings.reedActiveHigh = doc["reedActiveHigh"].as<bool>();
+    changed = true;
+  }
+
+  if (changed) {
+    saveSettings();
+    DEBUG_PRINTLN(F("Settings updated via web API"));
+  }
+
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleWebRemoteConfig() {
+  // Build list of known gateway nodes for dropdown
+  String nodeOptions = "";
+  for (int i = 0; i < network.node_count; i++) {
+    NodeState* node = &network.nodes[i];
+    // Include gateways and relays (roles 3, 4, 5)
+    if (node->role >= ROLE_RELAY_LORA && node->node_id != NODE_ID) {
+      char opt[64];
+      const char* roleName;
+      switch (node->role) {
+        case ROLE_GATEWAY_ONSHORE:  roleName = "Gateway Ice"; break;
+        case ROLE_GATEWAY_OFFSHORE: roleName = "Gateway Remote"; break;
+        case ROLE_RELAY_LORA:       roleName = "Relay"; break;
+        default:                    roleName = "Node"; break;
+      }
+      snprintf(opt, sizeof(opt), "<option value=\"%d\">Node %d - %s</option>",
+               node->node_id, node->node_id, roleName);
+      nodeOptions += opt;
+    }
+  }
+
+  // If no other gateways found, show manual entry
+  if (nodeOptions.length() == 0) {
+    nodeOptions = "<option value=\"0\">No gateways discovered</option>";
+  }
+
+  String html = F(R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remote Config - Ice Fishing Monitor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; margin: 0; padding: 20px; }
+    .container { max-width: 500px; margin: 0 auto; }
+    h1 { color: #4fc3f7; margin-bottom: 5px; }
+    .subtitle { color: #aaa; margin-bottom: 20px; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; color: #aaa; }
+    input[type="number"], select { width: 100%; padding: 10px; border: 1px solid #333; background: #252538; color: #fff; border-radius: 4px; font-size: 16px; }
+    .checkbox-group { display: flex; align-items: center; gap: 10px; padding: 10px 0; }
+    input[type="checkbox"] { width: 20px; height: 20px; }
+    .checkbox-group label { margin: 0; }
+    button { background: #4fc3f7; color: #000; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; margin-right: 10px; margin-top: 10px; }
+    button:hover { background: #03a9f4; }
+    .send-btn { background: #f44336; color: #fff; }
+    .send-btn:hover { background: #d32f2f; }
+    .back { background: #555; color: #fff; }
+    .message { padding: 10px; border-radius: 4px; margin-bottom: 15px; display: none; }
+    .message.show { display: block; }
+    .success { background: #2e7d32; }
+    .error { background: #c62828; }
+    .pending { background: #f57c00; }
+    .info-box { background: #252538; padding: 15px; border-radius: 4px; margin-bottom: 20px; border-left: 3px solid #4fc3f7; }
+    .info-box p { margin: 5px 0; color: #aaa; font-size: 13px; }
+    .status-indicator { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+    .status-indicator.waiting { background: #f57c00; animation: pulse 1s infinite; }
+    .status-indicator.success { background: #4caf50; }
+    .status-indicator.failed { background: #f44336; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Remote Gateway Config</h1>
+    <p class="subtitle">Push settings to another gateway via LoRa (supports multi-hop)</p>
+
+    <div class="info-box">
+      <p><strong>How it works:</strong></p>
+      <p>Settings are sent via LoRa to the target gateway</p>
+      <p>Messages relay through intermediate nodes if needed</p>
+      <p>Target applies settings and sends acknowledgment back</p>
+      <p>Timeout: 15 seconds (allows for multi-hop delay)</p>
+    </div>
+
+    <div id="message" class="message"></div>
+
+    <form id="remoteForm">
+      <div class="form-group">
+        <label for="targetNode">Target Gateway</label>
+        <select id="targetNode">
+)rawliteral");
+
+  html += nodeOptions;
+
+  html += F(R"rawliteral(
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="manualTarget">Or enter Node ID manually:</label>
+        <input type="number" id="manualTarget" min="1" max="254" placeholder="e.g. 4">
+      </div>
+
+      <hr style="border-color:#333; margin: 20px 0;">
+
+      <div class="form-group checkbox-group">
+        <input type="checkbox" id="buzzerEnabled" checked>
+        <label for="buzzerEnabled">Buzzer Enabled</label>
+      </div>
+
+      <div class="form-group">
+        <label for="alertHoldSec">Alert Hold Time (seconds)</label>
+        <input type="number" id="alertHoldSec" value="30" min="5" max="300">
+      </div>
+
+      <div class="form-group">
+        <label for="heartbeatSec">Heartbeat Interval (seconds)</label>
+        <input type="number" id="heartbeatSec" value="60" min="10" max="600">
+      </div>
+
+      <div class="form-group checkbox-group">
+        <input type="checkbox" id="reedActiveHigh" checked>
+        <label for="reedActiveHigh">Reed Switch: Trigger on HIGH</label>
+      </div>
+
+      <div>
+        <button type="submit" class="send-btn">Send Config</button>
+        <button type="button" class="back" onclick="location.href='/'">Back</button>
+      </div>
+    </form>
+
+    <div id="ack-status" style="margin-top: 20px; display: none;">
+      <span class="status-indicator waiting" id="status-dot"></span>
+      <span id="status-text">Waiting for acknowledgment...</span>
+    </div>
+  </div>
+  <script>
+    const msgEl = document.getElementById('message');
+    const ackStatus = document.getElementById('ack-status');
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    let pollInterval = null;
+
+    function showMessage(text, type) {
+      msgEl.textContent = text;
+      msgEl.className = 'message show ' + type;
+      if (type !== 'pending') {
+        setTimeout(() => { msgEl.className = 'message'; }, 5000);
+      }
+    }
+
+    function getTargetNode() {
+      const manual = document.getElementById('manualTarget').value;
+      if (manual && parseInt(manual) > 0) {
+        return parseInt(manual);
+      }
+      return parseInt(document.getElementById('targetNode').value) || 0;
+    }
+
+    async function checkAckStatus() {
+      try {
+        const resp = await fetch('/api/remote-config/status');
+        const data = await resp.json();
+
+        if (!data.waiting) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+
+          if (data.lastSuccess) {
+            statusDot.className = 'status-indicator success';
+            statusText.textContent = 'Config acknowledged!';
+            showMessage('Remote gateway applied the config successfully!', 'success');
+          } else {
+            statusDot.className = 'status-indicator failed';
+            statusText.textContent = 'Timeout - no acknowledgment received';
+            showMessage('No ACK received. Config may still have been applied.', 'error');
+          }
+
+          setTimeout(() => { ackStatus.style.display = 'none'; }, 5000);
+        }
+      } catch (e) {
+        console.error('Status check failed:', e);
+      }
+    }
+
+    document.getElementById('remoteForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const targetNode = getTargetNode();
+      if (!targetNode || targetNode < 1) {
+        showMessage('Please select or enter a valid target node ID', 'error');
+        return;
+      }
+
+      const data = {
+        targetNode: targetNode,
+        buzzerEnabled: document.getElementById('buzzerEnabled').checked,
+        alertHoldSec: parseInt(document.getElementById('alertHoldSec').value) || 30,
+        heartbeatSec: parseInt(document.getElementById('heartbeatSec').value) || 60,
+        reedActiveHigh: document.getElementById('reedActiveHigh').checked
+      };
+
+      showMessage('Sending config via LoRa...', 'pending');
+      ackStatus.style.display = 'block';
+      statusDot.className = 'status-indicator waiting';
+      statusText.textContent = 'Waiting for acknowledgment...';
+
+      try {
+        const resp = await fetch('/api/remote-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+        const result = await resp.json();
+
+        if (result.success) {
+          showMessage('Config sent to node ' + targetNode + '! Waiting for ACK...', 'pending');
+          if (pollInterval) clearInterval(pollInterval);
+          pollInterval = setInterval(checkAckStatus, 1000);
+          setTimeout(() => {
+            if (pollInterval) {
+              clearInterval(pollInterval);
+              checkAckStatus();
+            }
+          }, 16000);
+        } else {
+          showMessage('Failed: ' + (result.error || 'Unknown error'), 'error');
+          ackStatus.style.display = 'none';
+        }
+      } catch (e) {
+        showMessage('Error: ' + e.message, 'error');
+        ackStatus.style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
+)rawliteral");
+
+  server.send(200, "text/html", html);
+}
+
+void handleWebApiRemoteConfig() {
+  if (!server.hasArg("plain")) {
+    server.send(400, "application/json", "{\"error\":\"No body\"}");
+    return;
+  }
+
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, server.arg("plain"));
+  if (error) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+
+  uint8_t targetNode = doc["targetNode"] | 0;
+  if (targetNode == 0 || targetNode == NODE_ID) {
+    server.send(400, "application/json", "{\"error\":\"Invalid target node\"}");
+    return;
+  }
+
+  // Build config from request (use current settings as defaults)
+  DeviceSettings configToSend = settings;
+
+  if (doc.containsKey("buzzerEnabled")) {
+    configToSend.buzzerEnabled = doc["buzzerEnabled"].as<bool>();
+  }
+  if (doc.containsKey("alertHoldSec")) {
+    configToSend.alertHoldSec = constrain(doc["alertHoldSec"].as<int>(), 5, 300);
+  }
+  if (doc.containsKey("heartbeatSec")) {
+    configToSend.heartbeatSec = constrain(doc["heartbeatSec"].as<int>(), 10, 600);
+  }
+  if (doc.containsKey("reedActiveHigh")) {
+    configToSend.reedActiveHigh = doc["reedActiveHigh"].as<bool>();
+  }
+
+  // Temporarily swap settings for sendRemoteConfig
+  DeviceSettings originalSettings = settings;
+  settings = configToSend;
+
+  // Send config
+  bool sent = sendRemoteConfig(targetNode);
+
+  // Restore original settings (we're only sending, not applying locally)
+  settings = originalSettings;
+
+  if (sent) {
+    server.send(200, "application/json", "{\"success\":true}");
+    DEBUG_PRINTF("Remote config sent to node %d\n", targetNode);
+  } else {
+    server.send(500, "application/json", "{\"error\":\"LoRa send failed\"}");
+  }
+}
+
+void handleWebApiRemoteConfigStatus() {
+  StaticJsonDocument<128> doc;
+  doc["waiting"] = pendingConfigWaiting;
+  doc["targetNode"] = pendingConfigTarget;
+  doc["seq"] = pendingConfigSeq;
+
+  // Calculate if last config was successful (not waiting + recent)
+  bool recentAttempt = (millis() - pendingConfigTime) < (CONFIG_ACK_TIMEOUT_MS + 5000);
+  doc["lastSuccess"] = !pendingConfigWaiting && recentAttempt && (pendingConfigTarget != 0);
+
+  String json;
+  serializeJson(doc, json);
+  server.send(200, "application/json", json);
+}
+
+
+// ---- web: /radio page and API (chalet; hubs in LR mode have no web server) ----
+// meshRadioJson + what only main.cpp knows (relay requests, backbone receiver mode)
+static String radioJsonFull() {
+  String s = meshRadioJson();
+  s.remove(s.length() - 1);   // closing brace
+  s += ",\"eb_ready\":"; s += espNowReady ? "true" : "false";
+  s += ",\"eb_chalet_lr\":"; s += settings.ebChaletLr ? "true" : "false";
+  s += ",\"relay_req\":[";
+  bool first = true;
+  for (const auto& r : relayReqs) {
+    if (r.dev == 0) continue;
+    if (!first) s += ",";
+    first = false;
+    s += "{\"dev\":"; s += r.dev; s += ",\"on\":"; s += r.on ? "true" : "false"; s += "}";
+  }
+  s += "]}";
+  return s;
+}
+
+void handleWebApiRadio() {
+  server.send(200, "application/json", radioJsonFull());
+}
+
+void handleWebApiRadioPost() {
+  StaticJsonDocument<320> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) {
+    server.send(400, "application/json", "{\"error\":\"radio settings are set on the chalet\"}");
+    return;
+  }
+  if (doc.containsKey("test")) {
+    const int m = doc["test"].as<int>();
+    if (m >= 0 && m <= 4) { settings.radioTestMode = (uint8_t)m; meshSetTestMode((uint8_t)m); meshResetStats(); }
+  }
+  if (doc.containsKey("adaptive")) { settings.adaptiveRadio = doc["adaptive"].as<bool>(); meshSetAdaptive(settings.adaptiveRadio); }
+  if (doc["resetStats"] | false) meshResetStats();
+  // v2 network: transport, LoRa channel, relays, backbone receiver mode
+  if (doc.containsKey("transport")) {
+    const int t = doc["transport"].as<int>();
+    if (t >= 0 && t <= 3) { settings.transportMode = (uint8_t)t; meshSetTransport((uint8_t)t); }   // D71: 3 = ESP-NOW first
+  }
+  if (doc.containsKey("channel")) {   // "auto" or 1-8
+    if (doc["channel"].is<const char*>()) { settings.loraChannel = MESH_CH_AUTO; meshSetLoraChannel(MESH_CH_AUTO); }
+    else {
+      const int c = doc["channel"].as<int>();
+      if (c >= 1 && c <= 8) { settings.loraChannel = (uint8_t)(c - 1); meshSetLoraChannel((uint8_t)(c - 1)); }
+    }
+  }
+  if (doc["rescan"] | false) meshRescanChannels();
+  if (doc.containsKey("relay")) {
+    const int dev = doc["relay"]["dev"] | 0;
+    if (dev > 0 && dev < 255) relayRequest((uint8_t)dev, doc["relay"]["on"] | false);
+  }
+  saveSettings();
+  server.send(200, "application/json", radioJsonFull());
+}
+
+void handleWebApiSonar() {
+  server.send(200, "application/json", meshSonarListJson());
+}
+
+// v2 simulation per hole. GET: {"virtual":bool,"rate":n,"all":v|-1,"holes":[{"id","name","req","on"}]}
+// POST: {"hole":id|255,"sonar":bool,"hall":bool} | {"all":bool} | {"virtual":bool} | {"rate":1-63}
+static String simJson() {
+  String s;
+  s.reserve(160 + network.node_count * 48);
+  s = "{\"virtual\":"; s += settings.sonarSim ? "true" : "false";
+  s += ",\"rate\":"; s += simRate;
+  s += ",\"all\":"; s += chSimAllSet ? String(chSimAllValue) : String(-1);
+  s += ",\"demo_hubs\":"; s += meshDemoHubs();
+  s += ",\"demo_holes\":"; s += meshDemoHoles();
+  s += ",\"holes\":[";
+  bool first = true;
+  for (int i = 0; i < network.node_count; i++) {
+    const NodeState& n = network.nodes[i];
+    if (n.node_id == NODE_ID || n.node_id == 0 || !n.initialized) continue;
+    if (!first) s += ",";
+    first = false;
+    s += "{\"id\":"; s += n.node_id;
+    s += ",\"name\":\""; for (const char* c = n.name; *c; c++) if (*c != '"' && *c != '\\') s += *c; s += "\"";
+    const uint8_t dv = meshDemoSim(n.node_id);   // demo hole: what it runs (256 = explicitly off, for the page)
+    s += ",\"req\":"; s += dv != 0xFF ? String(dv ? dv : 256) : String(simRequested(n.node_id));
+    s += ",\"on\":"; s += HAS_FLAG(n.flags, FLAG_SIM) ? "true" : "false";
+    s += ",\"virtual\":"; s += n.node_id >= 128 ? "true" : "false";
+    s += "}";
+  }
+  s += "]}";
+  return s;
+}
+
+void handleWebApiSim() { server.send(200, "application/json", simJson()); }
+
+void handleWebApiSimPost() {
+  StaticJsonDocument<192> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { server.send(400, "application/json", "{\"error\":\"simulation is set on the chalet\"}"); return; }
+  if (doc.containsKey("rate")) { const int r = doc["rate"].as<int>(); if (r >= 1 && r <= 63) simRate = (uint8_t)r; }
+  if (doc.containsKey("virtual")) { settings.sonarSim = doc["virtual"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
+  if (doc.containsKey("all")) simAll(doc["all"].as<bool>());
+  if (doc.containsKey("demo")) demoSet((uint8_t)(doc["demo"] | 0), (uint8_t)(doc["demo_holes"] | 3));
+  if (doc.containsKey("hole")) {
+    const int h = doc["hole"].as<int>();
+    if (h > 0 && h <= 255) simRequest((uint8_t)h, doc["sonar"] | false, doc["hall"] | false);
+  }
+  server.send(200, "application/json", simJson());
+}
+
+// v2 (D42) GET: {"preset":0-3,"knobs":[{"key","name","lo","hi","def","unit","v"}]}
+// POST: {"key":"snr","v":12} | {"preset":0-2} | {"defaults":true} | {"resend":true}
+static String knobsJson() {
+  using namespace icemesh::sonar;
+  String s; s.reserve(200 + P_COUNT * 110);
+  s = "{\"preset\":"; s += presetOf(sonarPrm); s += ",\"knobs\":[";
+  for (uint8_t i = 0; i < P_COUNT; i++) {
+    const ParamInfo& f = paramInfo(i);
+    if (i) s += ",";
+    s += "{\"key\":\""; s += f.key; s += "\",\"name\":\""; s += f.name; s += "\",\"lo\":"; s += f.lo;
+    s += ",\"hi\":"; s += f.hi; s += ",\"def\":"; s += f.def; s += ",\"unit\":\""; s += f.unit; s += "\",\"v\":"; s += sonarPrm[i]; s += "}";
+  }
+  s += "]}";
+  return s;
+}
+
+void handleWebApiKnobs() { server.send(200, "application/json", knobsJson()); }
+
+void handleWebApiKnobsPost() {
+  using namespace icemesh::sonar;
+  StaticJsonDocument<192> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { server.send(400, "application/json", "{\"error\":\"the sonar knobs are set on the chalet\"}"); return; }
+  if (doc.containsKey("key") && doc.containsKey("v")) {
+    const char* k = doc["key"] | "";
+    for (uint8_t i = 0; i < P_COUNT; i++) if (strcmp(k, paramInfo(i).key) == 0) sonarKnobSet(i, (uint8_t)constrain(doc["v"].as<int>(), 0, 255));
+  }
+  if (doc.containsKey("preset")) {
+    Params q = sonarPrm; applyPreset(q, (uint8_t)(doc["preset"] | 1));
+    for (uint8_t i = 0; i < P_COUNT; i++) if (q[i] != sonarPrm[i]) sonarKnobSet(i, q[i]);
+  }
+  if (doc["defaults"] | false) for (uint8_t i = 0; i < P_COUNT; i++) sonarKnobSet(i, paramInfo(i).def);
+  if (doc["resend"] | false) sonarKnobsResend();
+  server.send(200, "application/json", knobsJson());
+}
+
+void handleWebApiSonarPost() {
+  StaticJsonDocument<128> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) {
+    server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+    return;
+  }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) {
+    server.send(400, "application/json", "{\"error\":\"sonar settings are set on the chalet\"}");
+    return;
+  }
+  if (doc.containsKey("sim")) { settings.sonarSim = doc["sim"].as<bool>(); meshSetSonarSim(settings.sonarSim); saveSettings(); }
+  if (doc.containsKey("follow")) { settings.followAction = doc["follow"].as<bool>(); meshSetFollow(settings.followAction); saveSettings(); }   // D80
+  if (doc.containsKey("follow_n")) { const int n = doc["follow_n"].as<int>(); if (n >= 1 && n <= 3) { settings.followHoles = (uint8_t)n; meshSetFollowHoles(settings.followHoles); saveSettings(); } }   // D82
+  if (doc.containsKey("focus")) {
+    const int f = doc["focus"].as<int>();
+    if (f >= 0 && f <= 255) meshSetFocusNode((uint8_t)f);
+  }
+  server.send(200, "application/json", meshSonarListJson());
+}
+
+// D82: several holes in one answer: nodes=a,b,c & since=s1,s2,s3 -> {"nodes":[...]}
+static String pingsMultiJson(const String& ns, const String& ss, uint8_t m, bool lite) {
+  String out; out.reserve(3 * (100 + m * 130)); out = "{\"nodes\":[";
+  int pn = 0, ps = 0, k = 0;
+  while (pn < (int)ns.length() && k < 3) {
+    int en = ns.indexOf(',', pn); if (en < 0) en = ns.length();
+    int es = ss.indexOf(',', ps); if (es < 0) es = ss.length();
+    const int node = ns.substring(pn, en).toInt(); const uint32_t since = strtoul(ss.substring(ps, es).c_str(), nullptr, 10);
+    if (node > 0 && node <= 255) { if (k) out += ","; out += meshSonarPingsJson((uint8_t)node, since, m, lite); k++; }
+    pn = en + 1; ps = es + 1;
+  }
+  out += "]}";
+  return out;
+}
+static uint8_t pingsMax() { const int mx = server.hasArg("max") ? server.arg("max").toInt() : 40; return (uint8_t)(mx < 1 ? 1 : (mx > 64 ? 64 : mx)); }
+void handleWebApiSonarPings() {
+  const uint8_t m = pingsMax();
+  const bool lite = server.arg("lite") == "1";   // D82: bottom + targets only (the Live card), ~1/3 of the bytes
+  if (server.hasArg("nodes")) { server.send(200, "application/json", pingsMultiJson(server.arg("nodes"), server.arg("since"), m, lite)); return; }
+  const int node = server.arg("node").toInt();
+  const uint32_t since = strtoul(server.arg("since").c_str(), nullptr, 10);
+  if (node <= 0 || node > 255) { server.send(400, "application/json", "{\"error\":\"node\"}"); return; }
+  server.send(200, "application/json", meshSonarPingsJson((uint8_t)node, since, m, lite));
+}
+
+void handleWebApiSonarBg() {
+  const int node = server.arg("node").toInt();
+  if (node <= 0 || node > 255) { server.send(400, "application/json", "{\"error\":\"node\"}"); return; }
+  server.send(200, "application/json", meshSonarBgJson((uint8_t)node));
+}

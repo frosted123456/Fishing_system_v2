@@ -9,6 +9,7 @@
 #define MESSAGES_H
 
 #include <Arduino.h>
+#include <alarm_latch.h>   // v2 (D41/D47) FISH ON alarm latch rules (lib/IceMesh, host-tested)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NODE ROLES
@@ -29,8 +30,10 @@ enum NodeRole : uint8_t {
 #define FLAG_FISH_ON        (1 << 0)
 #define FLAG_LOW_BATTERY    (1 << 1)
 #define FLAG_FIRST_BOOT     (1 << 2)
-#define FLAG_CONFIG_MODE    (1 << 3)
-#define FLAG_LORA_OK        (1 << 4)
+#define FLAG_SIM            (1 << 3)   // v2: this node runs a simulation (fake sonar / fake trips); was FLAG_CONFIG_MODE, never used
+#define FLAG_CONFIG_MODE    FLAG_SIM   // legacy name
+#define FLAG_DISARMED       (1 << 4)   // v2 (D61): the hole's button / the chalet disarmed it: spool movement ignored, no FISH ON
+#define FLAG_LORA_OK        FLAG_DISARMED   // legacy name (never used)
 #define FLAG_ESPNOW_OK      (1 << 5)
 #define FLAG_SENSOR_ERROR   (1 << 6)
 #define FLAG_ACKNOWLEDGED   (1 << 7)
@@ -63,6 +66,12 @@ enum MessageType : uint8_t {
   MSG_LORA_DISCOVERY  = 0x42,
   MSG_CONFIG_UPDATE   = 0x50,   // Remote config update (supports hops)
   MSG_CONFIG_ACK      = 0x51,   // Config update acknowledgment (supports hops)
+  MSG_SONAR           = 0x60,   // v2: node -> hub, [net][node][type] + one sonar block (sonar_codec.h)
+  MSG_SONAR_CTRL      = 0x61,   // v2: hub -> nodes, SonarCtrlMessage (sim switch + FOCUS node)
+  MSG_DEV_CMD         = 0x62,   // v2: hub -> one node, DevCmdMessage (backbone relay on/off)
+  MSG_SELFTEST        = 0x63,   // D70: node -> hub, SelfTestMessage (wiring check result)
+  MSG_EB_BEACON       = 0x70,   // v2: ESP-NOW backbone, chalet beacon (lib/IceMesh/src/eb_link.h)
+  MSG_EB_HUB          = 0x71,   // v2: ESP-NOW backbone, hub packet (eb_link.h)
   MSG_PING            = 0x80,
   MSG_PONG            = 0x81,
   MSG_RESET_CMD       = 0x90,   // Reset all nodes command
@@ -81,7 +90,9 @@ typedef struct __attribute__((packed)) {
   uint16_t battery_mv;
   uint16_t sequence;        // Monotonic counter for deduplication
   uint32_t uptime_sec;      // Monotonic uptime
+  uint16_t turns;           // D69: quarter turns of the spool since armed / trip cleared (0 on reed heads)
 } SensorMessage;
+#define SENSOR_MSG_MIN_LEN 12   // D69: frames from a head without `turns` are still accepted (turns = 0)
 
 // Alert message (16 bytes)
 typedef struct __attribute__((packed)) {
@@ -93,7 +104,9 @@ typedef struct __attribute__((packed)) {
   uint16_t sequence;
   uint32_t uptime_sec;
   uint32_t alert_time;
+  uint16_t turns;           // D69: as SensorMessage
 } AlertMessage;
+#define ALERT_MSG_MIN_LEN 16
 
 // Silence sync message (12 bytes)
 typedef struct __attribute__((packed)) {
@@ -213,6 +226,61 @@ typedef struct __attribute__((packed)) {
   uint8_t  checksum;        // XOR checksum
 } ConfigAckMessage;
 
+// v2 sonar control - hub broadcast every second while the sonar test mode is on (or the knobs just
+// changed), and right after any message from a node (the node listens briefly after it transmits).
+#define SONAR_CTRL_PARAMS 32   // >= icemesh::sonar::P_COUNT (26 since D57) (lib/IceMesh/src/sonar_params.h)
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  sender_id;
+  uint8_t  msg_type;        // MSG_SONAR_CTRL
+  uint8_t  focus_node;      // 0 = none
+  uint8_t  sim_on;          // 1 = sonar nodes generate fake data
+  uint8_t  n_params;        // v2 (D42): sonar knobs that follow (0 = none)
+  uint8_t  params[SONAR_CTRL_PARAMS];
+  uint8_t  focus_extra[2];  // D81 (5.4): up to two more streamed holes (0 = none)
+} SonarCtrlMessage;
+
+// v2 device command (6 bytes) - hub -> one node, sent right after a message from that node
+// (the node listens briefly after it transmits). Relay = stay awake and rebroadcast backbone frames.
+enum : uint8_t { DEVCMD_RELAY = 1, DEVCMD_SIM = 2, DEVCMD_BAIT = 3, DEVCMD_ARM = 4, DEVCMD_SELFTEST = 5 };   // DEVCMD_SELFTEST: run the wiring check, answer with MSG_SELFTEST (D70)   // DEVCMD_BAIT value: bait depth, 5 cm steps   // DEVCMD_SIM value: bit0 sonar, bit1 Hall trips, bits 2-7 trips/hour (0 = 6)   // DEVCMD_ARM value: 1 armed, 0 disarmed (D61)
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  sender_id;
+  uint8_t  msg_type;        // MSG_DEV_CMD
+  uint8_t  target;          // node ID
+  uint8_t  cmd;             // DEVCMD_*
+  uint8_t  value;           // relay: 1 on, 0 off; sim: see DEVCMD_SIM
+} DevCmdMessage;
+
+// D70 wiring self-test result (12 bytes), the same bytes on ESP-NOW (SelfTestMessage) and in the LoRa SEC_SELFTEST
+// section ([node] + these 12). Built by the hole (WROOM / C3 head, or the Heltec's own hole), decoded by the chalet page.
+enum : uint8_t {   // SelfTestResult.sensor
+  ST_SENS_LEVEL = 0x01, ST_SENS_FLIPS = 0x02, ST_SENS_HALL = 0x04, ST_SENS_PINGED = 0x08 };   // PINGED: the shield test ping ran (the shield byte is full)
+enum : uint8_t {   // SelfTestResult.button
+  ST_BTN_RELEASED = 0x01, ST_BTN_PRESSED_SINCE_BOOT = 0x02, ST_BTN_NONE = 0x80 };
+enum : uint8_t {   // SelfTestResult.shield
+  ST_SH_SPI_OK = 0x01, ST_SH_PINS_SWAPPED = 0x02, ST_SH_VDRV_READY = 0x04, ST_SH_PULSE_FLT = 0x08,
+  ST_SH_DRV_FLT = 0x10, ST_SH_EE_FLT = 0x20, ST_SH_LEAKAGE = 0x40, ST_SH_NOT_BUILT = 0x80 };
+typedef struct __attribute__((packed)) {
+  uint8_t  ver;             // 1
+  uint8_t  sensor;          // ST_SENS_*: bit0 pin level now, bit1 flips / edges seen since boot, bit2 Hall latch logic (else reed)
+  uint8_t  button;          // ST_BTN_*
+  uint16_t battery_mv;      // 0 = no reading
+  uint8_t  shield;          // ST_SH_*
+  uint8_t  raw_max_16;      // largest raw ADC sample of the test ping / 16 (255 = clipped)
+  uint8_t  ring_bins;       // bins (2.5 cm) above the noise floor after time zero: transducer ring-down (heuristic)
+  uint8_t  noise_code;      // noise floor, 8-bit log code (prototype scale)
+  uint8_t  flips;           // sensor edges since boot, saturates at 255
+  uint8_t  presses;         // button presses since boot, saturates at 255
+  uint8_t  rssi_abs;        // |RSSI| dBm of the last hub / chalet message heard, 0 = none
+} SelfTestResult;
+typedef struct __attribute__((packed)) {
+  uint8_t  network_id;
+  uint8_t  node_id;
+  uint8_t  msg_type;        // MSG_SELFTEST
+  SelfTestResult r;
+} SelfTestMessage;
+
 // Reset command message (8 bytes) - broadcast to all nodes
 typedef struct __attribute__((packed)) {
   uint8_t  network_id;
@@ -226,7 +294,7 @@ typedef struct __attribute__((packed)) {
 // NODE STATE TRACKING (for deduplication and state management)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#define MAX_NODES 16
+#define MAX_NODES 48       // v2: 10 hubs x (hub hole + 3 tip-ups) + spares (was 16)
 #define ALERT_MIN_HOLD_MS 1000    // 1 second debounce - prevents false clears from reed bounce
 
 // Per-node tracking for sequence and state
@@ -247,9 +315,11 @@ typedef struct {
   bool     via_lora;          // Currently being received via LoRa
   bool     received_direct;   // Has EVER been received via ESP-NOW (for timeout logic)
   uint8_t  clear_confirm_count;  // Consecutive FISH_ON clear confirmations
+  uint16_t turns;             // D69: quarter turns since armed / trip cleared, as the hole reported
   char     name[16];
   uint8_t  grid_row;
   uint8_t  grid_col;
+  icemesh::AlarmLatch alarm;  // v2 (D41/D47): the FISH ON alarm shown / sounded for this hole (alarm_latch.h)
 } NodeState;
 
 // Network state

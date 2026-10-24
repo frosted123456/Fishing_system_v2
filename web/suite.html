@@ -1,0 +1,2054 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ice Fishing</title>
+<style>
+:root{
+  --bg:#EEF3F4; --surface:#FFFFFF; --ink:#13262D; --muted:#55707A; --line:#D2DEE2; --chip:#E1EAEC;
+  --accent:#1C6C77; --accent-ink:#FFFFFF; --alert:#C2412D; --alert-ink:#FFFFFF;
+  --water:#0A1E26; --water-2:#0F2A33; --water-ink:#D7E6EA; --water-muted:#86A2AB; --water-line:#1C3B46;
+  color-scheme:light; box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
+    --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0C171C; --surface:#13232A; --ink:#E4EDEF; --muted:#90A7AF; --line:#22363D; --chip:#1A2D34;
+  --accent:#5DB0BA; --accent-ink:#0A1E26; --alert:#E0725A; --alert-ink:#0A1E26; color-scheme:dark;
+}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Barlow Semi Condensed","Arial Narrow","Roboto Condensed",system-ui,sans-serif;
+  font-size:16px;line-height:1.4;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+a{color:var(--accent)}
+.top{max-width:1240px;margin:0 auto;padding:14px 14px 6px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 12px;align-items:end}
+.top h1{margin:0;font-size:2rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
+.top .sub{margin:4px 0 0;color:var(--muted);font-size:.98rem}
+.playback{display:flex;gap:6px;align-items:center}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:7px 12px;min-height:40px;min-width:44px;font-weight:600;cursor:pointer}
+.seg{display:inline-flex;background:var(--chip);border-radius:12px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;color:var(--muted);padding:7px 14px;border-radius:9px;min-height:38px;font-weight:600;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.modebar{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
+.hint{color:var(--muted);font-size:.92rem}
+.simb{background:#F2C94C;color:#3A2A00;border-radius:6px;padding:2px 8px;font-weight:700;font-size:.85rem;letter-spacing:.02em}
+.tog{display:inline-flex;align-items:center;gap:8px;font-weight:600}
+.grid{max-width:1240px;margin:0 auto;padding:8px 12px 24px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr);
+  grid-template-areas:"holes" "inst" "fall" "tgt" "echo" "ctrl" "note"}
+@media (min-width:920px){
+  .grid{grid-template-columns:350px minmax(0,1fr);grid-template-areas:"holes holes" "inst fall" "tgt fall" "echo ctrl" "note note";align-items:start}
+}
+.grid.nofocus .inst,.grid.nofocus .fall,.grid.nofocus .tgt,.grid.nofocus .echo,.grid.nofocus .ctrl{display:none}
+.water{background:var(--water);color:var(--water-ink);border-radius:18px;padding:12px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px}
+.card h2,.water h2{margin:0 0 8px;font-size:1.15rem;font-weight:600;letter-spacing:.005em}
+.water h2{color:var(--water-ink)}
+.muted{color:var(--muted)}
+/* Holes */
+.holes{grid-area:holes}
+.hgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+.hole{display:grid;gap:2px;text-align:left;border:1px solid var(--line);background:transparent;border-radius:12px;padding:10px;cursor:pointer;min-height:104px}
+.hole[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.hole.fish{border-color:var(--alert);box-shadow:inset 0 0 0 1px var(--alert)}
+.hole .hd{display:flex;justify-content:space-between;gap:6px;align-items:baseline;font-weight:600}
+.hole .big{font-size:1.3rem;font-weight:700;line-height:1.15}
+.hole .sm{color:var(--muted);font-size:.88rem;line-height:1.25}
+.badge{font-size:.72rem;font-weight:700;padding:1px 6px;border-radius:6px;background:var(--chip);color:var(--muted);white-space:nowrap}
+.badge.on{background:var(--accent);color:var(--accent-ink)}.badge.al{background:var(--alert);color:var(--alert-ink)}
+.act{height:5px;background:var(--chip);border-radius:3px;overflow:hidden;margin-top:4px}.act i{display:block;height:100%;background:var(--accent)}
+.sw{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:baseline}
+/* Instrument */
+.inst{grid-area:inst}
+.flash-wrap{position:relative;width:100%;max-width:330px;margin:0 auto;aspect-ratio:1/1}
+.flash-wrap canvas{position:absolute;inset:0;width:100%;height:100%}
+.readouts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:8px;border-top:1px solid var(--water-line);padding-top:10px}
+.readouts div{min-width:0}
+.readouts span{display:block;color:var(--water-muted);font-size:.85rem}
+.readouts strong{display:block;font-weight:600;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Waterfall */
+.fall{grid-area:fall}
+.fall-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fall-head p{margin:0;color:var(--water-muted);font-size:.9rem}
+.stack{position:relative;height:clamp(300px,56vh,560px);border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
+.stack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.zoom-head{display:flex;justify-content:space-between;align-items:baseline;margin:12px 0 6px;color:var(--water-muted);font-size:.9rem}
+.zoom-head strong{color:var(--water-ink);font-weight:600}
+.zstack{position:relative;height:108px;border-radius:10px;overflow:hidden;background:var(--water);box-shadow:inset 0 0 0 1px var(--water-line)}
+.zstack canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:10px;font-size:.88rem;color:var(--water-muted)}
+.legend i{display:inline-block;width:18px;height:8px;border-radius:2px;margin-right:6px;vertical-align:middle}
+/* Targets */
+.tgt{grid-area:tgt}
+.tlist{display:grid;gap:6px}
+.trow{display:grid;grid-template-columns:12px minmax(0,1fr) auto;gap:4px 10px;align-items:center;text-align:left;width:100%;border:1px solid var(--line);background:transparent;border-radius:10px;padding:8px 10px;cursor:pointer}
+.trow[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.trow .dot{width:12px;height:12px;border-radius:50%}
+.trow .nm{font-weight:600}.trow .dp{font-weight:600;justify-self:end}
+.trow .meta{grid-column:2/4;color:var(--muted);font-size:.9rem}
+.empty{margin:0;color:var(--muted)}
+/* Echo */
+.echo{grid-area:echo}
+.echo .who{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.echo .who strong{font-size:1.1rem}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;margin:10px 0 0}
+.metrics div{min-width:0}
+.metrics dt{color:var(--muted);font-weight:500;font-size:.9rem}
+.metrics dd{margin:0;color:var(--muted);font-size:.9rem;line-height:1.25}
+.metrics dd b{display:block;color:var(--ink);font-weight:700;font-size:1.25rem;line-height:1.15}
+.read{margin:12px 0 0;padding:10px 12px;border-radius:10px;background:var(--chip);line-height:1.35}
+.small{font-size:.85rem;color:var(--muted);margin:8px 0 0}
+/* Controls */
+.ctrl{grid-area:ctrl}
+.toggles{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.toggles li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.toggles li:last-child{border-bottom:0}
+.toggles .name{font-weight:600}
+.toggles .desc{grid-column:1;color:var(--muted);font-size:.9rem;line-height:1.3}
+.switch{grid-row:1/3;grid-column:2;width:48px;height:28px;border-radius:14px;border:0;background:var(--line);position:relative;cursor:pointer;flex:none}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s ease}
+.switch[aria-checked="true"]{background:var(--accent)}
+.switch[aria-checked="true"]::after{transform:translateX(20px)}
+.tog .switch{grid-row:auto;grid-column:auto}
+.scene{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.note{grid-area:note;margin:0;color:var(--muted);font-size:.9rem;max-width:78ch}
+@media (prefers-reduced-motion: reduce){ .switch::after{transition:none} }
+/* ---- Suite shell ---- */
+.app{background:var(--bg)}
+.app .bar{max-width:1240px;margin:0 auto;padding:10px 14px 6px;display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between}
+.app h1{margin:0;font-size:1.6rem;line-height:1;font-weight:700;letter-spacing:-0.01em}
+.app .sub{margin:3px 0 0;color:var(--muted);font-size:.92rem}
+.actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.actions .btn{min-height:38px;padding:5px 11px}
+.btn[aria-pressed="true"].warn{background:#F2C94C;border-color:#F2C94C;color:#3A2A00}
+.rtbar[hidden]{display:none}.rtbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#F2C94C;color:#3A2A00;padding:6px 14px;font-weight:700;font-size:.95rem}.rtbar .btn{background:#3A2A00;color:#fff;border-color:#3A2A00}.rtt td,.rtt th{padding:4px 8px;text-align:right}.rtt td:first-child,.rtt th:first-child{text-align:left}.follow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 8px}#follow[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.alert{position:fixed;left:0;right:0;bottom:0;z-index:20;padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));pointer-events:none}
+.alert>div{pointer-events:auto;max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;background:var(--alert);color:var(--alert-ink);border-radius:14px;padding:10px 14px;font-size:1.05rem;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+body.has-alert{padding-bottom:84px}
+.alert .btn{background:#FFFFFF;color:#13262D;border:0;min-height:40px}
+.alert>div.muted-al{background:var(--chip);color:var(--ink)}
+.alert b{font-size:1.2rem;letter-spacing:.03em;margin-right:6px}
+.alert .btn{min-height:36px}
+.soundhint{max-width:1240px;margin:0 auto 6px;padding:0 14px;color:var(--muted);font-size:.9rem}
+.tabs{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:0 max(10px,calc((100% - 1240px)/2 + 10px));display:flex;gap:2px;overflow-x:auto}
+.tabs button{border:0;background:transparent;color:var(--muted);font-weight:600;font-size:1rem;padding:10px 14px;min-height:44px;border-bottom:3px solid transparent;cursor:pointer;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tabs .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--alert);margin-left:6px;vertical-align:middle}
+.wrap{max-width:1240px;margin:0 auto;padding:12px 12px 24px;display:grid;gap:12px;grid-template-columns:minmax(0,1fr)}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px 10px}
+.stat span{display:block;color:var(--muted);font-size:.78rem}.stat strong{display:block;font-size:1.15rem;font-weight:700;line-height:1.2}
+.pmap .pmhd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+#pmap{display:block;width:100%;height:340px;border-radius:10px;background:#DCE9EC;touch-action:none;cursor:grab}
+@media (max-width:520px){#pmap{height:300px}}
+.pmlegend{display:flex;flex-wrap:wrap;gap:4px 12px;margin-top:6px;font-size:.86rem;color:var(--muted)}.pmlegend .sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px}
+.pmfx{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;border-radius:10px}.pmfull .pmfx{border-radius:8px}
+.pmfollow{display:block;margin:0 0 6px;max-width:100%;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid rgba(0,179,214,.55);border-radius:999px;background:rgba(255,255,255,.94);color:#13262D;font-family:inherit;font-weight:600;font-size:.85rem;line-height:1.2;padding:5px 12px 5px 10px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.pmfollow::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:#00B3D6;margin-right:7px;vertical-align:1px}
+.pmfollow.pinned::before{border-radius:2px}.pmfollow.trip{border-color:rgba(194,65,45,.6)}.pmfollow.trip::before{background:#C2412D}.pmfollow.idle{color:#5A6E74;font-weight:500}.pmfollow.idle::before{background:#B8C6CA}
+.pmchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.pmwrap{position:relative}.pmfull{position:fixed;inset:0;z-index:50;border-radius:0;overflow:auto;padding:10px 12px}.pmfull #pmap{height:calc(100vh - 150px);border-radius:8px}.pmsheet{margin-top:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface)}.pmsheet .hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.pmsheet .nm{font-weight:700;font-size:1.05rem}.pmsheet .kv{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:4px 12px;margin:8px 0;font-size:.92rem}.pmsheet .kv span{color:var(--muted);display:block;font-size:.8rem}.pmsheet .acts{display:flex;flex-wrap:wrap;gap:6px}#pmDepth[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.pmchips .btn.ghost{border-style:dashed}.pmctl{position:absolute;right:8px;top:8px;display:flex;flex-direction:column;gap:4px}.pmctl button{width:34px;height:34px;border-radius:8px;border:1px solid var(--line);background:rgba(255,255,255,.92);color:var(--ink);font-size:20px;line-height:1;cursor:pointer}#pmLay button{min-height:30px;padding:2px 10px}.pmchips .btn{min-height:32px;padding:3px 10px;font-size:.9rem}.pmchips .btn[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.small.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+/* D85b: compact cards, so the map, the Live card and every hole fit on one screen */
+.ngrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:6px}
+@media (max-width:520px){.ngrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:359px){.ngrid{grid-template-columns:minmax(0,1fr)}}
+.node{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px 8px;display:grid;gap:2px;align-content:start}
+.node.fish{border-color:var(--alert);box-shadow:inset 0 0 0 1px var(--alert)}
+.node.off{opacity:.65}
+.node .hd{display:flex;justify-content:space-between;gap:6px;align-items:center;font-weight:600;font-size:.98rem}
+.node .hd .nm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node .hd .bd{display:flex;gap:4px;flex-shrink:0}
+.node.fish .hd .nm{color:var(--alert)}
+.node .sum{display:grid;gap:0;margin-top:3px;padding-top:4px;border-top:1px solid var(--line)}
+.node .sum b{font-size:.9rem}.node .sum small{color:var(--muted);font-size:.78rem}
+.node .flags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.node{min-width:0}.node>*{min-width:0}
+.node .acts{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}.node .acts .btn{flex:1 1 0;min-width:0;min-height:28px;padding:2px 4px;font-size:.78rem;white-space:nowrap;border-radius:7px}
+.node .acts .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+@media (max-width:520px){.node .acts .btn{flex:1 0 42%}}   /* phones: two rows of two */
+.badge.warn{background:#F2C94C;color:#3A2A00}.badge.ice{background:var(--alert);color:var(--alert-ink)}
+.node .sm{color:var(--muted);font-size:.78rem;line-height:1.3}
+.bat{display:flex;align-items:center;gap:8px;font-size:.88rem;color:var(--muted)}
+.bat .bar{flex:1;height:4px;background:var(--chip);border-radius:3px;overflow:hidden}.bat .bar i{display:block;height:100%;background:var(--accent)}
+.busy .bat span:first-child{min-width:8.5em;color:var(--ink)}.busy .bat.cur span:first-child{font-weight:700}
+details.adv{margin-top:6px}details.adv h3{font-size:.9rem;margin:14px 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}details.adv>summary{cursor:pointer;color:var(--muted);font-weight:600;padding:6px 0}details.adv[open]>summary{margin-bottom:10px}
+.rl{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}.rl .sm{color:var(--muted);font-size:.86rem}
+.node.low .bat .bar i{background:#E0A43A}
+.gl{display:block;width:100%;height:46px;border-radius:6px;background:var(--chip);margin-top:4px}
+.lpgrid{display:grid;gap:8px;grid-template-columns:1fr}
+.lp{border:1px solid var(--line);border-radius:12px;padding:8px 10px;background:var(--surface);cursor:pointer;text-align:left;color:inherit;font:inherit;display:block;width:100%}
+.lp.main{border-color:var(--accent)}.lp .hd{display:flex;justify-content:space-between;align-items:baseline;gap:6px}.lp .nm{font-weight:700}.lp .st{color:var(--muted);font-size:.85rem}
+.lp canvas{display:block;width:100%;height:120px;border-radius:8px;background:#0A1E26;margin-top:6px}.lpgrid[data-n="1"] .lp canvas{height:170px}
+.hcards summary{cursor:pointer;font-weight:700;padding:6px 0}.hcards summary .hint{font-weight:400;margin-left:6px}
+@media (min-width:920px){.pmlive{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start}.pmlive>.card{margin:0}}
+.hole.live2{border-color:rgba(0,179,214,.6)}.badge.on2{background:rgba(0,179,214,.18);color:#0b6a80}.hole .gl{height:44px;margin-top:4px}
+.glt{display:grid;gap:1px;font-size:.86rem}.glt small{color:var(--muted)}
+.badge.sim{background:#E0A43A;color:#1b1b1b}
+.simt{width:100%;border-collapse:collapse;font-size:.92rem}.simt td,.simt th{padding:5px 4px;border-bottom:1px solid var(--line);text-align:left}.simt th{color:var(--muted);font-weight:600}
+.btnrow{display:flex;flex-wrap:wrap;gap:8px}
+.son{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-top:4px;padding-top:6px;border-top:1px solid var(--line);font-size:.9rem}
+.linkbtn{border:0;background:transparent;color:var(--accent);font-weight:600;padding:4px 0;cursor:pointer;justify-self:start;min-height:32px}
+.btn.small{min-height:34px;padding:4px 10px}
+.tablewrap{overflow-x:auto}
+table.rt{border-collapse:collapse;width:100%;font-size:.92rem;min-width:720px}
+table.rt th,table.rt td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:right;white-space:nowrap}
+table.rt th:first-child,table.rt td:first-child{text-align:left}
+table.tbl{border-collapse:collapse;width:100%;font-size:.92rem}table.tbl th,table.tbl td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top}
+table.rt th{color:var(--muted);font-weight:600}
+.form{display:grid;gap:10px}
+.form label.f{display:grid;gap:4px;font-weight:600}
+.form input[type=number],.form input[type=text],.form select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-height:42px}
+.form small{color:var(--muted);font-weight:400}
+.msg{min-height:1.4em;color:var(--muted)}
+.sgrid{grid-template-columns:minmax(0,1fr)}
+@media (min-width:920px){.sgrid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}}
+dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt{color:var(--muted)}dl.kv dd{margin:0;font-weight:600}
+@media (max-width:600px){
+  .app .bar{padding:8px 12px 4px;gap:4px 8px}
+  .app .bar>div:first-child{order:0;flex:1 1 100%;min-width:0}.app .actions{order:2;flex:1 1 100%;justify-content:flex-start}
+  .app .sub{order:1;flex-basis:100%;margin:0;font-size:.86rem;line-height:1.3}
+  .app h1{font-size:1.35rem}
+  .actions .btn{min-height:34px;padding:4px 9px;font-size:.92rem}
+  .simb{font-size:.74rem;padding:2px 6px}
+}
+</style>
+</head>
+<body>
+<header class="app">
+  <div class="bar">
+    <div><h1>Ice Fishing</h1><p class="sub" id="sysline">Connecting to the chalet…</p></div>
+    <div class="actions">
+      <span class="simb" id="testb" hidden>TEST MODE</span>
+      <button class="btn" id="soundBtn" type="button" aria-pressed="true">Sound on</button>
+      <button class="btn" id="silenceBtn" type="button" aria-pressed="false">Silence alerts</button>
+    </div>
+  </div>
+  <div class="alert" id="alert" role="alert" hidden><div id="alertBox"><span><b>FISH ON</b><span id="alertWho"></span></span><button class="btn" id="alertSilence" type="button">Silence</button></div></div>
+  <div class="rtbar" id="rtBar" hidden><span id="rtLine">RANGE TEST</span><button class="btn small" id="rtStop" type="button">Stop the range test</button></div>
+  <div class="soundhint" id="soundHint" hidden>Tap anywhere on the page to allow the alert sound on this phone.</div>
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button type="button" role="tab" data-tab="holes" aria-selected="true">Holes<span class="dot" id="holesDot" hidden></span></button>
+    <button type="button" role="tab" data-tab="sonar" aria-selected="false">Sonar</button>
+    <button type="button" role="tab" data-tab="radio" aria-selected="false">Radio</button>
+    <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+  </nav>
+</header>
+
+<div class="panel" id="tab-holes" role="tabpanel">
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><span>Holes online</span><strong id="sOnline">–</strong></div>
+      <div class="stat"><span>Fish on</span><strong id="sFish">–</strong></div>
+      <div class="stat"><span>LoRa mesh</span><strong id="sLora">–</strong></div>
+      <div class="stat"><span>Wi-Fi</span><strong id="sWifi">–</strong></div>
+    </div>
+    <div class="pmlive">
+    <div class="card pmap" id="pmapCard">
+      <div class="pmhd"><h2 style="margin:0">Pocket map</h2>
+        <div class="btnrow"><span class="seg" role="group" aria-label="Map layer" id="pmLay"><button type="button" data-lay="map" aria-pressed="true">Map</button><button type="button" data-lay="sat" aria-pressed="false">Satellite</button></span><button class="btn small" id="pmDepth" type="button" aria-pressed="false" title="CHS NONNA bathymetry where it exists (Ottawa River around Ottawa; not upstream of the Chats dam)">Depth</button><button class="btn small" id="pmSave" type="button" title="Keep the tiles of this area on the chalet for the ice (no internet)">Save area</button><button class="btn small" id="pmFull" type="button" aria-pressed="false" title="Expand the map">⤢</button></div></div>
+      <button type="button" class="pmfollow" id="pmFollow" hidden title="Open the Sonar tab"></button>
+      <div class="pmwrap">
+      <canvas id="pmap" aria-label="Map of the holes around the chalet: drag to pan, pinch to zoom"></canvas>
+      <canvas class="pmfx" id="pmFx" aria-hidden="true"></canvas>
+      <div class="pmctl"><button type="button" id="pmIn" aria-label="Zoom in">+</button><button type="button" id="pmOut" aria-label="Zoom out">−</button><button type="button" id="pmHome" aria-label="Centre on the chalet">⌂</button></div></div>
+      <div class="pmlegend"><span><i class="sw" style="background:#9ED3D9"></i>shallow</span><span><i class="sw" style="background:#15404C"></i>deep</span><span><i class="sw" style="background:#C9A25C"></i>hard</span><span><i class="sw" style="background:#A89A6A"></i>medium</span><span><i class="sw" style="background:#7E8A5A"></i>soft</span><span><i class="sw" style="background:var(--alert)"></i>fish on</span><span><i class="sw" style="background:#00B3D6"></i>followed</span><span id="pmBg"></span></div>
+      <p class="hint" id="pmHint" style="margin:6px 0 0"></p>
+      <div class="pmchips" id="pmChips"></div>
+      <div class="pmsheet" id="pmSheet" hidden></div>
+    </div>
+    <div class="card" id="liveCard">
+      <div class="pmhd"><h2 style="margin:0">Live</h2>
+        <div class="btnrow"><button class="btn small" id="follow2" type="button" aria-pressed="true" title="The streamed holes follow the fish">Follow the action</button>
+        <span class="seg" role="group" aria-label="Holes streamed at once" id="followN" title="Holes streamed at once (more = more radio and a slower page)"><button type="button" data-fn="1" aria-pressed="false">1</button><button type="button" data-fn="2" aria-pressed="true">2</button><button type="button" data-fn="3" aria-pressed="false">3</button></span></div></div>
+      <p class="hint" id="liveWhy" style="margin:4px 0 8px"></p>
+      <div class="lpgrid" id="lpgrid"><p class="empty">No hole streaming yet.</p></div>
+      <p class="hint" style="margin:8px 0 0">Whole water column of every hole that streams (up to 3 when the radio has room), newest on the right. Tap a panel for the full view.</p>
+    </div>
+    </div>
+    <details id="holeCards" class="hcards"><summary>Hole cards <span class="hint" id="hcSum"></span></summary>
+    <label class="hint" style="display:flex;gap:8px;align-items:center;margin:8px 0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
+    <div class="ngrid" id="ngrid"></div>
+    </details>
+    <p class="hint" id="tripsInfo" style="margin:0"></p>
+    <p class="hint" style="margin:0">Hole cards: last minutes of every sonar hole; Watch opens the live sonar. Set bait tells the hole where your lure is (labels, near-bait warning).</p>
+  </div>
+</div>
+
+<div class="panel" id="tab-sonar" role="tabpanel" hidden>
+<div class="top">
+  <div>
+    <h1 id="ttl">Sonar</h1>
+    <p class="sub" id="sub">Pick a hole to stream it</p>
+  </div>
+  <div class="playback">
+    <button class="btn" id="play" type="button" aria-pressed="true">Pause</button>
+    <span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span>
+  </div>
+  <div class="modebar">
+    <span class="simb" id="simb" hidden>FAKE DATA</span>
+    <span class="tog"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
+    <span class="hint" id="st"></span>
+  </div>
+</div>
+
+<main class="grid nofocus" id="main">
+  <section class="card holes" aria-label="Holes">
+    <h2>Holes</h2>
+    <div class="follow"><button class="btn small" id="follow" type="button" aria-pressed="true" title="The streamed hole follows the fish: the busiest hole, at least 20 s each; FISH ON wins for 2 min; your own pick holds 5 min">Follow the action</button><span class="hint" id="followWhy"></span></div>
+    <div class="hgrid" id="holes"></div>
+    <p class="hint" style="margin:8px 0 0">Tap a hole to stream it (about 1 s behind). The others send a summary every few seconds. With "Follow the action" on, a hole you pick stays for 5 min, then the stream follows the fish again.</p>
+  </section>
+
+  <section class="water inst" aria-label="Flasher">
+    <div class="flash-wrap"><canvas id="flash" aria-label="Flasher dial showing the latest ping"></canvas></div>
+    <div class="readouts">
+      <div><span>Bait line</span><strong id="roBait">–</strong></div>
+      <div><span>Bottom type</span><strong id="roBottom">–</strong></div>
+      <div><span>Noise floor</span><strong id="roNoise">–</strong></div>
+      <div><span>Beam at bottom</span><strong id="roCone">–</strong></div>
+    </div>
+  </section>
+
+  <section class="water fall" aria-label="Waterfall">
+    <div class="fall-head"><h2>Last 60 seconds</h2><p>4 pings per second, newest on the right</p></div>
+    <div class="stack"><canvas id="fall" aria-label="Waterfall of the last 240 pings"></canvas><canvas id="fallOv" aria-hidden="true"></canvas></div>
+    <div class="zoom-head"><strong>Bottom lock</strong><span id="zoomSpan">last 5 ft above bottom, stretched</span></div>
+    <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
+    <div class="legend">
+      <span><i style="background:#8FA9B2"></i><i class="sw" style="background:#9A8F7A"></i>Lake bed <i class="sw" style="background:#6FA868"></i>Weeds, structure (still)</span>
+      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong</span>
+      <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
+    </div>
+  </section>
+
+  <section class="card tgt" aria-label="Targets under the hole">
+    <h2>Under the hole now</h2>
+    <div class="tlist" id="tlist"></div>
+  </section>
+
+  <section class="card echo" aria-label="Echo character">
+    <h2>Echo character</h2>
+    <div class="who"><strong id="echoWho">–</strong><span class="muted" id="echoDepth"></span></div>
+    <dl class="metrics">
+      <div><dt>Flicker</dt><dd><b id="mFlick">–</b>change in strength ping to ping</dd></div>
+      <div><dt>Frequency change</dt><dd><b id="mSpread">–</b>how differently 190 and 210 kHz see it</dd></div>
+      <div><dt>Echo length</dt><dd><b id="mWidth">–</b><span id="mWidthNote">the pulse alone is about 4 in</span></dd></div>
+      <div><dt>Versus bait</dt><dd><b id="mRel">–</b>strength relative to your lure</dd></div>
+    </dl>
+    <p class="read" id="echoRead">Pick a target to see its echo.</p>
+    <p class="small">The echo shape at 190/200/210 kHz stays on the hole: too big for the radio. These numbers are computed there, every 2 s.</p>
+  </section>
+
+  <section class="card ctrl" aria-label="Display">
+    <h2>Display</h2>
+    <ul class="toggles" id="toggles"></ul>
+    <ul class="toggles" id="vknobs">
+      <li><span class="name">Depth scale</span><select id="vDepth" aria-label="Depth scale"></select><span class="desc">Auto follows the bottom; a fixed scale zooms on the top of the water.</span></li>
+      <li><span class="name">Colour gain</span><input type="range" id="vGain" min="-6" max="6" step="1" aria-label="Colour gain"><span class="desc">Brighter or darker echoes on this screen only.</span></li>
+      <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only.</span></li>
+    </ul>
+    <details class="knobs"><summary>Processing on the holes (every sonar hole)</summary>
+      <ul class="toggles">
+        <li><span class="name">Noise filter</span><div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High</button></div><span class="desc">Low shows more (and more junk), High shows only clear echoes. Start Normal.</span></li>
+        <li><span class="name">Water</span><div class="seg" role="group" aria-label="Water depth" id="kWater"><button type="button" data-water="lake">Lake</button><button type="button" data-water="shallow">Shallow (under 2 m)</button><button type="button" data-water="bucket">Bucket test</button></div><span class="desc">Where the bottom is looked for and how close to the transducer echoes count.</span></li>
+      </ul>
+      <label class="tog" style="margin:8px 0"><input type="checkbox" id="kAdv"> Advanced (all 22 settings)</label>
+      <ul class="toggles" id="knobs" hidden></ul>
+      <div class="scene"><button class="btn" id="kDefaults" type="button">Defaults</button> <button class="btn" id="kResend" type="button">Send to holes again</button></div>
+      <p class="desc" id="kNote">Values tuned on simulated echoes so far; the first real recordings will move them. Saved on every hole.</p>
+    </details>
+    <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
+  </section>
+
+  <p class="note" id="note">Processing runs on each hole (bottom lock, noise floor, targets, static scene); the radio carries targets, changed cells and a 4-level static scene, so the picture is coarser than raw sonar.</p>
+</main>
+</div>
+
+<div class="panel" id="tab-radio" role="tabpanel" hidden>
+  <div class="wrap">
+    <section class="card">
+      <h2>Links</h2>
+      <p class="hint" id="lkSum" style="margin:0 0 8px"></p>
+      <div class="tablewrap"><table class="rt" id="lkTable"></table></div>
+      <p class="hint" style="margin:10px 0 0">When the chalet last heard each hub directly on LoRa, and on ESP-NOW (with the relays passed). Backbone = the hub also sends over ESP-NOW right now (Auto fallback or ESP-NOW mode). Transport and channel are set in Settings → Network.</p>
+    </section>
+    <section class="card" id="rtCard">
+      <h2>Range test — walk with the chalet box</h2>
+      <p class="sm" style="margin:0 0 8px">One hub stays at its hole; its turn cycles through every LoRa speed (SF9 → SF5, one per second) while you carry the chalet box around. Every result is logged with the box's GPS position and its distance to the hub. Trips and alerts keep working; only that hub's sonar is thin while a speed fails.</p>
+      <div class="form">
+        <label class="f">Hub that stays put<select id="rtHub"></select></label>
+        <label class="f">Note for this run<input type="text" id="rtNote" maxlength="44" placeholder="e.g. hub antenna 30 cm above the ice, box at waist height"></label>
+        <div class="btnrow"><button class="btn" type="button" id="rtPin" title="The box must be at the hub right now (GPS fix)">Box is at the hub: pin it here</button><button class="btn primary" type="button" id="rtGo">Start the range test</button></div>
+        <p class="hint" id="rtMsg" style="margin:0"></p>
+      </div>
+      <div class="tablewrap" style="margin-top:8px"><table class="rt rtt" id="rtTable"></table></div>
+      <h3 style="margin:14px 0 6px;font-size:1rem">Runs on the chalet</h3>
+      <div id="rtRuns"></div>
+      <p class="hint" style="margin:8px 0 0">Download a run (CSV: time, GPS, distance, speed, received, RSSI, SNR, and how the hub heard the chalet) and send it over: the speed limits get measured instead of estimated. Stops by itself after 2 h, when storage runs low, or when the hub is gone for 5 min.</p>
+    </section>
+    <section class="card">
+      <h2>Radio test modes</h2>
+      <div class="form">
+        <label class="f">Test mode
+          <select id="rTest"><option value="0">Off (normal)</option><option value="1">Rotate SF9 … SF5</option><option value="2">Fixed SF9/500</option><option value="3">Fixed SF8/500</option><option value="4">Fixed SF7/500</option></select>
+        </label>
+        <span class="tog"><span id="lblAd">Adaptive speed per hub (SF9 → SF5 on signal margin; off = SF9 for a range test)</span><button type="button" class="switch" role="switch" id="rAdapt" aria-labelledby="lblAd" aria-checked="false"></button></span>
+        <div><button class="btn" id="rReset" type="button">Reset stats</button></div>
+      </div>
+      <p class="hint" id="rStatus" style="margin:10px 0 0"></p>
+    </section>
+    <section class="card">
+      <h2>Hubs</h2>
+      <div class="tablewrap"><table class="rt" id="rTable"></table></div>
+      <p class="hint" style="margin:10px 0 0">Per hub and per LoRa mode: packets received / slots scheduled at the chalet, RSSI/SNR at the chalet. Beacon columns: the chalet beacon as heard by the hub, beacons lost in the last 64, timing error. Sensitivity (theory, not measured): SF9/500 −123.5, SF8/500 −121, SF7/500 −118.5 dBm.</p>
+    </section>
+  </div>
+</div>
+
+<div class="panel" id="tab-settings" role="tabpanel" hidden>
+  <div class="wrap sgrid">
+    <section class="card">
+      <h2>Alerts</h2>
+      <form class="form" id="setForm">
+        <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
+        <span class="tog"><span id="lblNb">Short beep when a fish comes near a bait (sonar)</span><button type="button" class="switch" role="switch" id="fNear" aria-labelledby="lblNb" aria-checked="false"></button></span>
+        <label class="f">FISH ON alarm<select id="fAlarm"><option value="0">Until silenced</option><option value="1">1 min after the trip</option><option value="5">5 min after the trip</option><option value="15">15 min after the trip</option><option value="30">30 min after the trip</option></select><small>Screen, buzzer and phone keep ringing after the flag is reset, until silenced (or this time). A new trip always rings again.</small></label>
+        <div><button class="btn" type="submit" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)">Save</button> <span class="msg" id="setMsg"></span></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>PIN</h2>
+      <form class="form" id="pinForm">
+        <label class="f">PIN for changes (4-8 digits, empty = off)<input type="text" id="fPin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off" placeholder="off"><small id="fPinInfo">Off by default: anyone on the chalet Wi-Fi can arm holes or change settings. With a PIN, the page asks for it once per phone. Forgot it? Serial command <code>PIN CLEAR</code>. This is a lock, not encryption: never expose the chalet to the internet.</small></label>
+        <div><button class="btn" type="submit">Save PIN</button> <span class="msg" id="pinMsg"></span></div>
+      </form>
+    </section>
+    <section class="card">
+      <h2>Network</h2>
+      <p id="nStatus" style="margin:0 0 4px;font-weight:600"></p>
+      <p class="hint" id="nStatus2" style="margin:0"></p>
+      <p class="hint" id="nStatus3" style="margin:4px 0 0"></p>
+    </section>
+    <section class="card">
+      <h2>This phone</h2>
+      <div class="form">
+        <span class="tog"><span id="lblSnd">Alert sound</span><button type="button" class="switch" role="switch" id="fSound" aria-labelledby="lblSnd" aria-checked="true"></button></span>
+        <div><span class="hint">Depth units</span><br><span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span></div>
+        <div><button class="btn" id="testSound" type="button">Test the sound</button></div>
+      </div>
+    </section>
+    <section class="card">
+      <details class="adv" id="setAdv"><summary>Advanced (normally nothing to change)</summary>
+      <h3>Measurements</h3>
+      <div class="form">
+        <label class="f" for="fTurn">Line per spool turn (cm)<input type="number" id="fTurn" min="0" max="60" value="12" form="setForm"><small>For the "line out" estimate next to the turn count. A 5 cm spool pays out 10-15 cm per turn when full, less as the bait goes deeper: 12 is a fair average. 0 = turns only.</small></label>
+        <label class="f" for="fBeam">Sonar beam angle (°)<input type="number" id="fBeam" min="5" max="60" value="14" form="setForm"><small>Full cone angle from the transducer's spec sheet (typical 10-25° at 200 kHz). Sets the beam-width readouts on the Sonar tab.</small></label>
+        <div><button class="btn" type="submit" form="setForm">Save</button></div>
+      </div>
+      <h3>Wiring check</h3>
+      <p class="sm" style="margin:0 0 6px">Asks a hole to test itself: sensor pin, arming button, battery, sonar shield (SPI, VDRV, a test ping) and radio. The result comes back over the mesh: a hub answers in a few seconds, a sleeping tip-up at its next heartbeat (up to 1 min).</p>
+      <div class="acts" style="margin:0 0 6px"><select id="stHole"></select> <button class="btn small primary" type="button" id="stRun">Run</button> <span class="msg" id="stMsg"></span></div>
+      <div id="stOut"></div>
+      <h3>Map storage</h3>
+      <p class="sm" style="margin:0 0 6px">Map tiles come from the internet through the phone; every tile seen stays on this phone, and <b>Save area</b> on the Holes tab keeps the tiles of an area on the chalet for any phone on the ice. Depth contours (optional, where CHS has data): a pack made on the PC with <code>tools/lake_prep.py</code>.</p>
+      <p class="hint" id="tlInfo" style="margin:0 0 6px"></p>
+      <div class="acts" style="margin:0 0 10px"><button class="btn small" type="button" id="tlClear">Clear saved areas on the chalet</button> <button class="btn small" type="button" id="tlPhone">Clear this phone's tile cache</button></div>
+      <div class="acts" style="margin:0 0 6px"><input type="file" id="mpFile" accept=".json,application/json" aria-label="Map pack file"> <button class="btn small primary" type="button" id="mpUp">Store on chalet</button> <button class="btn small" type="button" id="mpClear">Remove</button></div>
+      <p class="hint" id="mpInfo" style="margin:0 0 10px"></p>
+      <h3>LoRa &amp; relays</h3>
+      <div class="form">
+        <label class="f">LoRa channel<select id="nCh"><option value="auto">Auto (moves when busy)</option><option value="1">1 · 915.0 MHz</option><option value="2">2 · 904.0 MHz</option><option value="3">3 · 907.0 MHz</option><option value="4">4 · 910.0 MHz</option><option value="5">5 · 913.0 MHz</option><option value="6">6 · 918.0 MHz</option><option value="7">7 · 921.0 MHz</option><option value="8">8 · 924.0 MHz</option></select><small id="nChInfo"></small></label>
+        <div><span class="hint">Activity heard by the chalet per channel (% of the time a signal is 8 dB above that channel's noise floor)</span><div class="busy" id="nBusy"></div></div>
+        <div><button class="btn" id="nScan" type="button">Check channels now</button></div>
+        <div><span class="hint">ESP-NOW relays (rebroadcast between hubs and the chalet, max 2 in a row)</span><div id="nRelays"></div></div>
+        <p class="hint" style="margin:0">Hubs follow these settings through the beacon: nothing to reprogram on the ice. A channel change is announced 6 beacons ahead.</p>
+      </div>
+      <h3>Test &amp; simulation</h3>
+      <div class="form">
+        <div class="btnrow"><button class="btn" type="button" id="simAllOn">Everything ON</button><button class="btn" type="button" id="simAllOff">Everything OFF</button></div>
+        <label class="f">Demo network on this box (no other hardware)<select id="simDemo"><option value="0">Off</option><option value="1x3">1 hub x 3 holes</option><option value="2x3">2 hubs x 3 holes</option><option value="3x3">3 hubs x 3 holes</option><option value="4x3">4 hubs x 3 holes</option><option value="3x4">3 hubs x 4 holes</option><option value="4x4">4 hubs x 4 holes</option></select><small>Fake hubs and holes inside the chalet, marked DEMO / SIM. Off after a reboot.</small></label>
+        <label class="f">Fake fish (flag up) per hole<select id="simRate"><option value="2">about 2 per hour</option><option value="6">about 6 per hour</option><option value="12">about 12 per hour</option><option value="30">about 30 per hour</option><option value="60">about 1 per minute</option></select><small>Applies to the next switch you turn on</small></label>
+        <div class="tablewrap"><table class="simt" id="simTable"></table></div>
+        <p class="hint" style="margin:0">Fake sonar keeps a tip-up awake (battery). Fake fish go through the real alert path (buzzer, phone) and are marked SIM everywhere. Test holes on the hubs are switched from the Sonar tab and never survive a reboot. Turn the rest off after testing.</p>
+      </div>
+      </details>
+    </section>
+    <section class="card">
+      <h2>About</h2>
+      <dl class="kv" id="about"></dl>
+      <p class="hint" style="margin:10px 0 0">Hubs take the network settings (LoRa channel, relays) from the chalet; their other settings are set on each hub. Hub ↔ chalet link: ESP-NOW while a hub hears the chalet on it, LoRa otherwise, by itself.</p>
+    </section>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
+// v2 (D42) display knobs of this phone/PC: depth scale (auto or fixed, metres), colour gain, hide weak echoes
+const vopt = { depth: 'auto', gain: 0, weak: 0 };
+try { Object.assign(vopt, JSON.parse(localStorage.getItem('sonarView') || '{}')); } catch (e) { /* private mode */ }
+const saveV = () => { try { localStorage.setItem('sonarView', JSON.stringify(vopt)); } catch (e) { /* ignore */ } };
+const NICE = [2, 3, 4, 5, 6, 8, 10, MAXD];
+let autoVD = MAXD;
+function VD() {   // depth shown (m): fixed, or auto = recent bottom + 20 % (+0.3 m), snapped to a nice scale, with hysteresis
+  if (vopt.depth !== 'auto') return Math.min(MAXD, Math.max(1, +vopt.depth || MAXD));
+  const bs = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) if (recs[k].b != null) bs.push(recs[k].b);
+  if (!bs.length) return autoVD;
+  bs.sort((a, b) => a - b); const b = bs[bs.length - 1];
+  if (b * 1.1 > autoVD || b * 1.6 < autoVD) autoVD = NICE.find(v => v >= b * 1.2 + 0.3) || MAXD;
+  return autoVD;
+}
+const ROWS = () => Math.min(N, Math.ceil(VD() / BIN));
+const WT = [0, 0.12, 0.25, 0.4];   // hide echoes weaker than this (display value 0..1)
+const GAIN = () => Math.pow(1.15, vopt.gain || 0);
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+
+/* ---------- Palettes (prototype) ---------- */
+function hex(h) { return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+function lut(stops) {
+  const L = new Uint8ClampedArray(256 * 3);
+  for (let k = 0; k < 256; k++) {
+    const x = k / 255; let j = 0;
+    while (j < stops.length - 2 && x > stops[j + 1][0]) j++;
+    const [x0, c0] = stops[j], [x1, c1] = stops[j + 1], u = clamp((x - x0) / (x1 - x0), 0, 1), a = hex(c0), b = hex(c1);
+    for (let ch = 0; ch < 3; ch++) L[k * 3 + ch] = a[ch] + (b[ch] - a[ch]) * u;
+  }
+  return L;
+}
+const PAL = lut([[0, '#0A1E26'], [0.16, '#11414C'], [0.32, '#1B7778'], [0.48, '#58AE7C'], [0.62, '#D3C04A'], [0.76, '#EE8B2F'], [0.9, '#D8432F'], [1, '#FFE6D2']]);
+const GREY = lut([[0, '#0A1E26'], [1, '#8FA9B2']]);
+const SEDIMENT = lut([[0, '#0A1E26'], [1, '#9A8F7A']]);   // static scene at and below the bottom line: the lake bed
+const WEED = lut([[0, '#0A1E26'], [1, '#6FA868']]);       // static scene above the bottom line: weeds, structure
+const palCss = v => { const k = Math.round(clamp(v, 0, 1) * 255) * 3; return `rgb(${PAL[k]},${PAL[k + 1]},${PAL[k + 2]})`; };
+const BGV = [0, 0.13, 0.30, 0.55];      // static scene level -> grey value (dimmed like the prototype)
+const RV = [0, 0.35, 0.55, 0.75];       // changed-cell level -> colour value
+const HARD = [{ c: '#C9A25C', t: 'Hard' }, { c: '#A89A6A', t: 'Medium' }, { c: '#7E8A5A', t: 'Soft' }, { c: '#86A2AB', t: '–' }];
+const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
+
+/* ---------- State ---------- */
+let units = 'ft';
+try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
+const opts = { overlays: true, bgsep: true, cone: true, dz: true };
+let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting (Settings tab); 14° per the transducer listing
+const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
+// D57 bottom dead zone: a fish closer to the bottom than this is inside the bottom echo and cannot be seen.
+// A fish at the beam edge returns as late as the bottom under the hole (slant range) + half the ping length (Ona & Mitson).
+const dzK = { cycles: 16, sound: 53 };   // knob values, updated when the hole knobs load
+const deadZone = b => b * (1 - Math.cos(beamDeg * Math.PI / 360)) + dzK.cycles / 200000 * (1350 + dzK.sound) / 2;
+let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
+let selSlot = null, userPicked = false, playing = true;
+
+const fmtD = m => units === 'ft' ? (m * 3.28084).toFixed(1) + ' ft' : m.toFixed(2) + ' m';
+const fmtNum = m => units === 'ft' ? (m * 3.28084).toFixed(1) : m.toFixed(2);
+const nameOf = n => names[n] || ('Hole ' + n);
+function labelOf(t, bottom) { return t.slot === 0 ? 'At bait depth' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
+function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of the prototype colour scale (46 dB span)
+
+/* ---------- Server ---------- */
+function post(o) { return fetch('/api/sonar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { L = d; renderHoles(); }).catch(() => {}); }
+// v2: one request of each kind at a time (the ESP32 serves one request at a time; overlapping polls piled up)
+let listBusy = false, pingBusy = false;
+const sfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
+function applyList(d) { L = d; renderHoles(); }
+function loadList() { if (listBusy) return; listBusy = true; sfetch('/api/sonar').then(r => r.json()).then(applyList).catch(() => {}).then(() => { listBusy = false; }); }
+function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }
+function setBeam(deg) { if (deg >= 5 && deg <= 60 && deg !== beamDeg) { beamDeg = deg; if (recs.length && visible()) drawOverlay(); } }   // called by the suite with /api/status
+function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
+function loadPings() {
+  if (!focus || pingBusy) return; const n = focus;
+  pingBusy = true;
+  sfetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
+    if (n !== focus) return;
+    if (d.last != null && d.last < since) { since = 0; queue = []; }   // D82: the chalet restarted (its counter went back)
+    (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
+  }).catch(() => {}).then(() => { pingBusy = false; });
+}
+
+/* ---------- Holes ---------- */
+function renderHoles() {
+  $('sim').setAttribute('aria-checked', String(!!L.sim)); $('simb').hidden = !L.sim;
+  $('st').textContent = 'frame ' + (L.frame || 0) + ' | blocks ' + (L.blocks_ok || 0) + ' ok, ' + (L.blocks_bad || 0) + ' bad';
+  const nodes = (L.nodes || []).slice().sort((a, b) => a.node - b.node);
+  let h = '';
+  nodes.forEach(n => {
+    const ln = lines[n.node] || {}, fish = !!ln.fish, off = ln.online === false || n.age > 30, foc = n.node === L.focus;
+    const live = !foc && (L.live || []).indexOf(n.node) >= 0;   // D81: streamed too (follow the action, when the radio has room)
+    const badge = fish ? '<span class="badge al">FISH ON</span>' : off ? '<span class="badge">no data</span>' : foc ? '<span class="badge on">LIVE</span>' : live ? '<span class="badge on2">LIVE too</span>' : '';
+    h += `<button type="button" class="hole${fish ? ' fish' : ''}${live ? ' live2' : ''}" data-n="${n.node}" aria-pressed="${foc}">` +
+      `<span class="hd"><span>${nameOf(n.node)}</span>${badge}</span>` +
+      `<span class="big">${n.fish ? `<i class="sw" style="background:${palCss(RV[n.lvl] || 0.5)}"></i>${n.fish} fish` : 'No fish'}</span>` +
+      `<span class="sm">${n.fish ? 'nearest ' + fmtD(n.near / 100) + ' · ' : ''}bottom ${n.bottom < 2047 ? fmtD(n.bottom / 100) : '–'} ${HARD[n.hard] ? HARD[n.hard].t.toLowerCase() : ''}</span>` +
+      `<span class="act" title="activity"><i style="width:${Math.round(100 * n.act / 15)}%"></i></span>` +
+      `<span class="sm">${n.age <= 1 ? 'now' : n.age + ' s ago'} · hub ${n.hub}</span>` +
+      `<canvas class="gl" data-glance="${n.node}" title="${live || foc ? 'live: one column per frame' : 'last minutes: one column per summary'}"></canvas></button>`;
+  });
+  if (window.suiteTab === 'sonar' && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: the Sonar tab cards carry the preview (the Holes tab has its own 2 s poll)
+  if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
+  $('holes').innerHTML = h;
+  if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
+  { const fo = L.follow !== false; $('follow').setAttribute('aria-pressed', String(fo));   // D80
+    $('followWhy').textContent = !fo ? 'off: you pick the hole' : L.trip_s ? `FISH ON — back to following in ${Math.ceil(L.trip_s / 10) * 10} s` :
+      L.pin_s ? `your pick — following again in ${Math.ceil(L.pin_s / 60)} min (tap Follow to resume now)` : (L.focus ? `following: ${nameOf(L.focus)} · ${L.why || 'activity'}` : 'following: waiting for fish');
+    const extra = (L.live || []).filter(x => x !== L.focus);   // D81: more holes stream when the radio has room
+    if (extra.length) $('followWhy').textContent += ` · also live: ${extra.map(nameOf).join(', ')}`; }
+  if (window.suiteTab === 'holes') lpRender();   // D82
+  const f = nodes.find(n => n.node === focus);
+  if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
+}
+$('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
+$('sim').addEventListener('click', () => post({ sim: !L.sim }));
+// D80 / D85: a tap while a hand pick is holding the watched hole hands it back to Follow at once, instead of turning Follow off
+const followTap = () => post({ follow: (L.follow !== false && L.pin_s > 0) ? true : !(L.follow !== false) });
+$('follow').addEventListener('click', followTap);
+$('follow2').addEventListener('click', followTap);   // D82: same button on the Holes tab
+$('followN').addEventListener('click', e => { const b = e.target.closest('[data-fn]'); if (b) post({ follow_n: +b.dataset.fn }); });
+
+/* ---------- D82: live panels on the Holes tab: the whole water column of every streamed hole ---------- */
+const LP = { nodes: {}, busy: false, order: [] };   // per node: since, recs (last 240 pings), el
+function lpNodes() { const live = (L.live || []).slice(); if (L.focus && live.indexOf(L.focus) < 0) live.unshift(L.focus); return live.filter(n => n > 0).slice(0, 3); }
+// D85: the Live card is fed by the suite's merged Holes-tab poll (/api/poll, every second): lpArgs() gives the
+// query part (every streaming hole, bottom + targets only), lpApply() takes the "pings" part of the answer.
+function lpArgs() {
+  const ids = lpNodes(); if (!ids.length) return '';
+  ids.forEach(n => { if (!LP.nodes[n]) LP.nodes[n] = { since: 0, recs: [], queue: [] }; });
+  return '&nodes=' + ids.join(',') + '&since=' + ids.map(n => LP.nodes[n].since).join(',') + '&max=24&lite=1';
+}
+function lpApply(d) {
+  ((d && d.nodes) || []).forEach(x => {
+    const st = LP.nodes[x.node]; if (!st) return;
+    if (x.last != null && x.last < st.since) { st.since = 0; st.recs = []; st.queue = []; }   // D82: the chalet restarted
+    st.queue = st.queue || [];
+    (x.pings || []).forEach(p => { st.since = Math.max(st.since, p[0]); st.queue.push(p); });
+  });
+  lpPlay();
+}
+// D85b: like the Sonar tab, the pings arrive in one block per radio frame (0.5-2 s) and are played out 4 a second,
+// catching up when the queue grows, so the columns move instead of jumping once per frame.
+function lpPlay() {
+  let moved = false;
+  Object.keys(LP.nodes).forEach(k => {
+    const st = LP.nodes[k], q = st.queue || []; if (!q.length) return;
+    if (q.length > 40) q.splice(0, q.length - 12);
+    let n = 1 + Math.floor(q.length / 8);
+    while (n-- && q.length) { const p = q.shift(); const b = p[2] < 2047 ? p[2] / 100 : null; st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); }
+    if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
+    moved = true;
+  });
+  if (moved || !LP.order.length) lpRender();
+}
+setInterval(() => { if (window.suiteTab === 'holes' && !document.hidden) lpPlay(); }, 250);
+function lpRender() {
+  const ids = lpNodes(), g = $('lpgrid');
+  const fo = L.follow !== false;
+  $('follow2').setAttribute('aria-pressed', String(fo));
+  document.querySelectorAll('#followN [data-fn]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.fn === (L.follow_n || 2))));
+  $('liveWhy').textContent = $('followWhy').textContent;
+  if (!ids.length) { g.innerHTML = '<p class="empty">No hole streaming yet. Tap a hole on the Sonar tab, or wait for Follow the action.</p>'; g.dataset.n = 1; LP.order = []; return; }
+  g.dataset.n = ids.length;
+  if (ids.join(',') !== LP.order.join(',')) {   // rebuild the panels only when the set changes
+    g.innerHTML = ids.map(n => `<button type="button" class="lp${n === L.focus ? ' main' : ''}" data-lp="${n}"><span class="hd"><span class="nm">${nameOf(n)}</span><span class="st" data-lpst="${n}"></span></span><canvas data-lpc="${n}" aria-label="live water column"></canvas></button>`).join('');
+    LP.order = ids.slice();
+    Object.keys(LP.nodes).forEach(k => { if (ids.indexOf(+k) < 0) delete LP.nodes[k]; });   // a hole that comes back later starts fresh
+  }
+  const acc = '#00B3D6', al = '#C2412D';
+  ids.forEach(n => {
+    const st = LP.nodes[n], c = document.querySelector(`canvas[data-lpc="${n}"]`); if (!c) return;
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight; if (!w) return;
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    const x = c.getContext('2d'); x.scale(dpr, dpr); x.fillStyle = '#0A1E26'; x.fillRect(0, 0, w, h);
+    const recs = st ? st.recs : [];
+    const lastB = recs.length ? (recs.slice().reverse().find(r => r.b != null) || {}).b : null;
+    const sum = (L.nodes || []).find(k => k.node === n);
+    const stEl = document.querySelector(`[data-lpst="${n}"]`);
+    if (stEl) stEl.textContent = sum ? (sum.fish ? sum.fish + ' fish · ' : '') + 'bottom ' + (lastB != null ? fmtD(lastB) : (sum.bottom < 2047 ? fmtD(sum.bottom / 100) : '–')) : '';
+    if (!recs.length) { x.fillStyle = '#7E9AA3'; x.font = '12px system-ui'; x.fillText('waiting for pings…', 8, h / 2 + 4); return; }
+    let maxD = 3; recs.forEach(r => { if (r.b != null && r.b * 1.12 > maxD) maxD = r.b * 1.12; });
+    const N = 240, cw = w / N, off = N - recs.length, y = d => 2 + (h - 4) * Math.min(d, maxD) / maxD;
+    // depth grid
+    x.strokeStyle = 'rgba(215,230,234,0.08)'; x.fillStyle = 'rgba(215,230,234,0.5)'; x.font = '10px system-ui';
+    const stepM = maxD > 12 ? 5 : maxD > 6 ? 2 : 1;
+    for (let d = stepM; d < maxD; d += stepM) { const yy = Math.round(y(d)) + 0.5; x.beginPath(); x.moveTo(0, yy); x.lineTo(w, yy); x.stroke(); x.fillText(fmtD(d), 4, yy - 2); }
+    // bottom fill
+    x.beginPath(); let started = false;
+    recs.forEach((r, i) => { if (r.b == null) return; const xx = (i + off) * cw; if (!started) { x.moveTo(xx, y(r.b)); started = true; } else x.lineTo(xx, y(r.b)); });
+    if (started) { x.lineTo(w, y(recs[recs.length - 1].b != null ? recs[recs.length - 1].b : maxD)); x.lineTo(w, h); x.lineTo((off) * cw, h); x.closePath(); x.fillStyle = (HARD[recs[recs.length - 1].hard] || HARD[3]).c; x.globalAlpha = 0.55; x.fill(); x.globalAlpha = 1; }
+    // bait line (median of the last 40 pings' slot 0) and fish
+    const ds = []; recs.slice(-40).forEach(r => r.t.forEach(t => { if (t.slot === 0) ds.push(t.d); }));
+    if (ds.length) { ds.sort((a, b) => a - b); const yb = Math.round(y(ds[ds.length >> 1])) + 0.5; x.strokeStyle = 'rgba(255,255,255,0.7)'; x.setLineDash([4, 4]); x.beginPath(); x.moveTo(0, yb); x.lineTo(w, yb); x.stroke(); x.setLineDash([]); }
+    recs.forEach((r, i) => { const xx = (i + off + 0.5) * cw; r.t.forEach(t => { if (t.slot === 0) return; const rr = 1 + 2.5 * Math.max(0.2, t.s); x.fillStyle = t.s > 0.6 ? al : acc; x.globalAlpha = 0.45 + 0.55 * t.s; x.beginPath(); x.arc(xx, y(t.d), rr, 0, Math.PI * 2); x.fill(); }); });
+    x.globalAlpha = 1;
+  });
+}
+$('lpgrid').addEventListener('click', e => { const b = e.target.closest('[data-lp]'); if (!b) return; post({ focus: +b.dataset.lp }).then(() => { if (window.suiteShowTab) window.suiteShowTab('sonar'); }); });
+$('stop').addEventListener('click', () => post({ focus: 0 }));
+
+function setFocus(n) {
+  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
+  $('main').classList.toggle('nofocus', !n);
+  $('ttl').textContent = n ? nameOf(n) : 'Sonar';
+  $('sub').textContent = n ? 'Live sonar, about 1 s behind' + (L.sim ? ' · simulated pings' : '') : 'Pick a hole to stream it';
+  if (n) { loadPings(); render(); }
+}
+
+/* ---------- Pings -> display records ---------- */
+// p = [seq, index, bottom_cm, [[slot, depth_cm, strength, width]], [[bin, level]], hard, nf_neg, [[slot, flick, spread, elen, mature]]]
+function addPing(p) {
+  const prev = recs.length ? recs[recs.length - 1] : null;
+  const b = p[2] < 2047 ? p[2] / 100 : (prev ? prev.b : null);
+  const rec = { i: p[1], b, hard: p[5], nf: -p[6], t: p[3].map(x => ({ slot: x[0], d: x[1] / 100, s: x[2] / 31, w: x[3] })), r: p[4], px: null };
+  rec.t.forEach(t => t.label = labelOf(t, b));
+  (p[7] || []).forEach(x => { info[x[0]] = { flick: x[1] * 0.25, spread: x[2] * 0.5, elen: x[3] * BIN, mature: !!x[4], i: rec.i }; });
+  recs.push(rec); if (recs.length > HIST) recs.shift();
+}
+function pixels(rec) {
+  if (rec.px) return rec.px;
+  const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
+  const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
+  const bedBin = rec.b != null ? Math.round(rec.b / BIN) - 2 : N;   // the bottom line of this ping splits bed from weeds
+  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? (i >= bedBin ? SEDIMENT : WEED) : PAL, BGV[l]); } }
+  const G = GAIN(), wt = WT[vopt.weak] || 0;   // v2 display knobs: colour gain, hide weak echoes
+  for (const r of rec.r) { const v = RV[r[1]]; if (v >= wt) put(r[0], PAL, v * G); }
+  for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
+    if (t.slot !== 0 && t.s < wt) continue;
+    const j0 = Math.round(t.d / BIN);
+    for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * G * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
+    const v = clamp(Math.max(t.s, 0.5) * 1.12 * G, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
+  }
+  return rec.px = px;
+}
+function baitLine() {
+  const ds = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) for (const t of recs[k].t) if (t.slot === 0) ds.push(t.d);
+  if (!ds.length) return null; ds.sort((a, b) => a - b); return ds[ds.length >> 1];
+}
+function velOf(slot) {
+  const n = recs.length; if (!n) return 0;
+  const cur = recs[n - 1].t.find(t => t.slot === slot); if (!cur) return 0;
+  for (let k = n - 5; k >= Math.max(0, n - 9); k--) { const o = recs[k].t.find(t => t.slot === slot); if (o) return (cur.d - o.d) / ((n - 1 - k) * 0.25); }
+  return 0;
+}
+function trendOf(vel) { return vel < -0.04 ? 'rising' : vel > 0.04 ? 'sinking' : 'holding'; }
+const ARROW = { rising: '↑', sinking: '↓', holding: '' };
+
+/* ---------- Canvases ---------- */
+const fallC = $('fall'), fallX = fallC.getContext('2d'); fallC.width = HIST; fallC.height = N; let fallImg = fallX.createImageData(HIST, N);
+const zoomC = $('zoom'), zoomX = zoomC.getContext('2d'); zoomC.width = HIST; zoomC.height = ZR; const zoomImg = zoomX.createImageData(HIST, ZR);
+const ovC = $('fallOv'), ovX = ovC.getContext('2d'), zovC = $('zoomOv'), zovX = zovC.getContext('2d');
+const flC = $('flash'), flX = flC.getContext('2d');
+function fit(cv) {
+  const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  return { w, h, dpr };
+}
+function drawFall() {
+  const R = ROWS();
+  if (fallC.height !== R) { fallC.height = R; fallImg = fallX.createImageData(HIST, R); }   // only the rows shown
+  const data = fallImg.data, off = HIST - recs.length;
+  for (let x = 0; x < HIST; x++) {
+    const p = x >= off ? pixels(recs[x - off]) : null;
+    for (let i = 0; i < R; i++) {
+      const o = (i * HIST + x) * 4;
+      if (p) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
+      data[o + 3] = 255;
+    }
+  }
+  fallX.putImageData(fallImg, 0, 0);
+}
+function drawZoom() {
+  const data = zoomImg.data, off = HIST - recs.length;
+  for (let x = 0; x < HIST; x++) {
+    const rec = x >= off ? recs[x - off] : null, p = rec ? pixels(rec) : null;
+    const start = rec && rec.b != null ? Math.round(rec.b / BIN) - (ZR - 6) : 0;
+    for (let r = 0; r < ZR; r++) {
+      const o = (r * HIST + x) * 4, i = start + r;
+      if (p && rec.b != null && i >= 0 && i < N) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
+      data[o + 3] = 255;
+    }
+  }
+  zoomX.putImageData(zoomImg, 0, 0);
+  const { w, h, dpr } = fit(zovC); zovX.clearRect(0, 0, w, h);
+  if (opts.overlays && recs.length) {
+    const y = ((ZR - 6) / ZR) * h;
+    zovX.strokeStyle = HARD[recs[recs.length - 1].hard].c; zovX.lineWidth = 1.5 * dpr;
+    zovX.setLineDash([4 * dpr, 4 * dpr]); zovX.beginPath(); zovX.moveTo(0, y); zovX.lineTo(w, y); zovX.stroke(); zovX.setLineDash([]);
+    zovX.font = `${11 * dpr}px ${FONT}`; zovX.fillStyle = 'rgba(215,230,234,0.75)'; zovX.textBaseline = 'bottom';
+    zovX.fillText('bottom', 6 * dpr, y - 3 * dpr);
+  }
+}
+function pill(g, text, x, y, dpr, color) {
+  g.font = `600 ${12 * dpr}px ${FONT}`;
+  const tw = g.measureText(text).width, ph = 18 * dpr, pw = tw + 14 * dpr;
+  const px = Math.max(2 * dpr, x - pw), py = y - ph / 2;
+  g.fillStyle = 'rgba(10,30,38,0.82)'; g.beginPath();
+  if (g.roundRect) g.roundRect(px, py, pw, ph, 9 * dpr); else g.rect(px, py, pw, ph);
+  g.fill(); g.fillStyle = color; g.fillRect(px + 6 * dpr, py + ph / 2 - 3 * dpr, 3 * dpr, 6 * dpr);
+  g.fillStyle = '#E6F0F2'; g.textBaseline = 'middle'; g.fillText(text, px + 12 * dpr, y + 0.5 * dpr);
+}
+function drawOverlay() {
+  const { w, h, dpr } = fit(ovC), g = ovX; g.clearRect(0, 0, w, h);
+  const vd = ROWS() * BIN, yOf = dm => dm / vd * h, off = HIST - recs.length, xOf = k => ((k + off) + 0.5) / HIST * w;
+  const step = units === 'ft' ? (vd <= 3.1 ? 1 : vd <= 6.1 ? 2 : 5) / 3.28084 : (vd <= 3.1 ? 0.5 : 1);
+  g.font = `${11 * dpr}px ${FONT}`; g.textBaseline = 'bottom';
+  g.fillStyle = 'rgba(215,230,234,0.55)';
+  { const lab = (vopt.depth === 'auto' ? 'auto ' : '') + '0-' + fmtD(vd); const lw = g.measureText(lab).width; g.fillText(lab, w - lw - 6 * dpr, 14 * dpr); }
+  for (let dm = step; dm < vd - 0.05; dm += step) {
+    const y = Math.round(yOf(dm)) + 0.5;
+    g.strokeStyle = 'rgba(215,230,234,0.09)'; g.lineWidth = 1; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+    g.fillStyle = 'rgba(215,230,234,0.55)'; g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : (step < 1 ? dm.toFixed(1) : dm.toFixed(0)), 6 * dpr, y - 2 * dpr);
+    if (opts.cone) {   // D52: what the beam covers at that depth (a disc of this width on the lake, centred under the hole)
+      const lab = '⌀ ' + fmtD(coneWidth(dm)), lw = g.measureText(lab).width;
+      g.fillStyle = 'rgba(215,230,234,0.42)'; g.fillText(lab, w - lw - 6 * dpr, y - 2 * dpr);
+    }
+  }
+  g.fillStyle = 'rgba(215,230,234,0.5)';
+  g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
+  const nw = g.measureText('now').width; g.fillText('now', w - nw - 6 * dpr, h - 5 * dpr);
+  if (!opts.overlays || !recs.length) return;
+  const bait = baitLine();
+  if (bait != null) {
+    const yb = yOf(bait);
+    g.strokeStyle = 'rgba(230,240,242,0.35)'; g.lineWidth = 1 * dpr; g.setLineDash([6 * dpr, 6 * dpr]);
+    g.beginPath(); g.moveTo(0, yb); g.lineTo(w, yb); g.stroke(); g.setLineDash([]);
+    g.fillStyle = 'rgba(230,240,242,0.6)'; g.fillText('bait line', 26 * dpr, yb - 3 * dpr);
+  }
+  if (opts.dz) {   // D57: shade the band just above the bottom where a fish merges with the bottom echo
+    const cw = w / HIST + 0.5; g.fillStyle = 'rgba(230,240,242,0.10)';
+    recs.forEach((r, k) => { if (r.b == null) return; const y0 = yOf(Math.max(0, r.b - deadZone(r.b))), y1 = yOf(r.b); g.fillRect(xOf(k) - cw / 2, y0, cw, y1 - y0); });
+  }
+  g.beginPath(); let started = false;
+  recs.forEach((r, k) => { if (r.b == null) return; const x = xOf(k), y = yOf(r.b); started ? g.lineTo(x, y) : g.moveTo(x, y); started = true; });
+  g.strokeStyle = HARD[recs[recs.length - 1].hard].c; g.lineWidth = 2 * dpr; g.stroke();
+  const tl = new Map();
+  recs.forEach((r, k) => { for (const t of r.t) { if (t.label === 'Near bottom') continue; if (!tl.has(t.slot)) tl.set(t.slot, []); tl.get(t.slot).push({ x: xOf(k), y: yOf(t.d), v: t.s, k }); } });
+  for (const [slot, pts] of tl) {
+    g.beginPath(); let pk = -9;
+    for (const p of pts) { if (p.k - pk > 1) g.moveTo(p.x, p.y); else g.lineTo(p.x, p.y); pk = p.k; }
+    const last = pts[pts.length - 1];
+    g.strokeStyle = palCss(clamp(Math.max(0.5, last.v) * 1.12, 0, 1)); g.globalAlpha = 0.9; g.lineWidth = (slot === selSlot ? 3.2 : 2.2) * dpr; g.lineJoin = 'round'; g.stroke(); g.globalAlpha = 1;
+  }
+  const cur = recs[recs.length - 1].t.filter(t => (t.label === 'Fish' || t.label === 'At bait depth') && t.s > 0.08).sort((a, b) => a.d - b.d);
+  let lastY = -1e9;
+  for (const t of cur) {
+    let y = yOf(t.d) - 12 * dpr; if (y - lastY < 20 * dpr) y = lastY + 20 * dpr; lastY = y;
+    const a = ARROW[trendOf(velOf(t.slot))];
+    pill(g, `${t.label} ${fmtD(t.d)}${a ? ' ' + a : ''}`, w - 8 * dpr, y, dpr, palCss(Math.max(0.5, t.s)));
+  }
+}
+function drawFlash() {
+  const { w, h, dpr } = fit(flC), g = flX; g.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 4 * dpr, r1 = R * 0.95, r0 = R * 0.75;
+  const NV = ROWS(), VDm = NV * BIN, SPAN = Math.PI * 2 * 0.92, A0 = -Math.PI / 2, ang = i => A0 + (i / NV) * SPAN;
+  g.beginPath(); g.arc(cx, cy, r1, A0, A0 + SPAN); g.arc(cx, cy, r0, A0 + SPAN, A0, true); g.closePath(); g.fillStyle = '#0F2A33'; g.fill();
+  const n = recs.length;
+  for (const [k, alpha] of [[n - 3, 0.22], [n - 2, 0.42], [n - 1, 1]]) {
+    if (k < 0) continue; const p = pixels(recs[k]); g.globalAlpha = alpha;
+    for (let i = 0; i < NV; i++) {
+      const Rr = p[i * 4], Gg = p[i * 4 + 1], Bb = p[i * 4 + 2]; if (Rr + Gg + Bb < 95) continue;
+      g.beginPath(); g.arc(cx, cy, r1, ang(i), ang(i + 1) + 0.003); g.arc(cx, cy, r0, ang(i + 1) + 0.003, ang(i), true); g.closePath();
+      g.fillStyle = `rgb(${Rr},${Gg},${Bb})`; g.fill();
+    }
+  }
+  g.globalAlpha = 1;
+  if (n) for (const t of recs[n - 1].t) {
+    if (t.s <= 0.08 || t.d >= VDm) continue; const i = t.d / BIN;
+    g.beginPath(); g.arc(cx, cy, r1 + 1 * dpr, ang(i - 2), ang(i + 2)); g.arc(cx, cy, r0 - 1 * dpr, ang(i + 2), ang(i - 2), true); g.closePath();
+    g.fillStyle = palCss(clamp(Math.max(0.5, t.s) * 1.12, 0, 1)); g.fill();
+  }
+  const step = units === 'ft' ? (VDm <= 3.1 ? 1 : VDm <= 6.1 ? 2 : 5) / 3.28084 : (VDm <= 3.1 ? 0.5 : 1);
+  g.font = `${11 * dpr}px ${FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let dm = 0; dm < VDm - 0.05; dm += step) {
+    const a = A0 + (dm / VDm) * SPAN, ca = Math.cos(a), sa = Math.sin(a);
+    g.strokeStyle = 'rgba(215,230,234,0.5)'; g.lineWidth = 1 * dpr;
+    g.beginPath(); g.moveTo(cx + ca * (r0 - 2 * dpr), cy + sa * (r0 - 2 * dpr)); g.lineTo(cx + ca * (r0 - 7 * dpr), cy + sa * (r0 - 7 * dpr)); g.stroke();
+    g.fillStyle = 'rgba(215,230,234,0.6)';
+    g.fillText(units === 'ft' ? String(Math.round(dm * 3.28084)) : (step < 1 ? dm.toFixed(1) : dm.toFixed(0)), cx + ca * (r0 - 16 * dpr), cy + sa * (r0 - 16 * dpr));
+  }
+  const bait = baitLine();
+  if (opts.overlays && bait != null && bait < VDm) {
+    const a = A0 + (bait / VDm) * SPAN;
+    g.strokeStyle = 'rgba(230,240,242,0.8)'; g.lineWidth = 2 * dpr; g.beginPath();
+    g.moveTo(cx + Math.cos(a) * (r1 + 1 * dpr), cy + Math.sin(a) * (r1 + 1 * dpr)); g.lineTo(cx + Math.cos(a) * (r1 - 6 * dpr), cy + Math.sin(a) * (r1 - 6 * dpr)); g.stroke();
+  }
+  const cur = n ? recs[n - 1] : null;
+  g.fillStyle = '#E8F1F3'; g.font = `700 ${R * 0.36}px ${FONT}`; g.textBaseline = 'alphabetic';
+  g.fillText(cur && cur.b != null ? fmtNum(cur.b) : '–', cx, cy + R * 0.08);
+  g.fillStyle = 'rgba(215,230,234,0.7)'; g.font = `500 ${R * 0.11}px ${FONT}`;
+  g.fillText(units === 'ft' ? 'ft to bottom' : 'm to bottom', cx, cy + R * 0.25);
+  g.textAlign = 'left';
+}
+
+/* ---------- Cards ---------- */
+function liveTargets() {
+  if (!recs.length) return [];
+  return recs[recs.length - 1].t.filter(t => t.s > 0.08).slice().sort((a, b) => a.d - b.d).slice(0, 5);
+}
+function updTargets() {
+  const el = $('tlist'), list = liveTargets();
+  if (!list.length) { el.innerHTML = '<p class="empty">' + (recs.length ? 'Nothing moving under the hole right now.' : 'Waiting for pings…') + '</p>'; return; }
+  const bait = list.find(t => t.slot === 0);
+  el.innerHTML = list.map(t => {
+    const rel = bait && t.slot !== 0 ? toDb(t.s) - toDb(bait.s) : null, tr = trendOf(velOf(t.slot));
+    const meta = [tr === 'holding' ? 'holding depth' : tr, rel == null ? '' : `${rel > 0 ? '+' : ''}${rel.toFixed(0)} dB vs bait`].filter(Boolean).join(', ');
+    return `<button type="button" class="trow" data-slot="${t.slot}" aria-pressed="${t.slot === selSlot}"><span class="dot" style="background:${palCss(Math.max(0.5, t.s))}"></span><span class="nm">${t.label}</span><span class="dp">${fmtD(t.d)}</span><span class="meta">${meta}</span></button>`;
+  }).join('');
+}
+function pickDefault() {
+  const rank = t => t.label === 'Fish' ? 0 : t.label === 'Near bottom' ? 1 : 2;
+  const ts = liveTargets().slice().sort((a, b) => rank(a) - rank(b) || b.s - a.s);
+  return ts[0] || null;
+}
+function updEcho() {
+  const list = liveTargets();
+  let T = userPicked && selSlot != null ? list.find(t => t.slot === selSlot) : null;
+  if (!T) { userPicked = false; T = pickDefault(); selSlot = T ? T.slot : null; }
+  const set = (id, v) => { $(id).textContent = v; };
+  set('mWidthNote', units === 'ft' ? 'the pulse alone is about 4 in' : 'the pulse alone is about 10 cm');
+  if (!T) { set('echoWho', 'No target'); set('echoDepth', ''); ['mFlick', 'mSpread', 'mWidth', 'mRel'].forEach(i => set(i, '–')); set('echoRead', 'Pick a target to see its echo.'); return; }
+  const I = info[T.slot], bait = list.find(t => t.slot === 0 && t !== T);
+  const rel = bait ? toDb(T.s) - toDb(bait.s) : null;
+  set('echoWho', T.label); set('echoDepth', fmtD(T.d));
+  set('mFlick', I ? I.flick.toFixed(1) + ' dB' : '–');
+  set('mSpread', I ? I.spread.toFixed(1) + ' dB' : '–');
+  set('mWidth', I ? (units === 'ft' ? (I.elen * 39.37).toFixed(1) + ' in' : (I.elen * 100).toFixed(0) + ' cm') : '–');
+  set('mRel', rel == null ? '–' : `${rel > 0 ? '+' : ''}${rel.toFixed(1)} dB`);
+  let read;
+  if (!I || !I.mature) read = 'Collecting pings for this target.';
+  else if (I.spread >= 3.5 && I.flick >= 1.6) read = 'Flickers, and looks different at each frequency. That is typical of a swim bladder, so likely a fish.';
+  else if (I.spread < 2.5 && I.flick < 1.2) read = 'Steady, and the same at every frequency. That is typical of metal or a hard lure.';
+  else read = 'Mixed signature. Needs a few more pings to call.';
+  set('echoRead', read);
+}
+function updReadouts() {
+  const cur = recs.length ? recs[recs.length - 1] : null, bait = baitLine();
+  $('roBait').textContent = bait == null ? '–' : fmtD(bait);
+  $('roBottom').textContent = cur ? HARD[cur.hard].t : '–';
+  $('roNoise').textContent = cur ? cur.nf.toFixed(0) + ' dB' : '–';
+  $('roCone').textContent = cur && cur.b != null ? fmtD(coneWidth(cur.b)) + ' wide' : '–';
+  $('zoomSpan').textContent = units === 'ft' ? 'last 5 ft above bottom, stretched' : 'last 1.5 m above bottom, stretched';
+}
+function render() { if (!focus || !visible()) return; drawFall(); drawZoom(); drawOverlay(); drawFlash(); updTargets(); updEcho(); updReadouts(); }
+const pickRow = e => { const b = e.target.closest('.trow'); if (!b) return; selSlot = Number(b.dataset.slot); userPicked = true; updTargets(); updEcho(); drawOverlay(); };
+$('tlist').addEventListener('click', pickRow);
+
+/* ---------- Controls ---------- */
+const TOGGLES = [
+  ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
+  ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
+  ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
+  ['dz', 'Bottom blind band', 'Light band just above the bottom line: a fish that close to the bottom returns at the same time as the bottom itself and cannot be told apart (any sonar). Thicker in deep water and with a long ping.']
+];
+const tUl = $('toggles');
+tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
+function syncControls() {
+  tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
+  document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
+  $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
+}
+tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
+document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
+$('play').addEventListener('click', () => { playing = !playing; syncControls(); });
+// v2 (D42) display knobs (this phone / PC only)
+function fillDepth() {
+  const list = units === 'ft' ? [5, 10, 15, 20, 25, 30, 40] : [2, 3, 4, 5, 6, 8, 10, 12];
+  $('vDepth').innerHTML = '<option value="auto">Auto</option>' + list.map(v => { const m = units === 'ft' ? v / 3.28084 : v; return `<option value="${m.toFixed(3)}">0-${v} ${units}</option>`; }).join('');
+  const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto' && Math.abs(+o.value - +vopt.depth) < 0.01);
+  $('vDepth').value = opt ? opt.value : 'auto'; if (!opt) vopt.depth = 'auto';
+  $('vGain').value = String(vopt.gain || 0); $('vWeak').value = String(vopt.weak || 0);
+}
+const vChanged = () => { saveV(); recs.forEach(r => r.px = null); render(); };
+$('vDepth').addEventListener('change', e => { vopt.depth = e.target.value; vChanged(); });
+$('vGain').addEventListener('input', e => { vopt.gain = +e.target.value; vChanged(); });
+$('vWeak').addEventListener('change', e => { vopt.weak = +e.target.value; vChanged(); });
+fillDepth();
+document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', fillDepth));
+// processing knobs on the holes (chalet -> every sonar hole)
+let K = null;
+// plain words for each knob (the hole firmware only knows the short name and the unit)
+const KHELP = {
+  snr: ['Echo must stand out by', 'How much louder than the background an echo must be to count. Lower = more fish and more junk.'],
+  prom: ['Peak sharpness', 'How much an echo must stand above its neighbours. Lower = merges close echoes less.'],
+  confirm: ['Pings to confirm', 'An echo is reported after this many pings in a row. Higher = fewer flickers, slower.'],
+  keep: ['Keep a lost fish for', 'Pings a fish stays on screen after its echo vanished.'],
+  gate: ['Max move per ping', 'A fish moving more than this between pings becomes a new one.'],
+  dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: ~0.9 m. Bucket: 0.1 m.'],
+  bsmooth: ['Bottom line smoothing', 'Lower = steadier bottom line, slower to follow a real change.'],
+  learn: ['Still-scene fading speed', 'How fast things that do not move (bed, weeds) fade to the muted colours.'],
+  range: ['Colour range', 'Loudness span mapped to the colours. Smaller = more contrast.'],
+  tvg: ['Deep echo boost', 'Boosts deeper echoes to make up for spreading. On for normal use.'],
+  cycles: ['Ping length, overview', 'Longer ping = more energy, longer ringing. Base mode.'],
+  fcycles: ['Ping length, watching', 'Shorter ping = sharper detail while you watch one hole.'],
+  gain: ['Receiver gain', '0-3 = 10 / 12.5 / 15 / 20x. Lower if the bench line says CLIPPED.'],
+  pinghz: ['Ping rate when busy', 'Pings per second (x0.25) while fish are around or you watch the hole.'],
+  idlehz: ['Ping rate when quiet', 'Pings per second (x0.25) when nothing is in the water. Lower saves battery.'],
+  avg: ['Pings averaged', 'Overview mode averages this many bursts: smoother, slower.'],
+  freq: ['Frequencies', '0 = 190/200/210 kHz every ping, 1 = one at a time, 2 = 200 kHz only.'],
+  sound: ['Speed of sound', '1350 + value m/s. 53 = 1403 m/s, fresh water near 0 C.'],
+  bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
+  thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
+  bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; bucket: just past the ringing.'],
+  vdrv: ['Drive voltage', 'Transducer drive, volts (max 20). Must stay 1.5 V below the MT3608 setting (21.5 V for 20; the shield diode drops ~0.8 V).'],
+  jitter: ['Ping timing jitter', 'Random wait (0 to this many ms) before each ping so neighbouring tip-ups never ping in step. Needed for the interference filter. 0 = off.'],
+  spike: ['Interference filter', 'Removes a blip that appears on one ping only, at a depth where the two pings before were this much quieter (another tip-up\'s ping). Lower = removes more, may thin a fast fish. 0 = off.'],
+  echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
+  vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
+};
+const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
+function renderKnobs() {
+  if (!K) return;
+  document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
+  const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
+  if (kv.cycles) dzK.cycles = kv.cycles; if (kv.sound != null) dzK.sound = kv.sound;
+  const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin) || null;
+  document.querySelectorAll('#kWater [data-water]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.water === water)));
+  $('knobs').hidden = !$('kAdv').checked;
+  if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#knobs')) return;
+  $('knobs').innerHTML = K.knobs.map(k => { const h = KHELP[k.key] || [k.name, '']; return `<li><span class="name">${h[0]}</span><input type="number" data-knob="${k.key}" min="${k.lo}" max="${k.hi}" value="${k.v}" style="width:5.5em" aria-label="${h[0]}"><span class="desc">${h[1]} <i>${k.unit}${k.v !== k.def ? ' · default ' + k.def : ''}</i></span></li>`; }).join('');
+}
+$('kAdv').addEventListener('change', renderKnobs);
+$('kWater').addEventListener('click', e => { const b = e.target.closest('[data-water]'); if (!b) return; const w = WATER[b.dataset.water]; postKnobs({ key: 'dead', v: w.dead }).then(() => postKnobs({ key: 'bmin', v: w.bmin })); });
+function loadKnobs() { sfetch('/api/sonar/knobs').then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
+function postKnobs(o) { return sfetch('/api/sonar/knobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
+$('knobs').addEventListener('change', e => { const i = e.target.closest('[data-knob]'); if (i) postKnobs({ key: i.dataset.knob, v: +i.value }); });
+$('kPreset').addEventListener('click', e => { const b = e.target.closest('[data-preset]'); if (b) postKnobs({ preset: +b.dataset.preset }); });
+$('kDefaults').addEventListener('click', () => { if (confirm('Sonar processing back to defaults on every hole?')) postKnobs({ defaults: true }); });
+$('kResend').addEventListener('click', () => postKnobs({ resend: true }));
+document.querySelector('details.knobs').addEventListener('toggle', e => { if (e.target.open) loadKnobs(); });
+loadKnobs();   // once at start too: the bottom blind band uses the cycles / sound knobs
+
+// playback: 4 pings/s; the radio delivers about one block per second, so catch up when the queue grows
+const visible = () => window.suiteTab === 'sonar';
+setInterval(() => {
+  if (!focus || !playing || !queue.length || !visible()) return;
+  if (queue.length > 40) queue.splice(0, queue.length - 12);
+  let n = 1 + Math.floor(queue.length / 8);
+  while (n-- && queue.length) addPing(queue.shift());
+  render();
+}, 250);
+setInterval(() => { if (visible() && !document.hidden) loadPings(); }, 700);
+setInterval(() => { if (visible() && !document.hidden) loadList(); }, 2000);   // v2: only while the Sonar tab is shown
+let rz = null;
+new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length && visible()) render(); }); }).observe(document.body);
+window.sonarApi = {
+  list: () => L, fmtD: m => fmtD(m), HARD, onStatus, setBeam,
+  focus: n => post({ focus: n }), setSim: on => post({ sim: on }),
+  show: () => { loadList(); requestAnimationFrame(() => { if (focus) { loadPings(); render(); } }); },
+  lpArgs, lpApply, applyList   // D85: for the merged Holes-tab poll
+};
+syncControls(); loadList();
+})();
+</script>
+<script>(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// D74: optional write PIN. Every non-GET carries "X-Pin" when the chalet asked for one (401): asked once, kept on this phone.
+const PIN = { v: null }; try { PIN.v = localStorage.getItem('chaletPin'); } catch (e) {}
+const rawFetch = window.fetch.bind(window);
+window.fetch = (url, o) => {
+  o = o || {}; const post = String(o.method || 'GET').toUpperCase() !== 'GET';
+  const run = () => { const h = Object.assign({}, o.headers || {}); if (post && PIN.v) h['X-Pin'] = PIN.v; return rawFetch(url, Object.assign({}, o, { headers: h })); };
+  return run().then(r => {
+    if (r.status !== 401 || !post) return r;
+    const p = prompt('This chalet asks for its PIN before it accepts a change (Settings → Map & PIN):'); if (p == null) return r;
+    PIN.v = p.trim(); try { localStorage.setItem('chaletPin', PIN.v); } catch (e) {}
+    return run();
+  });
+};
+// v2: every request gives up after 8 s (a half-open connection after a Wi-Fi blip would block that poll for minutes)
+const tfetch = (url, o) => { const c = new AbortController(), t = setTimeout(() => c.abort(), 8000); return fetch(url, Object.assign({}, o || {}, { signal: c.signal })).finally(() => clearTimeout(t)); };
+window.tfetch = tfetch;
+const api = (url, body) => tfetch(url, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
+// v2: a poll is skipped while the same one is still waiting, and nothing polls while the page is hidden
+const busy = {};
+// status keeps polling while the page is hidden: it rings FISH ON
+const poll = (key, fn) => () => { if (busy[key] || (document.hidden && key !== 'status')) return; busy[key] = true; Promise.resolve(fn()).catch(() => {}).then(() => { busy[key] = false; }); };
+const SON = () => window.sonarApi;
+let st = null, tab = 'holes', soundOn = true, actx = null, lastFish = {}, radio = null;
+try { soundOn = localStorage.getItem('alertSound') !== 'false'; } catch (e) { /* private mode */ }
+
+/* ---------- Tabs ---------- */
+function showTab(t) {
+  tab = t;
+  window.suiteShowTab = showTab;
+  document.querySelectorAll('.tabs [role=tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
+  ['holes', 'sonar', 'radio', 'settings'].forEach(k => { $('tab-' + k).hidden = k !== t; });
+  try { history.replaceState(null, '', '#' + t); } catch (e) { /* file:// */ }
+  window.suiteTab = t;
+  if (t === 'sonar' && SON()) SON().show();
+  if (t === 'holes' && SON()) SON().show();   // D82: the live card wants the list and the pings too
+  if (t === 'radio') loadRadio();
+  if (t === 'settings') { loadSettings(); renderAbout(); loadRadio(); }
+  if (t === 'holes') { renderNodes(); loadGlance(); }
+}
+document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
+function initialTab() {
+  const h = (location.hash || '').slice(1), p = location.pathname.replace(/^\/+/, '');
+  for (const k of ['holes', 'sonar', 'radio', 'settings']) if (h === k || p === k) return k;
+  return 'holes';
+}
+
+/* ---------- Sound ---------- */
+function audio() {
+  try { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) { actx = null; }
+  return actx;
+}
+function beep() {
+  const c = audio(); if (!c) return;
+  try {
+    for (let k = 0; k < 3; k++) {
+      const o = c.createOscillator(), g = c.createGain(), t0 = c.currentTime + k * 0.35;
+      o.connect(g); g.connect(c.destination); o.frequency.value = 800; o.type = 'square';
+      g.gain.setValueAtTime(0.3, t0); g.gain.exponentialRampToValueAtTime(0.01, t0 + 0.25);
+      o.start(t0); o.stop(t0 + 0.26);
+    }
+  } catch (e) { /* no audio */ }
+}
+function syncSound() {
+  $('soundBtn').textContent = soundOn ? 'Sound on' : 'Sound off'; $('soundBtn').setAttribute('aria-pressed', String(soundOn));
+  $('fSound').setAttribute('aria-checked', String(soundOn));
+  $('soundHint').hidden = !(soundOn && (!actx || actx.state !== 'running'));
+}
+function setSound(on) { soundOn = on; try { localStorage.setItem('alertSound', String(on)); } catch (e) { /* ignore */ } if (on) audio(); syncSound(); }
+$('soundBtn').addEventListener('click', () => setSound(!soundOn));
+$('fSound').addEventListener('click', () => setSound(!soundOn));
+$('testSound').addEventListener('click', () => beep());
+document.addEventListener('pointerdown', () => { if (soundOn) { audio(); setTimeout(syncSound, 200); } }, { capture: true });
+
+/* ---------- Status + alerts (every tab) ---------- */
+const fmtUp = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h > 0 ? h + 'h ' + m + 'm' : m + 'm'; };
+const nodeName = n => n.name || ('Hole ' + n.id);
+// D68: arm / disarm feedback. The hole confirms with its next report (hub's own hole: 1-2 s; a sleeping WROOM
+// tip-up: at its next heartbeat, up to 60 s), so the row keeps saying "sent" until the chalet shows the new state
+// or 90 s pass. arm_pending in the status = the command is still being beaconed.
+const armPending = {};
+function armButton(n) {
+  const p = armPending[n.id];
+  if (p && (Date.now() - p.at > 90000 || n.disarmed === !p.want)) delete armPending[n.id];
+  const q = armPending[n.id];
+  if (q) {
+    const beaconing = n.arm_pending != null;
+    const txt = (q.want ? 'Arm' : 'Disarm') + (beaconing ? ': sending…' : ': sent, waiting for the hole…');
+    return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" disabled title="the hole reports the new state with its next message (tip-up asleep: up to 1 min)">${txt}</button>`;
+  }
+  return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="D61: same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>`;
+}
+function applyStatus(d) { st = d; onStatus(); if (tab === 'settings') { renderNetwork(); stFillHoles(); } }
+function loadStatus() {
+  return api('/api/status').then(applyStatus).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+}
+function onStatus() {
+  const nodes = st.nodes || [], fish = nodes.filter(n => n.fish && n.online !== false), online = nodes.filter(n => n.online).length;
+  const lora = st.lora || {}, wifi = st.wifi || {};
+  const net = st.setup_arm_s ? `setup phase (${Math.ceil(st.setup_arm_s / 60)} min)` : 'network OK';
+  const gpsTxt = st.gps ? ` · GPS ${st.gps.fix ? st.gps.sats + ' sats' : (st.gps.data ? 'no fix' : 'no data')}` : '';
+  $('sysline').textContent = `${online}/${nodes.length} holes online · ${net} · LoRa ${lora.ready ? 'ch ' + (st.lora_ch || 1) : 'FAIL'} · Wi-Fi ${wifi.sta_connected ? 'STA' : (wifi.ap_active ? 'AP' : '–')}${gpsTxt} · up ${fmtUp(st.uptime || 0)}`;
+  $('testb').hidden = !(st.sonar_sim || (st.radio_test && st.radio_test !== 'off'));
+  $('rtBar').hidden = !st.rt; if (st.rt) $('rtLine').textContent = `${st.rt.line} · hub ${st.rt.hub} — Radio tab for the details`;   // D80
+  $('testb').textContent = st.sonar_sim ? 'TEST MODE: FAKE SONAR' : 'RADIO TEST';
+  const sil = !!st.silenced;
+  $('silenceBtn').textContent = sil ? `Silenced${st.silence_left_sec ? ' · ' + Math.ceil(st.silence_left_sec / 60) + ' min' : ''} - tap to undo` : 'Silence alerts';
+  $('silenceBtn').setAttribute('aria-pressed', String(sil)); $('silenceBtn').classList.toggle('warn', sil);
+  // alert banner: every tab
+  $('alert').hidden = !fish.length;
+  document.body.classList.toggle('has-alert', fish.length > 0);
+  $('alertBox').classList.toggle('muted-al', sil);
+  $('alertWho').textContent = fish.map(nodeName).join(', ') + (sil ? ' (silenced)' : '');
+  $('alertSilence').textContent = sil ? 'Undo silence' : 'Silence';
+  $('holesDot').hidden = !fish.length;
+  // sound on new FISH ON (not while silenced)
+  let fresh = false;
+  nodes.forEach(n => { const now = !!n.fish && n.online !== false; if (now && !lastFish[n.id]) fresh = true; lastFish[n.id] = now; });
+  if (fresh && soundOn && !sil) beep();
+  if (SON()) SON().onStatus(st);
+  if (tab === 'holes') renderNodes();
+  if (tab === 'settings') renderAbout();
+}
+function toggleSilence() { fetch('/api/silence', { method: 'POST' }).then(() => loadStatus()).catch(() => {}); }
+$('silenceBtn').addEventListener('click', toggleSilence);
+$('alertSilence').addEventListener('click', toggleSilence);
+
+/* ---------- Holes tab ---------- */
+try { $('holeCards').open = localStorage.getItem('holeCardsOpen') !== '0'; } catch (e) { $('holeCards').open = true; }   // D85b: open unless closed by hand
+$('holeCards').addEventListener('toggle', () => { try { localStorage.setItem('holeCardsOpen', $('holeCards').open ? '1' : '0'); } catch (e) {} });
+function renderNodes() {
+  { const ns = (st && st.nodes) || [], f = ns.filter(n => n.fish && n.online !== false).length; $('hcSum').textContent = `${ns.length} hole${ns.length === 1 ? '' : 's'}` + (f ? ` · ${f} FISH ON` : ''); }
+  if (!st) return;
+  $('tripsInfo').innerHTML = st.trips ? `Trip recordings (sonar of the minute before each flag): ${st.trips} · <a href="/api/trips?download=1">Download</a>` : '';
+  const rank = n => (n.fish && n.online !== false ? 0 : n.online === false ? 2 : 1);   // tripped, then online, offline last
+  const nodes = (st.nodes || []).slice().sort((a, b) => (rank(a) - rank(b)) || (a.id - b.id));
+  const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {};
+  (L.nodes || []).forEach(x => { sonar[x.node] = x; });
+  const fishN = nodes.filter(n => n.fish && n.online !== false).length;
+  $('sOnline').textContent = nodes.filter(n => n.online).length + ' / ' + nodes.length;
+  $('sFish').textContent = fishN; $('sFish').style.color = fishN ? 'var(--alert)' : '';
+  $('sLora').textContent = (st.lora && st.lora.ready) ? 'OK' : 'FAIL';
+  $('sWifi').textContent = st.wifi ? (st.wifi.sta_connected ? 'Network' : (st.wifi.ap_active ? 'Hotspot' : '–')) : '–';
+  let h = '';
+  nodes.forEach(n => {
+    const off = n.online === false, low = !!n.lowbat, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
+    const s = sonar[n.id], g = glance.nodes[n.id], fl = s ? (s.st || 0) : 0, fmt = m => son ? son.fmtD(m) : m.toFixed(2) + ' m';
+    const state = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : n.line ? '<span class="badge al">FLAG UP</span>' : low ? '<span class="badge warn">LOW BATT</span>' : '<span class="badge on">OK</span>';
+    const badge = (n.sim ? '<span class="badge sim">SIM</span>' : '') + (n.disarmed ? '<span class="badge" title="the button on the hole or this page disarmed it: spool movement is ignored">DISARMED</span>' : '') + state;
+    const via = n.via_lora ? 'LoRa' : (n.via_espnow ? 'ESP-NOW' : '');
+    const seen = n.last_seen_sec == null ? '' : (n.last_seen_sec < 60 ? n.last_seen_sec + ' s ago' : Math.round(n.last_seen_sec / 60) + ' min ago');
+    const q = n.turns || 0, cmt = st.cm_per_turn || 0;   // D69: quarter turns since armed / cleared
+    const run = q ? `<span class="badge${n.fish ? ' al' : ''}" title="spool turns since the hole was armed or its trip cleared${cmt ? ' · ≈ ' + cmt + ' cm per turn (Settings)' : ''}">${(q / 4).toFixed(q % 4 ? 2 : 0)} turn${q > 4 ? 's' : ''}${cmt ? ' ≈ ' + (q / 4 * cmt / 100).toFixed(1) + ' m out' : ''}</span>` : '';
+    const meta = ['#' + n.id, via, seen].filter(Boolean).join(' · ');
+    // sonar flags as chips: only facts the hole reported (bsnr 0 = not reported yet)
+    const bs = s ? (s.bsnr || 0) : 0;
+    const chips = (fl & 1 ? '<span class="badge ice" title="ring-down much longer than normal">ICE ON TRANSDUCER?</span>' : '') +
+      (fl & 2 ? '<span class="badge on">NEAR BAIT</span>' : '') + (fl & 4 ? '<span class="badge">BAIT IN COVER</span>' : '') +
+      (bs ? `<span class="badge${bs >= 15 ? '' : ' warn'}" title="bottom echo above the noise floor">echo ${bs} dB${bs >= 30 ? ' · good' : bs >= 15 ? ' · ok' : ' · weak, aim the transducer'}</span>` : '');
+    const sonarPart = (s || g) ? `<canvas class="gl" data-glance="${n.id}" title="last 3 min: bottom, fish, bait line"></canvas>` +
+      `<div class="sum glt" data-glt="${n.id}" data-baitcm="${n.bait || 0}"><b>${s && s.fish ? s.fish + ' fish · nearest ' + son.fmtD(s.near / 100) : 'No fish'}</b>` +
+      `<small>${s && s.bottom < 2047 ? 'bottom ' + son.fmtD(s.bottom / 100) + (s.hard != null && son.HARD && son.HARD[s.hard] ? ' · ' + son.HARD[s.hard].t.toLowerCase() : '') : 'bottom –'}${n.bait ? ' · bait ' + fmt(n.bait / 100) : ''}</small></div>` +
+      (chips ? `<div class="flags">${chips}</div>` : '') : '';
+    const acts = `<div class="acts">` + ((s || g) ? `<button class="btn small primary" type="button" data-watch="${n.id}">Watch</button>` +
+      `<button class="btn small" type="button" data-bait="${n.id}" title="tell the hole where your lure is${n.bait ? ' (now ' + fmt(n.bait / 100) + ')' : ''}">Bait</button>` : '') +
+      armButton(n) +
+      `<button class="btn small" type="button" data-rename="${n.id}">Rename</button></div>`;
+    h += `<div class="node${n.fish && !off ? ' fish' : ''}${off ? ' off' : ''}${low ? ' low' : ''}">` +
+      `<div class="hd"><span class="nm">${esc(nodeName(n))}</span><span class="bd">${badge}</span></div>` +
+      `<div class="sm">${meta}${run ? ' ' + run : ''}</div>` +
+      `<div class="bat"><span class="bar"><i style="width:${pct}%"></i></span>${pct}%</div>` +
+      sonarPart + acts + `</div>`;
+  });
+  $('ngrid').innerHTML = h || '<p class="empty">No hole heard yet.</p>';
+  drawGlances();
+  if ((st.map_bytes || 0) !== pm.packBytes) pmLoadPack(st.map_bytes || 0);   // D74
+  if (!pm.drag) drawPmap();
+}
+
+/* ---------- Sonar at a glance: last ~3 min of every hole (summaries every 2 s) ---------- */
+const glance = { frame: 0, nodes: {} };
+function applyGlance(d) {
+  if (glance.frame && ((d.frame - glance.frame) & 0xFFFF) > 0x8000) { glance.frame = 0; glance.nodes = {}; return; }   // chalet restarted
+  (d.nodes || []).forEach(x => {
+    const g = glance.nodes[x.node] || (glance.nodes[x.node] = { recs: [] });
+    g.hub = x.hub; g.hard = x.hard; g.act = x.act;
+    g.recs = g.recs.concat(x.recs || []).slice(-90);
+  });
+  glance.frame = d.frame;
+  drawGlances();
+}
+function loadGlance() { return api('/api/sonar/glance?since=' + glance.frame).then(applyGlance).catch(() => {}); }
+// D85: the Holes tab asks for everything it shows in ONE request a second (status, hole list, glance delta, live
+// pings): the chalet serves one client at a time, and four separate 2 s polls landing together waited for each other.
+function loadHoles() {
+  const son = SON();
+  return api('/api/poll?glance=' + glance.frame + (son ? son.lpArgs() : '')).then(d => {
+    if (d.status) applyStatus(d.status);
+    if (son && d.sonar) son.applyList(d.sonar);
+    if (d.glance) applyGlance(d.glance);
+    if (son && d.pings) son.lpApply(d.pings);
+  }).catch(() => { $('sysline').textContent = 'Chalet not reachable - retrying…'; });
+}
+function cssVar(n, f) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || f; }
+// v2 (D42) depth scale of the hole cards: same auto scale for all, each hole its own auto scale, or fixed
+/* ---------- Pocket map (D51 -> D75 tile map): pan / pinch / zoom, map or satellite tiles, holes on top ---------- */
+/* Tiles (Esri World Topo = lakes, rivers, roads; Esri World Imagery) are fetched by THIS PHONE when it has internet,
+   never by the chalet. Every tile shown is kept on the phone (IndexedDB) for the next trip, and "Save area" pushes the
+   tiles of the visible area to the chalet (its 4.8 MB store) so any phone gets them on the ice without internet.
+   Depth contours come from the optional map pack (Settings) where CHS data exists. Hole positions are metres east /
+   north of the chalet GPS origin (flat earth, fine for a few km); until "Chalet here" is done the map has no tiles. */
+const pm = { sel: null, placing: null, drag: null, view: null, pack: null, packBytes: 0, layer: 'map', depth: false, full: false, tiles: new Map(), net: { fails: 0, offUntil: 0 }, redraw: 0,
+  cz: null, ptrs: new Map(), pinch: null, pan: null, idb: null, idbFail: false, src: { net: 0, idb: 0, chalet: 0, miss: 0 }, saving: null, msg: null };
+try { pm.layer = localStorage.getItem('pmLayer') || 'map'; pm.depth = localStorage.getItem('pmDepth') === '1'; } catch (e) {}
+// D76 depth overlay: CHS NONNA bathymetry as WMS tiles (10 m product close up, 100 m zoomed out), transparent where unsurveyed
+function nonnaUrl(z, x, y) {
+  const R = 6378137, n = Math.pow(2, z), m = (tx, ty) => { const lon = tx / n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / n))) * 180 / Math.PI; return [R * lon * Math.PI / 180, R * Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360))]; };
+  const [x0, y1] = m(x, y), [x1, y0] = m(x + 1, y + 1);
+  return `https://nonna-geoserver.data.chs-shc.ca/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=${encodeURIComponent(z >= 12 ? 'nonna:NONNA 10' : 'nonna:NONNA 100')}&styles=&crs=EPSG:3857&bbox=${x0.toFixed(1)},${y0.toFixed(1)},${x1.toFixed(1)},${y1.toFixed(1)}&width=256&height=256&format=image/png&transparent=true`;
+}
+const LAYERS = { map: { url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${z}/${y}/${x}`, attr: 'Esri World Topo', max: 19 },
+  sat: { url: (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`, attr: 'Esri World Imagery', max: 19 },
+  dep: { url: nonnaUrl, attr: 'depth: CHS NONNA', max: 19 } };
+const DEF_ORG = { lat: 45.5, lon: -75.7 };   // projection anchor while the chalet has no GPS origin (no tiles drawn then)
+const PM_FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
+const pmClamp = (v, a, b) => Math.min(b, Math.max(a, v));
+function pmFit(cv) { const r = cv.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr)); if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; } return { w, h, dpr }; }
+const pmC = $('pmap'), pmX = pmC.getContext('2d');
+const PM_DEEP = [[0.0, [158, 211, 217]], [0.5, [60, 135, 150]], [1.0, [21, 64, 76]]];
+function pmColor(t) { t = pmClamp(t, 0, 1); let a = PM_DEEP[0], b = PM_DEEP[PM_DEEP.length - 1]; for (let i = 1; i < PM_DEEP.length; i++) if (t <= PM_DEEP[i][0]) { a = PM_DEEP[i - 1]; b = PM_DEEP[i]; break; } const u = (t - a[0]) / (b[0] - a[0] || 1); return a[1].map((c, k) => Math.round(c + (b[1][k] - c) * u)); }
+function pmOrigin() { const g = st && st.gps; return g && g.origin && g.lat0 != null ? { lat: +g.lat0, lon: +g.lon0 } : null; }
+function pmMetresToLL(o, x, y) { const c = Math.cos(o.lat * Math.PI / 180); return [o.lat + y / 111320, o.lon + x / (111320 * c)]; }
+function pmLLToMetres(o, lat, lon) { const c = Math.cos(o.lat * Math.PI / 180); return [(lon - o.lon) * 111320 * c, (lat - o.lat) * 111320]; }
+// Web Mercator, 256 px tiles: world pixel coordinates at zoom z
+function llToWorld(lat, lon, z) { const n = 256 * Math.pow(2, z), s = Math.sin(lat * Math.PI / 180); return [(lon + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n]; }
+function worldToLL(x, y, z) { const n = 256 * Math.pow(2, z); return [Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI, x / n * 360 - 180]; }
+function pmHoles() {
+  const son = SON(), L = son ? son.list() : { nodes: [] }, sonar = {}; (L.nodes || []).forEach(x => { sonar[x.node] = x; });
+  return (st && st.nodes || []).map(n => { const s = sonar[n.id]; const dr = pm.drag && pm.drag.id === n.id && pm.drag.moved; return { id: n.id, name: nodeName(n), x: dr ? pm.drag.x : n.px, y: dr ? pm.drag.y : n.py, placed: n.px != null, fish: !!n.fish && n.online !== false, off: n.online === false,
+    depth: s && s.bottom < 2047 ? s.bottom / 100 : null, hard: s ? s.hard : 3 }; });
+}
+// view: centre (lat, lon) + zoom (CSS-pixel zoom; device pixels add log2(dpr)); first view fits the holes around the chalet
+function pmView(w, h, holes, dpr) {
+  const o = pmOrigin() || DEF_ORG, ok = o.lat + ',' + o.lon;
+  if (pm.cz && pm.cz.ok !== ok) pm.cz = null;   // origin set or moved: re-centre
+  if (!pm.cz) {
+    const pts = holes.filter(x => x.placed).map(x => [x.x, x.y]).concat([[0, 0]]);
+    const span = Math.max(...pts.map(p => Math.abs(p[0])), ...pts.map(p => Math.abs(p[1])), 60) * 2 * 1.3;   // metres across, chalet centred
+    const mpp = 40075016.686 * Math.cos(o.lat * Math.PI / 180) / 256;   // metres per CSS px at z = 0
+    pm.cz = { ok, lat: o.lat, lon: o.lon, z: pmClamp(Math.log2(mpp * Math.min(w, h) / dpr / span), 3, 19) };
+  }
+  const c = pm.cz, zf = c.z + Math.log2(dpr), zt = pmClamp(Math.round(zf), 0, 19), s = Math.pow(2, zf - zt);   // tiles at zt, scaled by s
+  const [cx, cy] = llToWorld(c.lat, c.lon, zt);
+  const k = 256 * Math.pow(2, zf) / (40075016.686 * Math.cos(c.lat * Math.PI / 180));   // device px per metre
+  const llToPx = (lat, lon) => { const [x, y] = llToWorld(lat, lon, zt); return [w / 2 + (x - cx) * s, h / 2 + (y - cy) * s]; };
+  const pxToLL = (px, py) => worldToLL(cx + (px - w / 2) / s, cy + (py - h / 2) / s, zt);
+  return { w, h, dpr, o, zt, s, k, cx, cy, llToPx, pxToLL,
+    toPx: (mx, my) => llToPx(...pmMetresToLL(o, mx, my)), toM: (px, py) => pmLLToMetres(o, ...pxToLL(px, py)) };
+}
+/* ---- tile sources: phone cache (IndexedDB) -> internet (kept in the cache) -> chalet store ---- */
+function idb() {
+  if (pm.idb || pm.idbFail) return Promise.resolve(pm.idb);
+  return new Promise(res => { try { const r = indexedDB.open('icetiles', 1); r.onupgradeneeded = () => r.result.createObjectStore('t'); r.onsuccess = () => { pm.idb = r.result; res(pm.idb); }; r.onerror = () => { pm.idbFail = true; res(null); }; } catch (e) { pm.idbFail = true; res(null); } });
+}
+function idbGet(key) { return idb().then(db => new Promise(res => { if (!db) return res(null); try { const r = db.transaction('t').objectStore('t').get(key); r.onsuccess = () => res(r.result || null); r.onerror = () => res(null); } catch (e) { res(null); } })); }
+function idbPut(key, blob) { idb().then(db => { if (!db) return; try { db.transaction('t', 'readwrite').objectStore('t').put(blob, key); } catch (e) {} }); }
+function idbClear() { return idb().then(db => new Promise(res => { if (!db) return res(); try { const r = db.transaction('t', 'readwrite').objectStore('t').clear(); r.onsuccess = () => res(); r.onerror = () => res(); } catch (e) { res(); } })); }
+function idbCount() { return idb().then(db => new Promise(res => { if (!db) return res(0); try { const r = db.transaction('t').objectStore('t').count(); r.onsuccess = () => res(r.result); r.onerror = () => res(0); } catch (e) { res(0); } })); }
+function pmOnline() { return navigator.onLine !== false && Date.now() > pm.net.offUntil; }
+const chaletTileUrl = (l, z, x, y) => `/api/tile?l=${l[0]}&z=${z}&x=${x}&y=${y}`;   // the chalet knows m / s
+function pmTile(l, z, x, y) {
+  const key = `${l}/${z}/${x}/${y}`; let t = pm.tiles.get(key);
+  if (t) return t;
+  if (pm.tiles.size > 400) { const k0 = pm.tiles.keys().next().value; const t0 = pm.tiles.get(k0); if (t0 && t0.url) URL.revokeObjectURL(t0.url); pm.tiles.delete(k0); }
+  t = { img: new Image(), ok: false, err: false, from: '', blob: null, url: null };
+  pm.tiles.set(key, t);
+  const show = (src, from) => { t.img.onload = () => { t.ok = true; t.from = from; if (from === 'net') pm.net.fails = 0; pmRedraw(); }; t.img.onerror = () => { if (from === 'net') { if (++pm.net.fails >= 4) { pm.net.offUntil = Date.now() + 60000; pm.net.fails = 0; } tryChalet(); } else { t.err = true; pmRedraw(); } }; t.img.src = src; };
+  const tryChalet = () => show(chaletTileUrl(l, z, x, y), 'chalet');
+  const tryNet = () => {
+    if (!pmOnline()) return tryChalet();
+    const url = LAYERS[l].url(z, x, y);
+    fetch(url, { mode: 'cors' }).then(r => r.ok ? r.blob() : Promise.reject()).then(b => { t.blob = b; idbPut(key, b); t.url = URL.createObjectURL(b); show(t.url, 'net'); })
+      .catch(() => show(url, 'net'));   // no CORS (or offline): plain image load, nothing to keep
+  };
+  idbGet(key).then(b => { if (b) { t.blob = b; t.url = URL.createObjectURL(b); show(t.url, 'idb'); } else tryNet(); });
+  return t;
+}
+function pmRedraw() { if (pm.redraw) return; pm.redraw = setTimeout(() => { pm.redraw = 0; drawPmap(); }, 50); }
+function pmTileRange(v, zt) {   // tiles covering the canvas at zoom zt
+  const f = Math.pow(2, zt - v.zt), n = 1 << zt;
+  const x0 = Math.floor((v.cx - v.w / 2 / v.s) * f / 256), x1 = Math.floor((v.cx + v.w / 2 / v.s) * f / 256), y0 = Math.floor((v.cy - v.h / 2 / v.s) * f / 256), y1 = Math.floor((v.cy + v.h / 2 / v.s) * f / 256);
+  return { x0: Math.max(0, x0), x1: Math.min(n - 1, x1), y0: Math.max(0, y0), y1: Math.min(n - 1, y1), n };
+}
+function pmDrawTiles(g, v) {
+  if (!pmOrigin()) return false;
+  pm.src = { net: 0, idb: 0, chalet: 0, miss: 0 };
+  const base = pmDrawLayer(g, v, pm.layer);
+  if (pm.depth) { g.globalAlpha = 0.75; pmDrawLayer(g, v, 'dep'); g.globalAlpha = 1; }
+  return base;
+}
+function pmDrawLayer(g, v, l) {
+  const r = pmTileRange(v, v.zt), ts = 256 * v.s;
+  let drawn = 0;
+  for (let ty = r.y0; ty <= r.y1; ty++) for (let tx = r.x0; tx <= r.x1; tx++) {
+    const px = v.w / 2 + (tx * 256 - v.cx) * v.s, py = v.h / 2 + (ty * 256 - v.cy) * v.s;
+    const t = pmTile(l, v.zt, tx, ty);
+    if (t.ok) { g.drawImage(t.img, px, py, ts + 0.5, ts + 0.5); drawn++; pm.src[t.from]++; continue; }
+    // not there yet: a parent tile (up to 3 levels out), scaled, so zooming in offline still shows something
+    let got = false;
+    for (let u = 1; u <= 3 && !got; u++) { const p = pm.tiles.get(`${l}/${v.zt - u}/${tx >> u}/${ty >> u}`); if (p && p.ok) { const q = 256 >> u; g.drawImage(p.img, (tx & ((1 << u) - 1)) * q, (ty & ((1 << u) - 1)) * q, q, q, px, py, ts + 0.5, ts + 0.5); drawn++; got = true; } }
+    if (!got && t.err) pm.src.miss++;
+  }
+  return drawn > 0;
+}
+function pmLoadPack(bytes) {
+  pm.packBytes = bytes; pm.pack = null;
+  if (!bytes) { drawPmap(); return; }
+  tfetch('/api/map/pack').then(r => r.ok ? r.json() : null).then(j => {
+    if (j) { const regs = Array.isArray(j.regions) ? j.regions : (Array.isArray(j.lines) ? [j] : []);   // v2 regions, v1 single
+      pm.pack = { regions: regs.filter(r => Array.isArray(r.lines) && r.lines.length).map(r => { const ds = r.lines.map(l => +l.d); return Object.assign({ dmin: Math.min(...ds), dmax: Math.max(...ds) }, r); }) }; }
+    drawPmap(); mpInfo();
+  }).catch(() => {});
+}
+function pmRegions(o) {   // regions of the pack within 50 km of the chalet origin
+  const P = pm.pack; if (!P || !o) return [];
+  return P.regions.filter(r => r.lat0 != null && Math.hypot(...pmLLToMetres(o, +r.lat0, +r.lon0)) < 50000);
+}
+function pmDrawContours(g, v, o, dpr, fmt) {
+  const regs = pmRegions(o); if (!regs.length) return false;
+  g.lineWidth = 1.2 * dpr; g.lineJoin = 'round'; g.font = `${9 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  let li = 0;
+  for (const P of regs) {
+    const [sx, sy] = pmLLToMetres(o, +P.lat0, +P.lon0), rng = Math.max(P.dmax - P.dmin, 1);
+    for (const L of P.lines) {
+      const p = L.p; li++; if (!p || p.length < 4) continue;
+      const c = pmColor((+L.d - P.dmin) / rng); g.strokeStyle = `rgb(${c[0]},${c[1]},${c[2]})`;
+      g.beginPath(); let len = 0, lx = 0, ly = 0;
+      for (let i = 0; i < p.length; i += 2) { const [x, y] = v.toPx(sx + p[i] / 10, sy + p[i + 1] / 10); if (i) { len += Math.hypot(x - lx, y - ly); g.lineTo(x, y); } else g.moveTo(x, y); lx = x; ly = y; }
+      g.stroke();
+      if (len > 90 * dpr && v.k > 0.15) { const i = Math.floor((p.length / 2) * ((li * 0.37) % 1)) * 2; const [x, y] = v.toPx(sx + p[i] / 10, sy + p[i + 1] / 10); const lab = fmt(+L.d), w = g.measureText(lab).width;
+        g.fillStyle = 'rgba(255,255,255,0.75)'; g.fillRect(x - w / 2 - 2 * dpr, y - 6 * dpr, w + 4 * dpr, 12 * dpr); g.fillStyle = '#13262D'; g.fillText(lab, x, y); }
+    }
+  }
+  return true;
+}
+function drawPmap() {
+  if (tab !== 'holes') return;
+  const { w, h, dpr } = pmFit(pmC), g = pmX, holes = pmHoles(), v = pmView(w, h, holes, dpr); pm.view = v;
+  const fmt = SON() ? SON().fmtD : m => m.toFixed(1) + ' m';
+  const org = pmOrigin();
+  g.fillStyle = '#DCE9EC'; g.fillRect(0, 0, w, h);
+  const bg = pmDrawTiles(g, v);
+  const ctr = pmDrawContours(g, v, org, dpr, fmt);
+  const known = holes.filter(x => x.placed && x.depth != null);
+  if (known.length && v.k > 0.3) {   // inverse-distance depth field, faded away from the holes (no guessing far out)
+    const ds = known.map(x => x.depth), dmin = Math.min(...ds), dmax = Math.max(...ds), rng = Math.max(dmax - dmin, 1);
+    const cell = 6 * dpr;
+    const img = g.createImageData(Math.ceil(w / cell), Math.ceil(h / cell)), d = img.data;
+    for (let j = 0; j < img.height; j++) for (let i = 0; i < img.width; i++) {
+      const [mx, my] = v.toM((i + 0.5) * cell, (j + 0.5) * cell);
+      let sw = 0, sv = 0, near = 1e9;
+      for (const hh of known) { const dd = Math.hypot(hh.x - mx, hh.y - my); near = Math.min(near, dd); const wgt = 1 / (dd * dd + 4); sw += wgt; sv += wgt * hh.depth; }
+      const t = ((sv / sw) - dmin) / rng, c = pmColor(t), a = pmClamp(1 - (near - 12) / 25, 0, 1);   // solid within 12 m of a hole, gone past ~37 m
+      const o = (j * img.width + i) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = Math.round(a * (bg || ctr ? 150 : 230));
+    }
+    const tmp = document.createElement('canvas'); tmp.width = img.width; tmp.height = img.height; tmp.getContext('2d').putImageData(img, 0, 0);
+    g.imageSmoothingEnabled = true; g.drawImage(tmp, 0, 0, w, h);
+  }
+  // scale bar (bottom left) and attribution (bottom right)
+  { const want = 90 * dpr / v.k; const nice = [5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000].reduce((b, n) => Math.abs(n - want) < Math.abs(b - want) ? n : b, 5), px = nice * v.k, x = 8 * dpr, y = h - 10 * dpr;
+    g.strokeStyle = '#13262D'; g.lineWidth = 2 * dpr; g.beginPath(); g.moveTo(x, y); g.lineTo(x + px, y); g.moveTo(x, y - 4 * dpr); g.lineTo(x, y); g.moveTo(x + px, y - 4 * dpr); g.lineTo(x + px, y); g.stroke();
+    g.fillStyle = '#13262D'; g.font = `${10 * dpr}px ${PM_FONT}`; g.textAlign = 'left'; g.textBaseline = 'bottom'; g.fillText(nice >= 1000 ? (nice / 1000) + ' km' : nice + ' m', x + 3 * dpr, y - 2 * dpr);
+    if (bg) { g.textAlign = 'right'; g.fillStyle = 'rgba(19,38,45,0.7)'; g.fillText(LAYERS[pm.layer].attr, w - 6 * dpr, h - 3 * dpr); } }
+  g.fillStyle = 'rgba(19,38,45,0.6)'; g.font = `${10 * dpr}px ${PM_FONT}`; g.textAlign = 'left'; g.textBaseline = 'top'; g.fillText('N ↑', 6 * dpr, 4 * dpr);
+  // chalet
+  { const [x, y] = v.toPx(0, 0); g.fillStyle = '#13262D'; g.strokeStyle = '#fff'; g.lineWidth = 1.5 * dpr; g.beginPath(); g.moveTo(x, y - 9 * dpr); g.lineTo(x + 8 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y - 1 * dpr); g.lineTo(x + 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y + 7 * dpr); g.lineTo(x - 5 * dpr, y - 1 * dpr); g.lineTo(x - 8 * dpr, y - 1 * dpr); g.closePath(); g.fill(); g.stroke();
+    g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'top'; g.lineWidth = 3 * dpr; g.strokeText('chalet', x, y + 9 * dpr); g.fillText('chalet', x, y + 9 * dpr); }
+  // live GPS position of the box (when it is not at the origin): small blue dot
+  if (st && st.gps && st.gps.fix && org && st.gps.lat != null) { const [x, y] = v.llToPx(+st.gps.lat, +st.gps.lon); if (Math.hypot(x - w / 2, y - h / 2) < 5000) { g.fillStyle = '#1C6CF2'; g.strokeStyle = '#fff'; g.lineWidth = 2 * dpr; g.beginPath(); g.arc(x, y, 5 * dpr, 0, Math.PI * 2); g.fill(); g.stroke(); } }
+  // selected hole: dashed line from the chalet with the distance
+  const selH = holes.find(x => x.id === pm.sel && x.placed);
+  if (selH) { const [x0, y0] = v.toPx(0, 0), [x1, y1] = v.toPx(selH.x, selH.y); g.setLineDash([6 * dpr, 5 * dpr]); g.strokeStyle = '#1C6C77'; g.lineWidth = 1.5 * dpr; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); g.setLineDash([]);
+    const d = Math.hypot(selH.x, selH.y), lab = (d >= 1000 ? (d / 1000).toFixed(2) + ' km' : Math.round(d) + ' m') + ' · ' + Math.round((Math.atan2(selH.x, selH.y) * 180 / Math.PI + 360) % 360) + '°';
+    g.font = `600 ${10 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'bottom'; g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 3 * dpr; g.strokeText(lab, (x0 + x1) / 2, (y0 + y1) / 2 - 3 * dpr); g.fillStyle = '#13262D'; g.fillText(lab, (x0 + x1) / 2, (y0 + y1) / 2 - 3 * dpr); }
+  // holes
+  pm.drawn = holes.filter(x => x.placed).map(x => ({ id: x.id, x: x.x, y: x.y, fish: x.fish, r: (x.id === pm.sel ? 11 : 9) * dpr }));   // D80 follow marker layer
+  pmFollowCaption(holes);
+  const HC = ['#C9A25C', '#A89A6A', '#7E8A5A', '#86A2AB'];
+  for (const hh of holes) {
+    if (!hh.placed) continue;
+    const [x, y] = v.toPx(hh.x, hh.y), r = (hh.id === pm.sel ? 11 : 9) * dpr;
+    if (hh.fish) { g.beginPath(); g.arc(x, y, r + 6 * dpr, 0, Math.PI * 2); g.strokeStyle = 'rgba(194,65,45,0.45)'; g.lineWidth = 4 * dpr; g.stroke(); }
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fillStyle = hh.fish ? '#C2412D' : hh.off ? '#B8C6CA' : '#FFFFFF'; g.fill();
+    g.lineWidth = 3 * dpr; g.strokeStyle = hh.depth != null ? HC[hh.hard] || HC[3] : '#86A2AB'; g.stroke();
+    if (hh.id === pm.sel) { g.lineWidth = 2 * dpr; g.strokeStyle = '#1C6C77'; g.beginPath(); g.arc(x, y, r + 4 * dpr, 0, Math.PI * 2); g.stroke(); }
+    g.fillStyle = '#13262D'; g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 3 * dpr; g.font = `600 ${11 * dpr}px ${PM_FONT}`; g.textAlign = 'center'; g.textBaseline = 'bottom'; g.strokeText(hh.name, x, y - r - 2 * dpr); g.fillText(hh.name, x, y - r - 2 * dpr);
+    if (hh.depth != null) { g.font = `${10 * dpr}px ${PM_FONT}`; g.textBaseline = 'top'; g.strokeText(fmt(hh.depth), x, y + r + 2 * dpr); g.fillText(fmt(hh.depth), x, y + r + 2 * dpr); }
+  }
+  // legend line, chips, hint
+  const S = pm.src, srcTxt = !org ? 'no tiles until the chalet has its GPS origin (OLED: GPS / pin holes → Chalet here)' :
+    (bg ? (S.net ? 'online' : '') + (S.idb ? (S.net ? ' + ' : '') + 'phone cache' : '') + (S.chalet ? ((S.net || S.idb) ? ' + ' : '') + 'chalet store' : '') + (S.miss ? ` · ${S.miss} tile${S.miss > 1 ? 's' : ''} missing offline` : '') : (pmOnline() ? 'loading…' : 'offline: no tile of this area saved'));
+  $('pmBg').textContent = (pm.layer === 'sat' ? 'satellite' : 'map') + (pm.depth ? ' + depth' : '') + (srcTxt ? ' · ' + srcTxt : '') + (ctr ? ' · depth contours' : '');
+  const un = holes.filter(x => !x.placed);
+  $('pmChips').innerHTML = un.map(x => `<button class="btn ghost" type="button" data-pm="${x.id}" aria-pressed="${pm.sel === x.id}">${esc(x.name)} · not on map</button>`).join('');
+  const plc = pm.placing != null ? holes.find(x => x.id === pm.placing) : null;
+  $('pmHint').textContent = pm.msg ? pm.msg : (plc ? `Tap the map where ${plc.name} is` + (plc.placed ? ', or drag its marker.' : '.') : (pm.saving ? pm.saving : (un.length ? `${un.length} hole${un.length > 1 ? 's' : ''} not on the map: tap its name, then "Pin here" (box at the hole) or "Tap the map".` : (known.length < 3 ? 'Depth shading between holes needs 3 holes with a sonar bottom.' : ''))));
+  pmSheetRender();
+}
+/* ---- D80 follow the action on the map: pulsing cyan ring on the watched hole, arrow when it moves ---- */
+const PMF = { c: $('pmFx'), raf: 0, last: 0, node: 0, sw: null, still: matchMedia('(prefers-reduced-motion: reduce)').matches };
+const PMF_CY = [0, 179, 214];
+function pmFollowState() {
+  const f = st && st.follow; if (!f) return null;
+  const node = f.node || 0;
+  return { node, on: f.on !== false, trip: f.trip_s > 0, pin: f.pin_s > 0 || (f.on === false && node > 0), lock: f.pin_s > 0, why: f.why || '', pin_s: f.pin_s || 0, trip_s: f.trip_s || 0 };
+}
+function pmFollowCaption(holes) {
+  const el = $('pmFollow'), f = pmFollowState();
+  if (!f || (!f.on && !f.node)) { el.hidden = true; return; }
+  const hh = holes.find(x => x.id === f.node), nm = hh ? hh.name : 'Hole ' + f.node, off = hh && !hh.placed ? ' · not on the map' : '';
+  const mins = s => s >= 60 ? Math.ceil(s / 60) + ' min' : Math.ceil(s / 10) * 10 + ' s';
+  let t, cls = '';
+  if (!f.node) { t = 'Following the action · waiting for fish'; cls = 'idle'; }
+  else if (f.trip) { t = `FISH ON · ${nm} · following again in ${mins(f.trip_s)}`; cls = 'trip'; }
+  else if (f.lock) { t = `Your pick: ${nm} · following again in ${mins(f.pin_s)}`; cls = 'pinned'; }
+  else if (!f.on) { t = `Watching ${nm} · follow is off`; cls = 'pinned'; }
+  else t = `Following ${nm} · ${f.why || 'activity'}`;
+  el.textContent = t + off; el.className = 'pmfollow' + (cls ? ' ' + cls : ''); el.hidden = false;
+  // a move made by the follower (not your own pick): animate an arrow from the old hole
+  if (f.node !== PMF.node) { if (PMF.node && f.node && f.on && !f.lock) PMF.sw = { from: PMF.node, to: f.node, t0: performance.now() }; PMF.node = f.node; }
+  pmFxKick();
+}
+$('pmFollow').addEventListener('click', () => showTab('sonar'));
+function pmFxKick() { if (!PMF.raf) PMF.raf = requestAnimationFrame(pmFxFrame); }
+function pmFxFrame(t) {
+  PMF.raf = 0;
+  const v = pm.view, f = pmFollowState(), cv = PMF.c;
+  if (tab !== 'holes' || document.hidden || !v) return;   // stops; drawPmap / the next status starts it again
+  if (cv.width !== pmC.width || cv.height !== pmC.height) { cv.width = pmC.width; cv.height = pmC.height; }
+  const g = cv.getContext('2d'), dpr = v.dpr; g.clearRect(0, 0, cv.width, cv.height);
+  const hh = f && f.node ? (pm.drawn || []).find(x => x.id === f.node) : null;
+  let more = false;
+  // arrow from the previous hole (1.2 s draw, 0.6 s fade)
+  if (PMF.sw) {
+    const a = (pm.drawn || []).find(x => x.id === PMF.sw.from), b = (pm.drawn || []).find(x => x.id === PMF.sw.to), el = (t - PMF.sw.t0) / 1000;
+    if (!a || !b || el > 1.8) PMF.sw = null;
+    else {
+      const [x0, y0] = v.toPx(a.x, a.y), [x1, y1] = v.toPx(b.x, b.y), L = Math.hypot(x1 - x0, y1 - y0);
+      if (L > 30 * dpr) {
+        const ux = (x1 - x0) / L, uy = (y1 - y0) / L, s0 = a.r + 6 * dpr, s1 = L - b.r - 10 * dpr;
+        const p = PMF.still ? 1 : Math.min(1, el / 1.2), ease = 1 - Math.pow(1 - p, 3), e = s0 + (s1 - s0) * ease;
+        const al = el > 1.2 ? Math.max(0, 1 - (el - 1.2) / 0.6) : 1;
+        g.save(); g.globalAlpha = al; g.lineCap = 'round';
+        g.strokeStyle = 'rgba(255,255,255,0.9)'; g.lineWidth = 6 * dpr; g.beginPath(); g.moveTo(x0 + ux * s0, y0 + uy * s0); g.lineTo(x0 + ux * e, y0 + uy * e); g.stroke();
+        g.strokeStyle = `rgb(${PMF_CY})`; g.lineWidth = 3 * dpr; g.stroke();
+        const hx = x0 + ux * e, hy = y0 + uy * e, hs = 9 * dpr;   // head
+        g.beginPath(); g.moveTo(hx + ux * hs * 0.4, hy + uy * hs * 0.4); g.lineTo(hx - ux * hs + uy * hs * 0.6, hy - uy * hs - ux * hs * 0.6); g.lineTo(hx - ux * hs - uy * hs * 0.6, hy - uy * hs + ux * hs * 0.6); g.closePath();
+        g.fillStyle = `rgb(${PMF_CY})`; g.strokeStyle = '#fff'; g.lineWidth = 1.5 * dpr; g.fill(); g.stroke(); g.restore();
+      }
+      more = true;
+    }
+  }
+  if (hh) {
+    const [x, y] = v.toPx(hh.x, hh.y), r = hh.r;
+    if (hh.fish) {   // FISH ON: the red halo stays on top in importance; a thin steady cyan ring inside it
+      g.lineWidth = 2 * dpr; g.strokeStyle = `rgb(${PMF_CY})`; g.beginPath(); g.arc(x, y, r + 2.5 * dpr, 0, Math.PI * 2); g.stroke();
+    } else if (f.pin || PMF.still) {   // your pick / follow off: solid ring, no pulse
+      g.lineWidth = 3 * dpr; g.strokeStyle = 'rgba(255,255,255,0.9)'; g.beginPath(); g.arc(x, y, r + 5 * dpr, 0, Math.PI * 2); g.stroke();
+      g.lineWidth = 2.5 * dpr; g.strokeStyle = `rgb(${PMF_CY})`; g.stroke();
+    } else {   // following: a ping going out every 1.6 s (two rings, offset), plus the steady inner ring
+      for (const off of [0, 0.5]) {
+        const ph = ((t / 1600) + off) % 1, rr = r + 4 * dpr + ph * 20 * dpr;
+        g.lineWidth = (2.5 - 1.5 * ph) * dpr; g.strokeStyle = `rgba(${PMF_CY},${(0.85 * (1 - ph)).toFixed(3)})`; g.beginPath(); g.arc(x, y, rr, 0, Math.PI * 2); g.stroke();
+      }
+      g.lineWidth = 2.5 * dpr; g.strokeStyle = `rgb(${PMF_CY})`; g.beginPath(); g.arc(x, y, r + 4 * dpr, 0, Math.PI * 2); g.stroke();
+      more = true;
+    }
+    // badge (top right of the marker): sonar cone while following, padlock while your pick holds
+    const bx = x + r * 0.9, by = y + r * 0.9, br = 6.5 * dpr;   // bottom right: clear of the name above
+    g.beginPath(); g.arc(bx, by, br, 0, Math.PI * 2); g.fillStyle = hh.fish ? '#C2412D' : `rgb(${PMF_CY})`; g.fill(); g.lineWidth = 1.5 * dpr; g.strokeStyle = '#fff'; g.stroke();
+    g.fillStyle = '#fff'; g.strokeStyle = '#fff';
+    if (f.lock) {
+      g.fillRect(bx - 3 * dpr, by - 0.5 * dpr, 6 * dpr, 4.5 * dpr);
+      g.lineWidth = 1.3 * dpr; g.beginPath(); g.arc(bx, by - 0.5 * dpr, 2 * dpr, Math.PI, 0); g.stroke();
+    } else {   // a small downward beam: the transducer cone
+      g.beginPath(); g.moveTo(bx, by - 3.2 * dpr); g.lineTo(bx + 3.2 * dpr, by + 3 * dpr); g.lineTo(bx - 3.2 * dpr, by + 3 * dpr); g.closePath(); g.fill();
+    }
+  }
+  if (more && !PMF.still) { PMF.raf = requestAnimationFrame(pmFxFrame); }
+  else if (more) { PMF.raf = 0; setTimeout(pmFxKick, 300); }   // reduced motion: only the arrow fade, few frames
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pmFxKick(); });
+function pmFlash(m, ms) { pm.msg = m; drawPmap(); setTimeout(() => { if (pm.msg === m) { pm.msg = null; drawPmap(); } }, ms || 5000); }
+/* ---- hole / chalet sheet under the map (D76): what the hole reports, and what to do with it ---- */
+function pmSheetRender() {
+  const sh = $('pmSheet');
+  if (pm.sel == null) { sh.hidden = true; return; }
+  const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(2) + ' m', g = st && st.gps;
+  if (pm.sel === 'chalet') {
+    const fix = g && g.fix, o = pmOrigin();
+    sh.innerHTML = `<div class="hd"><span class="nm">Chalet box</span><span class="badge${fix ? ' on' : ''}">${fix ? 'GPS FIX · ' + g.sats + ' sats' : (g && g.data ? 'GPS: no fix yet' : 'no GPS')}</span></div>` +
+      `<div class="kv"><div><span>Map origin</span>${o ? o.lat.toFixed(5) + ', ' + o.lon.toFixed(5) : 'not set'}</div><div><span>Box now</span>${fix ? (+g.lat).toFixed(5) + ', ' + (+g.lon).toFixed(5) : '–'}</div><div><span>Holes on the map</span>${pmHoles().filter(x => x.placed).length} of ${pmHoles().length}</div></div>` +
+      `<div class="acts"><button class="btn small primary" type="button" data-gps="origin" ${fix ? '' : 'disabled'}>Chalet here (set the map origin)</button><button class="btn small" type="button" data-gps="clearall">Clear all hole positions</button><button class="btn small" type="button" data-close="1">Close</button></div>` +
+      `<p class="hint" style="margin:6px 0 0">The origin is where the chalet sits on the map (0, 0). Set it once with a fix; hole positions are metres from it, so moving the origin moves every hole with it.</p>`;
+    sh.hidden = false; return;
+  }
+  const n = (st && st.nodes || []).find(x => x.id === pm.sel); if (!n) { sh.hidden = true; return; }
+  const L = son ? son.list() : { nodes: [] }, s = (L.nodes || []).find(x => x.node === n.id), hh = pmHoles().find(x => x.id === n.id);
+  const off = n.online === false, pct = Math.min(100, Math.max(0, Math.round(((n.battery || 0) - 3200) / 13)));
+  const state = off ? '<span class="badge">OFFLINE</span>' : n.fish ? '<span class="badge al">FISH ON</span>' : n.line ? '<span class="badge al">FLAG UP</span>' : n.lowbat ? '<span class="badge warn">LOW BATT</span>' : '<span class="badge on">OK</span>';
+  const seen = n.last_seen_sec == null ? '–' : (n.last_seen_sec < 60 ? n.last_seen_sec + ' s ago' : Math.round(n.last_seen_sec / 60) + ' min ago');
+  const q = n.turns || 0, cmt = st.cm_per_turn || 0, HARDT = ['hard', 'medium', 'soft', ''];
+  const dist = hh && hh.placed ? (Math.hypot(hh.x, hh.y) >= 1000 ? (Math.hypot(hh.x, hh.y) / 1000).toFixed(2) + ' km' : Math.round(Math.hypot(hh.x, hh.y)) + ' m') + ' · ' + Math.round((Math.atan2(hh.x, hh.y) * 180 / Math.PI + 360) % 360) + '° from the chalet' : 'not on the map';
+  sh.innerHTML = `<div class="hd"><span class="nm">${esc(nodeName(n))} <span class="sm">#${n.id}</span></span><span>${n.disarmed ? '<span class="badge">DISARMED</span>' : ''}${state}</span></div>` +
+    `<div class="kv"><div><span>Bottom</span>${s && s.bottom < 2047 ? fmt(s.bottom / 100) + ' ' + (HARDT[s.hard] || '') : 'no sonar'}</div><div><span>Fish</span>${s && s.fish ? s.fish + ' · nearest ' + fmt(s.near / 100) : (s ? 'none' : '–')}</div>` +
+    `<div><span>Bait</span>${n.bait ? fmt(n.bait / 100) : 'not set'}</div><div><span>Line</span>${q ? (q / 4).toFixed(q % 4 ? 2 : 0) + ' turn' + (q > 4 ? 's' : '') + (cmt ? ' ≈ ' + (q / 4 * cmt / 100).toFixed(1) + ' m out' : '') : '–'}</div>` +
+    `<div><span>Battery</span>${n.battery ? pct + ' % (' + (n.battery / 1000).toFixed(2) + ' V)' : '–'}</div><div><span>Heard</span>${seen}${n.rssi ? ' · ' + n.rssi + ' dBm' : ''}${n.via_lora ? ' · LoRa' : (n.via_espnow ? ' · ESP-NOW' : '')}</div><div><span>Position</span>${dist}</div></div>` +
+    `<div class="acts">${armButton(n)}<button class="btn small" type="button" data-bait="${n.id}">${n.bait ? 'Bait ' + fmt(n.bait / 100) : 'Set bait'}</button>${s ? `<button class="btn small primary" type="button" data-watch="${n.id}">Watch sonar</button>` : ''}<button class="btn small" type="button" data-rename="${n.id}">Rename</button>` +
+    `<button class="btn small" type="button" data-pin="${n.id}" ${g && g.fix && pmOrigin() ? '' : 'disabled'} title="the chalet box is at this hole right now (GPS)">Pin here</button><button class="btn small" type="button" data-move="${n.id}" aria-pressed="${pm.placing === n.id}">${hh && hh.placed ? 'Move' : 'Tap the map'}</button>${hh && hh.placed ? `<button class="btn small" type="button" data-unpin="${n.id}">Remove from map</button>` : ''}<button class="btn small" type="button" data-close="1">Close</button></div>`;
+  sh.hidden = false;
+}
+$('pmSheet').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.close) { pm.sel = null; pm.placing = null; drawPmap(); return; }
+  if (b.dataset.gps === 'origin') { api('/api/gps', { origin: true }).then(j => { pmFlash(j && j.error ? j.error : 'Origin set: the chalet is here.'); pm.cz = null; loadStatus(); }).catch(() => pmFlash('Failed.')); return; }
+  if (b.dataset.gps === 'clearall') { if (!confirm('Forget the position of every hole?')) return; api('/api/gps', { clear: 'all' }).then(() => { pm.sel = null; loadStatus(); }).catch(() => {}); return; }
+  if (b.dataset.pin) { api('/api/gps', { pin: +b.dataset.pin }).then(j => { pmFlash(j && j.error ? j.error : 'Pinned at the box position.'); loadStatus(); }).catch(() => pmFlash('Failed.')); return; }
+  if (b.dataset.move) { pm.placing = pm.placing === +b.dataset.move ? null : +b.dataset.move; drawPmap(); return; }
+  if (b.dataset.unpin) { pmPost(+b.dataset.unpin, null); pm.placing = null; return; }
+  nodeActions(e);   // arm / bait / watch / rename: same as the hole cards
+});
+function pmHit(px, py) { const v = pm.view; if (!v) return null; let best = null, bd = 18 * (window.devicePixelRatio || 1); for (const hh of pmHoles()) { if (!hh.placed) continue; const [x, y] = v.toPx(hh.x, hh.y), d = Math.hypot(x - px, y - py); if (d < bd) { bd = d; best = hh; } } return best; }
+function pmEvt(e) { const r = pmC.getBoundingClientRect(), dpr = window.devicePixelRatio || 1; return [(e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr]; }
+function pmPost(id, x, y) { fetch('/api/node/pos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(x == null ? { nodeId: id } : { nodeId: id, x: +x.toFixed(1), y: +y.toFixed(1) }) }).then(() => loadStatus()).catch(() => {}); }
+// zoom by dz keeping the map point under (px, py) still
+function pmZoomAt(dz, px, py) {
+  const v = pm.view; if (!v) return; const c = pm.cz, z1 = pmClamp(c.z + dz, 3, LAYERS[pm.layer].max), f = Math.pow(2, z1 - c.z);
+  const wx = v.cx + (px - v.w / 2) / v.s, wy = v.cy + (py - v.h / 2) / v.s;   // world px (zt) under the pointer
+  const [lat, lon] = worldToLL(wx + (v.cx - wx) / f, wy + (v.cy - wy) / f, v.zt);
+  c.lat = lat; c.lon = lon; c.z = z1; drawPmap();
+}
+function pmPanBy(dx, dy) { const v = pm.view, c = pm.cz; if (!v) return; const [lat, lon] = worldToLL(v.cx - dx / v.s, v.cy - dy / v.s, v.zt); c.lat = pmClamp(lat, -85, 85); c.lon = lon; drawPmap(); }
+pmC.addEventListener('pointerdown', e => {
+  const [px, py] = pmEvt(e); pm.ptrs.set(e.pointerId, [px, py]); pmC.setPointerCapture(e.pointerId);
+  if (pm.ptrs.size === 2) { const P = [...pm.ptrs.values()]; pm.pinch = { d: Math.hypot(P[0][0] - P[1][0], P[0][1] - P[1][1]), mx: (P[0][0] + P[1][0]) / 2, my: (P[0][1] + P[1][1]) / 2 }; pm.pan = null; pm.drag = null; return; }
+  const hh = pmHit(px, py);
+  if (hh) { pm.sel = hh.id; if (pm.placing === hh.id) pm.drag = { id: hh.id, moved: false, x: hh.x, y: hh.y }; drawPmap(); return; }
+  { const [cx, cy] = pm.view ? pm.view.toPx(0, 0) : [-1e9, 0]; if (Math.hypot(cx - px, cy - py) < 16 * (window.devicePixelRatio || 1) && pm.placing == null) { pm.sel = 'chalet'; drawPmap(); return; } }
+  pm.pan = { x: px, y: py, moved: false, t: Date.now() };
+});
+pmC.addEventListener('pointermove', e => {
+  if (!pm.ptrs.has(e.pointerId)) return;
+  const [px, py] = pmEvt(e); pm.ptrs.set(e.pointerId, [px, py]);
+  if (pm.pinch && pm.ptrs.size >= 2) {
+    const P = [...pm.ptrs.values()], d = Math.hypot(P[0][0] - P[1][0], P[0][1] - P[1][1]), mx = (P[0][0] + P[1][0]) / 2, my = (P[0][1] + P[1][1]) / 2;
+    if (d > 0 && pm.pinch.d > 0) pmZoomAt(Math.log2(d / pm.pinch.d), mx, my);
+    pmPanBy(mx - pm.pinch.mx, my - pm.pinch.my); pm.pinch = { d, mx, my }; return;
+  }
+  if (pm.drag) { const [mx, my] = pm.view.toM(px, py); pm.drag.x = mx; pm.drag.y = my; pm.drag.moved = true; const n = (st.nodes || []).find(x => x.id === pm.drag.id); if (n) { n.px = mx; n.py = my; } drawPmap(); return; }
+  if (pm.pan) { const dx = px - pm.pan.x, dy = py - pm.pan.y; if (pm.pan.moved || Math.hypot(dx, dy) > 6 * (window.devicePixelRatio || 1)) { pm.pan.moved = true; pmPanBy(dx, dy); pm.pan.x = px; pm.pan.y = py; } }
+});
+function pmUp(e) {
+  const [px, py] = pm.ptrs.get(e.pointerId) || pmEvt(e); pm.ptrs.delete(e.pointerId);
+  if (pm.pinch) { if (pm.ptrs.size < 2) pm.pinch = null; pm.pan = null; return; }
+  if (pm.drag) { if (pm.drag.moved) { pmPost(pm.drag.id, pm.drag.x, pm.drag.y); pm.placing = null; } pm.drag = null; return; }
+  if (pm.pan) { const tap = !pm.pan.moved; pm.pan = null;
+    if (tap && pm.placing != null) { const [mx, my] = pm.view.toM(px, py); pmPost(pm.placing, mx, my); pm.placing = null; }
+    else if (tap && pm.sel != null) { pm.sel = null; drawPmap(); } }
+}
+pmC.addEventListener('pointerup', pmUp); pmC.addEventListener('pointercancel', pmUp);
+pmC.addEventListener('wheel', e => { e.preventDefault(); const [px, py] = pmEvt(e); pmZoomAt(e.deltaY < 0 ? 0.5 : -0.5, px, py); }, { passive: false });
+pmC.addEventListener('dblclick', e => { const [px, py] = pmEvt(e); pmZoomAt(1, px, py); });
+$('pmIn').addEventListener('click', () => { const v = pm.view; if (v) pmZoomAt(1, v.w / 2, v.h / 2); });
+$('pmOut').addEventListener('click', () => { const v = pm.view; if (v) pmZoomAt(-1, v.w / 2, v.h / 2); });
+$('pmHome').addEventListener('click', () => { pm.cz = null; drawPmap(); });
+function pmSetLayer(l) { pm.layer = l; try { localStorage.setItem('pmLayer', l); } catch (e) {} $('pmLay').querySelectorAll('[data-lay]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lay === l))); pm.net.offUntil = 0; drawPmap(); }
+$('pmLay').addEventListener('click', e => { const b = e.target.closest('[data-lay]'); if (b) pmSetLayer(b.dataset.lay); });
+pmSetLayer(pm.layer);
+window.addEventListener('online', () => { pm.net.offUntil = 0; pmRedraw(); });
+$('pmChips').addEventListener('click', e => { const b = e.target.closest('[data-pm]'); if (b) { pm.sel = pm.sel === +b.dataset.pm ? null : +b.dataset.pm; pm.placing = null; drawPmap(); } });
+$('pmDepth').addEventListener('click', () => { pm.depth = !pm.depth; $('pmDepth').setAttribute('aria-pressed', String(pm.depth)); try { localStorage.setItem('pmDepth', pm.depth ? '1' : '0'); } catch (e) {} drawPmap(); });
+$('pmDepth').setAttribute('aria-pressed', String(pm.depth));
+$('pmFull').addEventListener('click', () => { pm.full = !pm.full; $('pmapCard').classList.toggle('pmfull', pm.full); $('pmFull').setAttribute('aria-pressed', String(pm.full)); $('pmFull').textContent = pm.full ? '⤡' : '⤢'; document.body.style.overflow = pm.full ? 'hidden' : ''; drawPmap(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && pm.full) $('pmFull').click(); });
+new ResizeObserver(() => drawPmap()).observe(pmC);
+window.pmDbg = { pm, drawPmap, idbClear, idbCount };   // for tests / the browser console
+/* ---- "Save area": the tiles of the visible area (this zoom and one out) of the current layer, to the chalet store ---- */
+function pmTileBlob(l, z, x, y) {   // from the phone cache, else the internet (CORS); null when neither
+  const key = `${l}/${z}/${x}/${y}`;
+  return idbGet(key).then(b => b || (pmOnline() ? fetch(LAYERS[l].url(z, x, y), { mode: 'cors' }).then(r => r.ok ? r.blob() : null).then(b => { if (b) idbPut(key, b); return b; }).catch(() => null) : null));
+}
+function pmSaveArea() {
+  const v = pm.view; if (!v || pm.saving || !pmOrigin()) return;
+  const list = [], lays = pm.depth ? [pm.layer, 'dep'] : [pm.layer];
+  for (const l of lays) for (const z of [v.zt - 1, v.zt]) { if (z < 3) continue; const r = pmTileRange(v, z); for (let y = r.y0; y <= r.y1; y++) for (let x = r.x0; x <= r.x1; x++) list.push([l, z, x, y]); }
+  if (list.length > 240) { pm.saving = `Too much at once (${list.length} tiles): zoom in a bit.`; drawPmap(); setTimeout(() => { pm.saving = null; drawPmap(); }, 5000); return; }
+  let done = 0, kb = 0, failed = 0, stop = false;
+  const step = () => {
+    if (stop || done + failed >= list.length) { pm.saving = stop ? `Chalet store full after ${done} tiles (${kb.toFixed(0)} KB). Settings → Map: clear old areas.` : `Saved ${done} tile${done > 1 ? 's' : ''} (${kb.toFixed(0)} KB)` + (failed ? `, ${failed} not available (no internet / CORS)` : '') + ' on the chalet.'; drawPmap(); setTimeout(() => { pm.saving = null; drawPmap(); }, 6000); mpInfo(); return; }
+    const [l, z, x, y] = list[done + failed];
+    pm.saving = `Saving area to the chalet… ${done + failed}/${list.length}`; drawPmap();
+    pmTileBlob(l, z, x, y).then(b => {
+      if (!b) { failed++; return; }
+      const fd = new FormData(); fd.append('tile', b, 't');
+      return fetch(chaletTileUrl(l, z, x, y), { method: 'POST', body: fd }).then(r => r.json()).then(j => { if (j && j.ok) { done++; kb += b.size / 1024; } else if (j && j.error === 'full') stop = true; else failed++; });
+    }).catch(() => { failed++; }).then(step);
+  };
+  step();
+}
+$('pmSave').addEventListener('click', pmSaveArea);
+
+let glScale = 'common', glUnitKey = '';
+try { glScale = localStorage.getItem('glScale') || 'common'; } catch (e) { /* private mode */ }
+function fillGlScale() {
+  const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(1) + ' m', key = fmt(1);
+  if (key === glUnitKey) return; glUnitKey = key;
+  const ft = key.indexOf('ft') >= 0, list = ft ? [5, 10, 15, 20, 30, 40].map(v => v / 3.28084) : [2, 3, 5, 8, 12];
+  $('glScale').innerHTML = '<option value="common">Auto, same for all</option><option value="each">Auto, each hole</option>' +
+    list.map(m => `<option value="${Math.round(m * 100)}">0-${fmt(m)}</option>`).join('');
+  if (![...$('glScale').options].some(o => o.value === glScale)) glScale = 'common';
+  $('glScale').value = glScale;
+}
+$('glScale').addEventListener('change', e => { glScale = e.target.value; try { localStorage.setItem('glScale', glScale); } catch (x) { /* ignore */ } drawGlances(); });
+function drawGlances() {
+  fillGlScale();
+  const cs = document.querySelectorAll('canvas[data-glance]');
+  if (!cs.length) return;
+  let maxAll = 300;   // common depth scale (cm): deepest bottom + 15 %
+  Object.values(glance.nodes).forEach(g => g.recs.forEach(r => { if (r[1] && r[1] < 2047 && r[1] * 1.15 > maxAll) maxAll = r[1] * 1.15; }));
+  const scaleOf = g => {
+    if (glScale === 'common') return maxAll;
+    if (glScale !== 'each') return +glScale || maxAll;
+    let m = 200; g.recs.forEach(r => { if (r[1] && r[1] < 2047 && r[1] * 1.15 > m) m = r[1] * 1.15; }); return m;
+  };
+  const acc = cssVar('--accent', '#2a9d8f'), mut = cssVar('--muted', '#888'), al = cssVar('--alert', '#e63946');
+  const son = SON(), fmt = m => son ? son.fmtD(m) : m.toFixed(1) + ' m';
+  cs.forEach(c => {
+    const id = +c.dataset.glance, g = glance.nodes[id];
+    const dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (!w) return;
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    const x = c.getContext('2d'); x.scale(dpr, dpr); x.clearRect(0, 0, w, h);
+    const t = document.querySelector(`[data-glt="${id}"]`);
+    if (!g || !g.recs.length) { x.fillStyle = mut; x.font = '11px system-ui'; x.fillText('waiting for sonar…', 8, h / 2 + 4); return; }
+    const maxB = scaleOf(g), N = 90, cw = w / N, y = cm => 2 + (h - 4) * Math.min(cm, maxB) / maxB;
+    g.recs.forEach((r, i) => {
+      const x0 = w - (g.recs.length - i) * cw;
+      if (r[1] && r[1] < 2047 && r[1] < maxB) { x.fillStyle = mut; x.globalAlpha = 0.35; x.fillRect(x0, y(r[1]), cw + 0.5, h - y(r[1])); x.globalAlpha = 1; x.fillRect(x0, y(r[1]), cw + 0.5, 1.5); }
+      for (let k = 2; k < r.length; k++) {
+        const d = r[k] & 0x7FF, lv = (r[k] >> 11) & 3, bait = (r[k] >> 13) & 1;
+        if (d >= maxB) continue;   // below the chosen scale
+        if (bait) { x.fillStyle = mut; x.fillRect(x0, y(d), cw + 0.5, 1); continue; }
+        x.fillStyle = acc; x.globalAlpha = lv >= 3 ? 1 : lv === 2 ? 0.75 : 0.45;   // stronger echo = bigger, darker
+        const s = 2 + lv; x.fillRect(x0 + cw / 2 - s / 2, y(d) - s / 2, Math.max(s, cw), s); x.globalAlpha = 1;
+      }
+    });
+    if (t) {
+      const last = g.recs[g.recs.length - 1], fish = last.slice(2).filter(v => !((v >> 13) & 1));
+      const HN = ['', 'soft', 'medium', 'hard'];
+      const ds = fish.map(v => (v & 0x7FF) / 100).sort((a, b) => a - b);
+      const where = !ds.length ? '' : ds.length === 1 ? ' at ' + fmt(ds[0]) : ' · ' + fmt(ds[0]) + '–' + fmt(ds[ds.length - 1]);
+      const bait = +t.dataset.baitcm || 0;
+      t.innerHTML = `<b>${ds.length ? ds.length + ' fish' + where : 'No fish'}</b><small>bottom ${last[1] && last[1] < 2047 ? fmt(last[1] / 100) : '–'}${HN[g.hard] ? ' · ' + HN[g.hard] : ''}${bait ? ' · bait ' + fmt(bait / 100) : ''}</small>`;
+    }
+  });
+}
+window.addEventListener('resize', drawGlances);
+function nodeActions(e) {
+  const w = e.target.closest('[data-watch]');
+  if (w) { if (SON()) SON().focus(+w.dataset.watch); showTab('sonar'); return; }
+  const bt = e.target.closest('[data-bait]');
+  if (bt) {   // v2 (D43): bait depth of this hole, in the page's unit
+    const id = +bt.dataset.bait, son = SON(), ft = son && son.fmtD(1).indexOf('ft') >= 0;
+    const v = prompt('Bait depth for hole ' + id + ' (' + (ft ? 'feet' : 'metres') + ', 0 = not set):', '');
+    if (v === null) return;
+    const num = parseFloat(String(v).replace(',', '.')); if (!(num >= 0)) { alert('Enter a depth.'); return; }
+    const cm = Math.round((ft ? num / 3.28084 : num) * 100);
+    api('/api/node/bait', { nodeId: id, cm }).then(() => loadStatus()).catch(() => {});
+    return;
+  }
+  const ab = e.target.closest('[data-arm]');
+  if (ab) {   // v2 (D61): arm / disarm this hole (the hole confirms with its next report)
+    const id = +ab.dataset.arm, armed = ab.dataset.armed !== '1';
+    if (armPending[id]) return;   // D68: one click is enough; the row says "sent" until the hole answers
+    armPending[id] = { want: armed, at: Date.now() };
+    ab.disabled = true; ab.textContent = armed ? 'Arming…' : 'Disarming…';
+    api('/api/node/arm', { nodeId: id, armed }).then(() => setTimeout(loadStatus, 1200)).catch(() => { delete armPending[id]; loadStatus(); });
+    return;
+  }
+  const r = e.target.closest('[data-rename]'); if (!r) return;
+  const id = +r.dataset.rename, n = (st.nodes || []).find(x => x.id === id);
+  const name = prompt('Name for hole ' + id + ' (max 15 characters):', n && n.name ? n.name : '');
+  if (name === null) return;
+  if (name.length > 15) { alert('15 characters max.'); return; }
+  api('/api/node/name', { nodeId: id, name }).then(() => loadStatus()).catch(() => {});
+}
+$('ngrid').addEventListener('click', nodeActions);
+
+/* ---------- Radio tab ---------- */
+const TM = { off: 0, rotate: 1, 'SF9/500': 2, 'SF8/500': 3, 'SF7/500': 4 };
+const f1 = (x, d) => x === undefined || x === null ? '–' : (+x).toFixed(d || 0);
+function loadRadio() { return api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+function postRadio(o) { api('/api/radio', o).then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+function renderRadio() {
+  const d = radio; if (!d) return;
+  if (document.activeElement !== $('rTest')) $('rTest').value = TM[d.test_mode] || 0;
+  $('rAdapt').setAttribute('aria-checked', String(!!d.adaptive));
+  $('rStatus').textContent = `frame ${d.frame} · rx ${d.rx_ok} · CRC errors ${d.rx_crc} · tx ${d.tx} · allowance ${d.allowance} B · dropped slots ${d.dropped_slots}` + (d.radio_ok === false ? ' · RADIO FAIL' : '');
+  let h = '<tr><th>Hub</th><th>via</th><th>mode</th><th>rx / sched</th><th>loss %</th><th>RSSI avg / min</th><th>SNR avg / min</th><th>beacon RSSI / SNR</th><th>lost /64</th><th>sync err µs</th></tr>';
+  (d.hubs || []).forEach(x => (x.modes || []).forEach((m, i) => {
+    const loss = m.sched ? 100 * (m.sched - m.rx) / m.sched : undefined, hl = x.health || {};
+    h += `<tr><td>${i ? '' : 'Hub ' + x.id}</td><td>${i ? '' : (x.via ? 'hub ' + x.via : 'direct')}</td><td>${m.mode}</td><td>${m.rx} / ${m.sched}</td><td>${f1(loss, 1)}</td>` +
+      `<td>${f1(m.rssi_avg, 1)} / ${f1(m.rssi_min)}</td><td>${f1(m.snr_avg, 1)} / ${f1(m.snr_min, 1)}</td><td>${i ? '' : f1(hl.beacon_rssi) + ' / ' + f1(hl.beacon_snr, 1)}</td>` +
+      `<td>${i ? '' : f1(hl.beacon_lost64)}</td><td>${i ? '' : f1(hl.sync_err_us)}</td></tr>`;
+  }));
+  if (!(d.hubs || []).length) h += '<tr><td colspan="10" style="text-align:left">No hub heard yet.</td></tr>';
+  $('rTable').innerHTML = h;
+  const eb = d.eb || {};
+  $('lkSum').textContent = `Transport ${TRL[d.transport] || '–'} · LoRa channel ${d.channel + 1} (${f1(d.channel_mhz, 1)} MHz${d.channel_setting === 'auto' ? ', Auto' : ''})` +
+    ` · ESP-NOW rx ${eb.rx || 0} · tx ${eb.tx || 0}${eb.relay ? ' · relayed ' + (eb.relayed || 0) : ''}` + (d.eb_ready === false ? ' · ESP-NOW NOT READY' : '');
+  let k = '<tr><th>Hub</th><th>LoRa heard</th><th>ESP-NOW heard</th><th>relays passed</th><th>backbone</th><th>relay</th></tr>';
+  (d.paths || []).forEach(p => {
+    k += `<tr><td>Hub ${p.id}</td><td>${ago(p.lora_age)}</td><td>${ago(p.eb_age)}</td><td>${p.eb_age < 0 ? '–' : p.eb_hops}</td><td>${p.eb_path ? 'yes' : 'no'}</td><td>${p.relay ? 'on' : 'off'}</td></tr>`;
+  });
+  if (!(d.paths || []).length) k += '<tr><td colspan="6" style="text-align:left">No hub heard yet.</td></tr>';
+  $('lkTable').innerHTML = k;
+  renderNetwork();
+}
+const TRL = { auto: 'Auto', lora: 'LoRa only', espnow: 'ESP-NOW only', ebfirst: 'ESP-NOW first' };
+const ago = s => s === undefined || s === null || s < 0 ? '–' : (s < 60 ? s + ' s' : Math.round(s / 60) + ' min') + ' ago';
+$('rTest').addEventListener('change', e => postRadio({ test: +e.target.value }));
+$('rAdapt').addEventListener('click', () => postRadio({ adaptive: !(radio && radio.adaptive) }));
+$('rReset').addEventListener('click', () => postRadio({ resetStats: true }));
+
+/* ---------- Settings → Network ---------- */
+const TRN = { auto: 0, lora: 1, espnow: 2, ebfirst: 3 };
+function renderNetwork() {
+  const d = radio; if (!d || !$('nCh')) return;
+  const tr = TRN[d.transport] || 0;
+  // plain-language status first; settings stay behind "Advanced"
+  const viaEb = (d.paths || []).filter(p => p.eb_path).map(p => 'hub ' + p.id);
+  if (d.setup) {
+    $('nStatus').textContent = 'Setup phase: everything stays in basic mode';
+    $('nStatus2').textContent = `Switch the holes on in any order. The automatic fallbacks (channel change, ESP-NOW backup) arm once the network has run complete for 5 min — in about ${Math.ceil((d.arm_in_s || 0) / 60)} min.`;
+  } else {
+    $('nStatus').textContent = viaEb.length ? `Running · ${viaEb.join(', ')} on ESP-NOW${tr === 3 ? '' : ' backup'}` : 'Running · all hubs on LoRa';
+    $('nStatus2').textContent = `LoRa channel ${d.channel + 1} (${f1(d.channel_mhz, 1)} MHz${d.channel_setting === 'auto' ? ', automatic' : ', fixed'})` +
+      (d.channel_moves ? ` · moved ${d.channel_moves}× because of other LoRa users` : '') + ` · link ${TRL[d.transport] || 'Auto'}`;
+  }
+  { const w = st && st.wifi; $('nStatus3').textContent = w && w.sta_connected && w.eb_ok === false ? `Cabin router on Wi-Fi channel ${w.ch}: the hubs' ESP-NOW backup needs channel 1, so hubs use LoRa (fine). Set the router to channel 1 to get ESP-NOW near the chalet.` : ''; }   // D78
+  if (document.activeElement !== $('nCh') && d.channel_setting !== undefined) $('nCh').value = d.channel_setting === 'auto' ? 'auto' : String(d.channel_setting + 1);
+  $('nChInfo').textContent = `In use: channel ${d.channel + 1} (${f1(d.channel_mhz, 1)} MHz) · moved ${d.channel_moves || 0}× since the chalet started`;
+  $('nBusy').innerHTML = (d.channels || []).map(c => {
+    const b = c.busy;
+    return `<div class="bat${c.ch === d.channel ? ' cur' : ''}"><span>${c.ch + 1} · ${f1(c.mhz, 1)}${c.ch === d.channel ? ' (in use)' : ''}</span><span class="bar"><i style="width:${b == null ? 0 : b}%"></i></span>${b == null ? '–' : b + ' %'}</div>`;
+  }).join('');
+  const req = {}, rep = {}, devs = [];
+  (d.relay_req || []).forEach(r => { req[r.dev] = r.on; });
+  (d.paths || []).forEach(p => { rep[p.id] = p.relay; devs.push({ id: p.id, hub: true }); });
+  (d.hubs || []).forEach(h => { if (!devs.some(x => x.id === h.id)) devs.push({ id: h.id, hub: true }); });
+  ((st && st.nodes) || []).forEach(n => { if (n.id !== st.node_id && n.id < 128 && !devs.some(x => x.id === n.id)) devs.push({ id: n.id, hub: false, name: nodeName(n) }); });
+  $('nRelays').innerHTML = devs.map(x => {
+    const on = x.id in req ? req[x.id] : !!rep[x.id];
+    let state = '';
+    if (x.hub) state = x.id in rep ? 'relay ' + (rep[x.id] ? 'on' : 'off') + (x.id in req && req[x.id] !== !!rep[x.id] ? ' · change sent' : '') : (x.id in req ? 'sent' : '');
+    else if (x.id in req) state = 'sent, applied when it next transmits';
+    return `<div class="rl"><div><b>${x.hub ? 'Hub ' + x.id : esc(x.name || 'Hole ' + x.id)}</b><div class="sm">#${x.id} · ${x.hub ? 'hub' : 'tip-up (stays awake as a relay: battery)'}${state ? ' · ' + state : ''}</div></div>` +
+      `<button type="button" class="switch" role="switch" aria-checked="${on}" aria-label="Relay on device ${x.id}" data-relay="${x.id}" data-hub="${x.hub ? 1 : 0}"></button></div>`;
+  }).join('') || '<p class="empty">No device heard yet.</p>';
+}
+$('nCh').addEventListener('change', e => postRadio({ channel: e.target.value === 'auto' ? 'auto' : +e.target.value }));
+$('nScan').addEventListener('click', () => postRadio({ rescan: true }));
+$('nRelays').addEventListener('click', e => {
+  const b = e.target.closest('[data-relay]'); if (!b) return;
+  const on = b.getAttribute('aria-checked') !== 'true';
+  if (on && b.dataset.hub !== '1' && !confirm('This tip-up will stay awake as a relay: its battery will last much less. Continue?')) return;
+  postRadio({ relay: { dev: +b.dataset.relay, on } });
+});
+
+/* ---------- Settings tab ---------- */
+function loadSettings() {
+  api('/api/settings').then(d => {
+    $('fBuzzer').setAttribute('aria-checked', String(!!d.buzzerEnabled));
+    if (d.alarmHoldMin !== undefined) $('fAlarm').value = String(d.alarmHoldMin);
+    $('fNear').setAttribute('aria-checked', String(!!d.nearBaitBeep));
+    if (d.beamDeg) { $('fBeam').value = d.beamDeg; if (SON()) SON().setBeam(+d.beamDeg); }
+    if (d.cmPerTurn !== undefined) $('fTurn').value = d.cmPerTurn;
+    $('fPin').placeholder = d.pinSet ? 'set (type a new one to change it)' : 'off';
+  }).catch(() => { $('setMsg').textContent = 'Could not load the settings.'; });
+  loadSim();
+  mpInfo();
+}
+/* ---------- D74 map pack + PIN ---------- */
+function mpInfo() {
+  tfetch('/api/tiles').then(r => r.json()).then(t => { idbCount().then(n => { $('tlInfo').textContent = `Chalet: ${t.count} tile${t.count === 1 ? '' : 's'} saved (${(t.bytes / 1024).toFixed(0)} KB), ${(t.free / 1024).toFixed(0)} KB free · this phone: ${n} tile${n === 1 ? '' : 's'} cached.`; }); }).catch(() => {});
+  const b = st && st.map_bytes || 0;
+  const mx = st && st.map_max || 0;
+  $('mpInfo').textContent = b ? `Pack on the chalet: ${(b / 1024).toFixed(0)} KB of ${(mx / 1024).toFixed(0)} KB` + (pm.pack ? ` · ${pm.pack.regions.length} region${pm.pack.regions.length > 1 ? 's' : ''}: ` + pm.pack.regions.map(r => `${r.name || 'unnamed'} (${r.lines.length} lines)`).join(', ') : '') : `No map pack on the chalet (room for ${(mx / 1024).toFixed(0)} KB).`;
+}
+$('mpUp').addEventListener('click', () => {
+  const f = $('mpFile').files[0]; if (!f) { $('mpInfo').textContent = 'Pick the pack file first (lake_prep.py writes it).'; return; }
+  const mx = st && st.map_max || 0;
+  if (mx && f.size > mx) { $('mpInfo').textContent = `Too big: ${(f.size / 1024).toFixed(0)} KB, the chalet has room for ${(mx / 1024).toFixed(0)} KB. Coarser --interval / --simplify, or fewer regions.`; return; }
+  const fd = new FormData(); fd.append('pack', f, 'pack.json');
+  $('mpInfo').textContent = `Sending ${(f.size / 1024).toFixed(0)} KB…`; $('mpUp').disabled = true;
+  const c = new AbortController(), t = setTimeout(() => c.abort(), 90000);
+  fetch('/api/map/pack', { method: 'POST', body: fd, signal: c.signal }).then(r => r.json()).then(j => { $('mpInfo').textContent = j.ok ? 'Stored.' : 'Refused: ' + (j.error || '?'); pm.packBytes = -1; loadStatus(); })
+    .catch(() => { $('mpInfo').textContent = 'Upload failed (Wi-Fi?).'; }).finally(() => { clearTimeout(t); $('mpUp').disabled = false; });
+});
+$('tlClear').addEventListener('click', () => { if (!confirm('Remove every saved map area from the chalet?')) return; api('/api/tiles/clear', {}).then(() => { pm.tiles.clear(); mpInfo(); }).catch(() => {}); });
+$('tlPhone').addEventListener('click', () => { idbClear().then(() => { pm.tiles.clear(); mpInfo(); drawPmap(); }); });
+$('mpClear').addEventListener('click', () => { if (!confirm('Remove the map pack from the chalet?')) return; api('/api/map/clear', {}).then(() => { pm.packBytes = -1; loadStatus(); }).catch(() => {}); });
+$('pinForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = $('fPin').value.trim();
+  if (v && !/^[0-9]{4,8}$/.test(v)) { $('pinMsg').textContent = '4 to 8 digits.'; return; }
+  api('/api/settings', { webPin: v }).then(j => {
+    if (j && j.error) { $('pinMsg').textContent = j.error; return; }
+    PIN.v = v || null; try { if (v) localStorage.setItem('chaletPin', v); else localStorage.removeItem('chaletPin'); } catch (x) {}
+    $('pinMsg').textContent = v ? 'PIN set.' : 'PIN off.'; $('fPin').value = ''; loadSettings();
+  }).catch(() => { $('pinMsg').textContent = 'Save failed.'; });
+  setTimeout(() => { $('pinMsg').textContent = ''; }, 4000);
+});
+['fBuzzer', 'fNear'].forEach(id => $(id).addEventListener('click', e => { const b = e.currentTarget; b.setAttribute('aria-checked', String(b.getAttribute('aria-checked') !== 'true')); }));
+$('setForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const body = { buzzerEnabled: $('fBuzzer').getAttribute('aria-checked') === 'true',
+    alarmHoldMin: parseInt($('fAlarm').value, 10) || 0, nearBaitBeep: $('fNear').getAttribute('aria-checked') === 'true',
+    beamDeg: Math.min(60, Math.max(5, parseInt($('fBeam').value, 10) || 14)),
+    cmPerTurn: Math.min(60, Math.max(0, parseInt($('fTurn').value, 10) || 0)),
+  };
+  api('/api/settings', body).then(() => { $('setMsg').textContent = 'Saved.'; loadSettings(); }).catch(() => { $('setMsg').textContent = 'Save failed.'; });
+  setTimeout(() => { $('setMsg').textContent = ''; }, 4000);
+});
+/* ---------- D70 wiring check ---------- */
+let stWatch = null, stRun = 0;
+function stFillHoles() {
+  const sel = $('stHole'), cur = sel.value, nodes = (st.nodes || []).filter(n => n.id > 0 && n.id < 128 && n.id !== st.node_id);
+  const me = st.role === 'Chalet' ? `<option value="${st.node_id}">This chalet box (GPS, LiPo, radios)</option>` : '';
+  sel.innerHTML = me + (nodes.map(n => `<option value="${n.id}">${esc(nodeName(n))} (#${n.id})</option>`).join('') || (me ? '' : '<option value="">no hole heard yet</option>'));
+  if (cur) sel.value = cur;
+}
+function stRender(d) {
+  const ok = (c, t, bad) => `<tr><td>${t}</td><td>${c ? '<span class="badge on">OK</span>' : '<span class="badge al">' + (bad || 'CHECK') + '</span>'}</td></tr>`;
+  const info = (t, v) => `<tr><td>${t}</td><td>${v}</td></tr>`;
+  let h = '<table class="tbl"><tr><th>Check</th><th>Result</th></tr>';
+  if (d.chalet) {   // D73: the box itself
+    if (!d.gps_built) h += info('GPS', 'not in this firmware (GPS_RX_PIN = -1)');
+    else {
+      if (!d.gps_sentences && d.gps_levels) h += info('Pin levels (last scan round)', `${d.gps_levels} <small>pull-down on: H = driven high = a powered module's TX, L = nothing there (or the module unpowered), ~ = toggling. A live module shows H or ~ on exactly one pin; all L = no power to the module, or its TX is not on a header pin</small>`);
+      h += ok(d.gps_sentences > 0, 'GPS module talking (UART)', d.gps_scanning ? `NO DATA YET: scanning the header pins for the module's TX (now GPIO ${d.gps_rx_pin} at ${d.gps_baud} baud, ~25 s per round, then 38400 and 115200) — run again in a minute` : `NO DATA on any pin at ${d.gps_baud} baud: module powered (meter: 3.3-5 V on its VCC, ~3.3 V idle on its TX)? TX wire on a header pin? The pin marked RX (GPIO44) works too`);
+      if (d.gps_sentences > 0) {
+        h += info('GPS wiring', `module TX on GPIO ${d.gps_rx_pin}${d.gps_rx_pin === 44 ? ' (the header pin marked RX, shared with the USB serial: works, but unplug USB before trusting a fix)' : ''}${d.gps_swapped && d.gps_rx_pin !== 44 ? ' <span class="badge warn">found by the pin scan, not the configured pin: note it in config.h</span>' : ''} · ${d.gps_baud} baud · ${d.gps_sentences} sentences${d.gps_bad ? ', ' + d.gps_bad + ' bad checksums' : ''}${d.gps_data_age_s > 5 ? ' · last ' + d.gps_data_age_s + ' s ago' : ''}`);
+        h += ok(d.gps_fix, 'GPS fix', d.gps_sats ? `NO FIX YET: ${d.gps_sats} satellites (needs sky, 1-15 min from cold)` : 'NO FIX YET: 0 satellites (antenna / sky view)');
+        if (d.gps_fix) h += info('Position', `${d.gps_lat.toFixed(5)}, ${d.gps_lon.toFixed(5)} · ${d.gps_sats} sats · HDOP ${d.gps_hdop}`);
+        h += info('Map origin', d.gps_origin ? 'set (OLED: Settings → Pin holes → Chalet here)' : 'not set: OLED Settings → Pin holes (GPS) → "Chalet here" with a fix');
+      }
+    }
+    const bv = d.battery_mv / 1000;
+    h += ok(d.battery_mv > 3500, 'LiPo', d.battery_mv ? bv.toFixed(2) + ' V LOW' : 'NO READING') + info('', d.battery_mv ? bv.toFixed(2) + ' V' + (d.battery_mv > 3950 && d.battery_mv < 4100 ? ' (≈4.0 V with the cell off = USB only)' : '') : '');
+    h += ok(d.lora_ready, 'LoRa radio', 'NOT READY');
+    h += info('Wi-Fi', `${d.wifi_sta ? 'cabin network' : 'no cabin network'} · hotspot ${d.wifi_ap ? 'on' : 'off'}`);
+    h += info('CardKB', d.cardkb ? 'detected' : 'not detected');
+    h += info('Hubs heard (last 30 s)', d.hubs_heard);
+    h += info('Free heap', `${Math.round(d.heap / 1024)} kB`);
+    return h + '</table>';
+  }
+  h += info('Sensor pin', `level ${d.sensor_level ? 1 : 0}, ${d.flips} edge${d.flips === 1 ? '' : 's'} since boot (${d.sensor_hall ? 'Hall latch' : 'reed'})`);
+  h += ok(d.sensor_flips, 'Sensor seen moving', 'NO EDGE YET');
+  if (d.btn_none) h += info('Button', 'none on this head');
+  else { h += info('Button pin', `${d.btn_released ? 'released' : 'PRESSED / stuck low'}, ${d.presses} press${d.presses === 1 ? '' : 'es'} since boot`); h += ok(d.btn_released && d.btn_pressed, 'Button works', d.btn_released ? 'NOT PRESSED YET' : 'STUCK LOW'); }
+  const bv = d.battery_mv / 1000;
+  h += ok(d.battery_mv > 3400 && d.battery_mv < 5600, 'Battery', d.battery_mv ? bv.toFixed(2) + ' V' : 'NO READING') + info('', d.battery_mv ? bv.toFixed(2) + ' V' + (d.battery_mv <= 3400 ? ' · pack off / on USB, or no divider on the battery pin' : '') : 'battery pin not wired');
+  if (!d.shield_built) h += info('Sonar shield', 'not in this firmware (no SONAR_REAL)');
+  else {
+    h += ok(d.spi_ok, 'Shield answers on SPI', 'NO ANSWER: 3.3 V, GND, SCLK/MISO/MOSI/NCS');
+    if (d.pins_swapped) h += info('MISO / MOSI', '<span class="badge warn">CROSSED</span> works for now, swap the two wires');
+    if (d.spi_ok) {
+      h += ok(d.vdrv_ready, 'VDRV (21.5 V side)', 'NOT READY: MT3608 / J4 / 1N4001');
+      h += ok(!d.ee_fault, 'Chip EEPROM', 'CRC FAULT');
+      if (!d.pinged) h += info('Test ping', '<span class="badge warn">DID NOT RUN</span> (driver not started: shield found after boot? reboot the hole and run again)');
+      else {
+        h += ok(!d.pulse_fault && !d.drv_fault, 'Burst driver', d.pulse_fault ? 'PULSE COUNT FAULT: fewer IO2 pulses than BURST_PULSE' : 'DRIVER STUCK (firmware before D72 reports this on every ping)');
+        h += ok(d.leakage, 'Burst reaches the receiver (time zero)', 'NO LEAKAGE SEEN');
+        h += info('Transducer (heuristic)', d.ring_bins >= 8 ? `likely connected: ring-down ${d.ring_bins} bins` : `likely NOT connected: ring-down ${d.ring_bins} bins (open header measured 5)`);
+        h += info('ADC', `raw max ${d.raw_max}${d.raw_max >= 4080 ? ' (CLIPPED)' : ''}, noise floor code ${d.noise_code}`);
+      }
+    }
+  }
+  h += info('Radio', d.rssi ? `${d.rssi} dBm beacon at the hub` : 'tip-up: the hub reports its side on the Radio tab');
+  h += info('Result age', `${d.age_s} s`);
+  return h + '</table>';
+}
+function stPoll(id, t0, run) {   // the chalet drops the old result when it sends the request: have:true = the fresh one
+  api('/api/selftest?id=' + id).then(d => {
+    if (run !== stRun) return;   // a newer Run took over
+    if (d.have) { $('stOut').innerHTML = stRender(d); $('stMsg').textContent = ''; stWatch = null; $('stRun').disabled = false; return; }
+    if (Date.now() - t0 > 95000) { $('stMsg').textContent = 'No answer in 90 s: hole asleep, out of reach, or on old firmware.'; stWatch = null; $('stRun').disabled = false; return; }
+    $('stMsg').textContent = `sent, waiting for the hole… ${Math.round((Date.now() - t0) / 1000)} s`;
+    stWatch = setTimeout(() => stPoll(id, t0, run), 2000);
+  }).catch(() => { if (run === stRun) stWatch = setTimeout(() => stPoll(id, t0, run), 3000); });
+}
+$('stRun').addEventListener('click', () => {
+  const id = +$('stHole').value; if (!id) return;
+  if (stWatch) clearTimeout(stWatch);
+  const run = ++stRun;
+  $('stOut').innerHTML = ''; $('stMsg').textContent = 'sending…'; $('stRun').disabled = true;
+  const t0 = Date.now();
+  api('/api/node/selftest', { nodeId: id }).then(() => stPoll(id, t0, run)).catch(() => { $('stMsg').textContent = 'Chalet not reachable.'; $('stRun').disabled = false; });
+});
+/* ---------- Test & simulation ---------- */
+let sim = null;
+function loadSim() { return api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }
+function postSim(o) { api('/api/sim', o).then(d => { sim = d; renderSim(); }).catch(() => {}); }
+function renderSim() {
+  if (!sim) return;
+  if (document.activeElement !== $('simDemo')) {
+    const dv = sim.demo_hubs ? sim.demo_hubs + 'x' + sim.demo_holes : '0', sel = $('simDemo');
+    if (![...sel.options].some(o => o.value === dv)) sel.add(new Option(sim.demo_hubs + ' hubs x ' + sim.demo_holes + ' holes', dv));   // set from the box or serial
+    sel.value = dv;
+  }
+  if (document.activeElement !== $('simRate')) $('simRate').value = String([2, 6, 12, 30, 60].reduce((a, b) => Math.abs(b - sim.rate) < Math.abs(a - sim.rate) ? b : a, 6));
+  let h = '<tr><th>Hole</th><th>Fake sonar</th><th>Fake fish</th><th></th></tr>';
+  (sim.holes || []).forEach(x => {
+    const r = x.req || 0, so = r ? !!(r & 1) : !!(x.virtual && x.on), ha = !!(r & 2);   // test holes: fake sonar by default
+    const st = x.on ? '<span class="badge sim">SIM</span>' : ((r && !x.on) ? '<span class="sm">sent…</span>' : '');
+    h += `<tr><td>${esc(x.name || ((x.virtual ? 'Test hole ' : 'Hole ') + x.id))}</td>` +
+      `<td><button type="button" class="switch" role="switch" aria-checked="${so}" aria-label="Fake sonar ${x.id}" data-simh="${x.id}" data-k="sonar"></button></td>` +
+      `<td><button type="button" class="switch" role="switch" aria-checked="${ha}" aria-label="Fake fish ${x.id}" data-simh="${x.id}" data-k="hall"></button></td><td>${st}</td></tr>`;
+  });
+  if (!(sim.holes || []).length) h += '<tr><td colspan="4">No hole heard yet.</td></tr>';
+  $('simTable').innerHTML = h;
+}
+$('simTable').addEventListener('click', e => {
+  const b = e.target.closest('[data-simh]'); if (!b || !sim) return;
+  const id = +b.dataset.simh, x = (sim.holes || []).find(y => y.id === id) || { req: 0 };
+  const r = x.req || 0;
+  let so = r ? !!(r & 1) : !!(x.virtual && x.on), ha = !!(r & 2);
+  if (b.dataset.k === 'sonar') so = !so; else ha = !ha;
+  postSim({ hole: id, sonar: so, hall: ha });
+});
+$('simAllOn').addEventListener('click', () => postSim({ all: true }));
+$('simAllOff').addEventListener('click', () => postSim({ all: false }));
+$('simRate').addEventListener('change', e => postSim({ rate: +e.target.value }));
+$('simDemo').addEventListener('change', e => { const v = e.target.value.split('x'); postSim({ demo: +v[0] || 0, demo_holes: +v[1] || 3 }); });
+function renderAbout() {
+  if (!st) return;
+  const w = st.wifi || {}, l = st.lora || {};
+  const rows = [['Role', st.role || 'Chalet'], ['Node ID', st.node_id], ['Network ID', st.network_id], ['Firmware', st.fw || 'v2'], ['Uptime', fmtUp(st.uptime || 0)],
+    ['Wi-Fi', (w.ap_active ? 'Hotspot ' + (w.ap_ip || '') : '') + (w.sta_connected ? ' Network ' + (w.sta_ip || '') : '')], ['LoRa', (l.ready ? 'OK' : 'FAIL') + ' · rx ' + (l.rx_count || 0) + ' · tx ' + (l.tx_count || 0)]];
+  $('about').innerHTML = rows.filter(r => r[1] !== undefined && r[1] !== '').map(r => `<dt>${r[0]}</dt><dd>${esc(r[1])}</dd>`).join('');
+}
+
+/* ---------- D80 range test ---------- */
+let rt = null;
+function loadRange() { return tfetch('/api/rangetest').then(r => r.json()).then(d => { rt = d; renderRange(); }).catch(() => {}); }
+function renderRange() {
+  const d = rt; if (!d) return;
+  const all = (radio && radio.hubs) || [];
+  const hubs = all.filter(x => !x.via && !all.some(y => y.via === x.id));   // direct, and nobody relays through it
+  const sel = $('rtHub'), cur = sel.value || (d.running ? String(d.hub) : '');
+  const key = hubs.map(x => x.id).join(',');
+  if (sel.dataset.key !== key) {   // rebuild only when the list changes (a rebuild closes an open picker on phones)
+    sel.dataset.key = key;
+    sel.innerHTML = hubs.map(x => `<option value="${x.id}">Hub ${x.id}</option>`).join('') || '<option value="">no hub heard directly</option>';
+    if (cur && hubs.some(x => String(x.id) === cur)) sel.value = cur;
+  }
+  sel.disabled = d.running; $('rtNote').disabled = d.running;
+  $('rtGo').textContent = d.running ? 'Stop the range test' : 'Start the range test';
+  $('rtGo').classList.toggle('primary', !d.running);
+  const pinned = (st && st.nodes || []).some(n => String(n.id) === sel.value && n.px != null);
+  if (!d.running) $('rtMsg').textContent = !hubs.length ? 'No usable hub: it must be heard directly and not relay other hubs.' : (!(st && st.gps && st.gps.fix) ? 'No GPS fix on the box yet: the run is logged without distances until it has one.' : (pinned ? 'Hub position pinned: distances will be logged.' : 'Pin the hub first (box next to it) to get distances.'));
+  else $('rtMsg').textContent = `Run ${d.run} · ${Math.floor(d.secs / 60)} min ${d.secs % 60} s · ${d.rows} results` + (d.dist != null ? ` · ${Math.round(d.dist)} m from the hub` : ' · distance unknown');
+  if (!d.running && d.stopped) $('rtMsg').textContent += ` · last run stopped: ${d.stopped}`;
+  let h = '<tr><th>Speed</th><th>received</th><th>%</th><th>RSSI avg / min</th><th>SNR min</th><th>farthest received</th></tr>';
+  (d.modes || []).forEach(m => { const pc = m.sent ? Math.round(100 * m.ok / m.sent) : null;
+    h += `<tr><td>SF${m.sf}</td><td>${m.ok} / ${m.sent}</td><td>${pc == null ? '–' : pc + ' %'}</td><td>${m.ok ? m.rssi_avg + ' / ' + m.rssi_min + ' dBm' : '–'}</td><td>${m.ok ? m.snr_min + ' dB' : '–'}</td><td>${m.max_ok_m != null ? m.max_ok_m + ' m' : '–'}</td></tr>`; });
+  $('rtTable').innerHTML = h;
+  $('rtRuns').innerHTML = (d.runs || []).sort((a, b) => b.n - a.n).map(r => `<div class="rl"><div><b>Run ${r.n}</b> · hub ${r.hub} · ${(r.bytes / 1024).toFixed(0)} KB${r.note ? ' · ' + esc(r.note) : ''}</div><div class="btnrow"><a class="btn small" href="/api/rangetest/run?n=${r.n}" download>Download CSV</a><button class="btn small" type="button" data-rtdel="${r.n}" ${d.running && r.n === d.run ? 'disabled' : ''}>Delete</button></div></div>`).join('') || '<p class="empty">No run yet.</p>';
+}
+$('rtGo').addEventListener('click', () => {
+  if (rt && rt.running) { api('/api/rangetest', { stop: true }).then(loadRange).catch(() => {}); return; }
+  const hub = +$('rtHub').value; if (!hub) return;
+  api('/api/rangetest', { start: { hub, note: $('rtNote').value.trim() } }).then(j => { if (j && j.error) $('rtMsg').textContent = j.error; loadRange(); loadStatus(); }).catch(() => {});
+});
+$('rtPin').addEventListener('click', () => { const hub = +$('rtHub').value; if (!hub) return; api('/api/gps', { pin: hub }).then(j => { $('rtMsg').textContent = j && j.error ? j.error : `Hub ${hub} pinned at the box position.`; loadStatus(); }).catch(() => {}); });
+$('rtRuns').addEventListener('click', e => { const b = e.target.closest('[data-rtdel]'); if (b && confirm('Delete run ' + b.dataset.rtdel + '?')) api('/api/rangetest', { delete: +b.dataset.rtdel }).then(loadRange).catch(() => {}); });
+$('rtStop').addEventListener('click', () => api('/api/rangetest', { stop: true }).then(() => { loadStatus(); loadRange(); }).catch(() => {}));
+
+/* ---------- Start ---------- */
+syncSound();
+showTab(initialTab());
+loadStatus();
+const pStatus = poll('status', loadStatus), pRadio = poll('radio', loadRadio), pSim = poll('sim', loadSim), pGlance = poll('glance', loadGlance), pRange = poll('range', loadRange), pHoles = poll('holes', loadHoles);
+window.suiteGlance = pGlance;
+setInterval(() => { if (tab !== 'holes' || document.hidden) pStatus(); }, 2000);   // D85: on the Holes tab the merged poll carries the status
+setInterval(() => { if (tab === 'radio') { pRadio(); pRange(); } }, 2000);
+setInterval(() => { if (tab === 'settings') { pRadio(); pSim(); } }, 5000);
+setInterval(() => { if (tab === 'holes' && !document.hidden) pHoles(); }, 1000);   // D85: status + list + glance + live pings, one request
+})();
+</script>
+</body>
+</html>
