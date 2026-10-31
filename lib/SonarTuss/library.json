@@ -1,0 +1,6 @@
+{
+  "name": "SonarTuss",
+  "version": "1.0.0",
+  "description": "TUSS4470 sonar driver (ESP32 I2S-ADC / ESP32-S3 digital ADC), shared by the WROOM tip-up and the Heltec roles",
+  "build": { "flags": ["-I include"] }
+}

@@ -54,7 +54,11 @@
 //
 // Set to false to use standard 802.11 mode (shorter range but compatible with all devices)
 // ═══════════════════════════════════════════════════════════════════════════
-#define ESPNOW_LONG_RANGE_MODE  true    // Enable ESP32 proprietary Long Range mode
+// v2 (D28): ESP-NOW runs at the NORMAL rate (802.11b 1 Mbps) on every device. LR cannot share a board
+// with a phone hotspot (Espressif, esp-idf #4554), and the v1 range problem was the antenna height
+// (≈5 cm over the ice); the 20 cm mast gains far more than LR. Keep LR only for a range comparison:
+// it must then be set to the SAME value on every hub and tip-up (LR-only and normal cannot talk).
+#define ESPNOW_LONG_RANGE_MODE  false   // v2: normal rate (was true in v1)
 
 // Broadcast address for ESP-NOW
 static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
@@ -68,6 +72,20 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 //   false = Trigger when GPIO reads LOW (magnet present - normally-open)
 // Most tip-ups use a magnet that pulls away when the flag pops up, so HIGH is typical.
 #define REED_ACTIVE_HIGH        true
+
+// v2 (D46) spool-shaft Hall latch (US1881 + 4 magnets alternating): output flips every quarter turn.
+// Used instead of the reed level logic when HALL_LATCH is 1 (WROOM tip-up by default; C3 keeps the reed).
+#ifndef HALL_LATCH
+#ifdef BOARD_ESP32WROOM
+#define HALL_LATCH              1
+#else
+#define HALL_LATCH              0
+#endif
+#endif
+#define TRIGGER_FLIPS           1       // 1 = alert on a quarter turn, 2 = half turn (wind / bait false alerts)
+#define HALL_WINDOW_MS          10000   // flips further apart than this start a new count (matters with 2)
+#define HALL_CLEAR_SEC          30      // trip ends (line state back to normal) after the shaft is still this long.
+                                        // The chalet alarm stays latched until silenced (D41).
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TIMING SETTINGS
@@ -116,6 +134,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // GPIO1 is ADC1_CH1 and safe to use
 // Set to -1 if no battery voltage divider is connected
 #define VBAT_PIN            1           // Battery voltage ADC (GPIO1/ADC1_CH1, -1 to disable)
+#define BTN_PIN             -1          // no arming button on the C3 head (D61; remote arm/disarm still works)
 
 // Battery voltage divider calibration
 #define VBAT_DIVIDER        2.0
@@ -133,6 +152,7 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define LED_PIN             33          // Onboard red LED
 #define FLASH_PIN           4           // Flash LED (don't use for battery)
 #define VBAT_PIN            -1          // No ADC available easily
+#define BTN_PIN             -1          // no arming button (D61)
 
 #endif // BOARD_ESP32CAM
 
@@ -142,9 +162,12 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 #ifdef BOARD_ESP32WROOM
 
-#define REED_PIN            15          // Reed switch input
+#define REED_PIN            27          // Hall latch output (US1881, open drain): RTC GPIO, ext0 wake source
 #define LED_PIN             2           // Onboard LED (most devkits)
 #define VBAT_PIN            34          // Battery voltage ADC
+#ifndef BTN_PIN
+#define BTN_PIN             33          // D61 arming button to GND (internal pull-up): RTC GPIO, ext1 wake source
+#endif                                  //   (pod board: IO9, set with a build flag)
 
 #define VBAT_DIVIDER        2.0
 #define VBAT_REF_MV         3300
