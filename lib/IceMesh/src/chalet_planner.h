@@ -156,10 +156,23 @@ class ChaletPlanner {
         const uint8_t fails = static_cast<uint8_t>(h->trial_fails < 255 ? h->trial_fails + 1 : 255);
         setMode(*h, static_cast<RadioMode>(h->trial_prev), frame, static_cast<uint16_t>(fr(DOWN_HOLD_FRAMES * 1000UL) << f));
         h->trial_fails = fails;
-      } else if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->miss_streak >= 2 && h->mode != MODE_SF9_BW500) {
+      } else if (cfg.adaptive && cfg.test_mode == TEST_OFF && h->mode != MODE_SF9_BW500 && stepDownDue(*h)) {
         setMode(*h, slowerMode(static_cast<RadioMode>(h->mode)), frame, fr(DOWN_HOLD_FRAMES * 1000UL));
       }
     }
+  }
+
+  // D86b: when to step a hub down to a slower mode (after a miss at its mode, outside a trial).
+  // Frame at 500 ms (room to spare): speed buys nothing, reliability is everything -> two misses in a row.
+  // Frame stretched (streamed holes, many hubs): speed is what makes it fit -> 3 misses in the last 8 frames, which rides
+  // out the isolated losses of a fading link (range runs 2026-10-25: 3-7 % at the fast modes) and still reacts in 4 s.
+  enum { DOWN_STREAK = 2, DOWN_OF_8 = 3 };
+  bool stepDownDue(const HubInfo& h) const {
+    const uint16_t fm = frame_ms_ ? frame_ms_ : cfg.frame_ms;
+    if (fm <= FRAME_STEP_MS) return h.miss_streak >= DOWN_STREAK;
+    const uint8_t n = h.hist_n < 8 ? h.hist_n : 8;
+    uint8_t hits = 0; for (uint8_t i = 0; i < n; i++) hits += (h.hist >> i) & 1;
+    return h.miss_streak >= DOWN_STREAK + 1 || (n - hits) >= DOWN_OF_8;   // a long streak still counts whatever the window
   }
 
   void onRelayed(uint8_t hub, uint8_t via, uint16_t frame) {

@@ -9,6 +9,7 @@
 // WIFI CREDENTIAL MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════
 
+static bool staWanted();
 void loadWifiCredentials() {
   // v2: the Wi-Fi written in config.h wins once after it is changed and flashed (before: a network
   // saved earlier from the web page / serial / OLED always won, so a new config.h was silently ignored).
@@ -28,13 +29,61 @@ void loadWifiCredentials() {
   }
   String ssid = preferences.getString("ssid", "");
   String pass = preferences.getString("pass", "");
+  // D86: the saved networks (up to WIFI_KNOWN), most recent first: keys k0..k3 (name) / q0..q3 (password)
+  g_nKnown = 0;
+  for (uint8_t i = 0; i < WIFI_KNOWN; i++) {
+    char kk[4] = {'k', (char)('0' + i), 0, 0}, kq[4] = {'q', (char)('0' + i), 0, 0};
+    const String n = preferences.getString(kk, ""); if (!n.length()) continue;
+    strlcpy(g_known[g_nKnown].ssid, n.c_str(), sizeof(g_known[0].ssid));
+    strlcpy(g_known[g_nKnown].pass, preferences.getString(kq, "").c_str(), sizeof(g_known[0].pass));
+    g_nKnown++;
+  }
   preferences.end();
 
   memset(storedSsid, 0, sizeof(storedSsid)); memset(storedPassword, 0, sizeof(storedPassword));
   strncpy(storedSsid, ssid.c_str(), sizeof(storedSsid) - 1);
   strncpy(storedPassword, pass.c_str(), sizeof(storedPassword) - 1);
-  Serial.printf("Wi-Fi: cabin network %s\n", storedSsid[0] ? storedSsid : "(none)");
+  if (g_nKnown == 0 && storedSsid[0]) wifiKnownAdd(storedSsid, storedPassword);   // first boot with D86: the list starts with the network in use
+  Serial.printf("Wi-Fi: cabin network %s (%u saved)\n", storedSsid[0] ? storedSsid : "(none)", (unsigned)g_nKnown);
 }
+
+// ---- D86: saved networks ---------------------------------------------------------------------------------
+// Up to WIFI_KNOWN networks with their password stay on the chalet, so switching between the house, the parents'
+// router and the cabin is one tap on the Wi-Fi tab (or nothing at all: when the network in use is not found, the
+// retry scan joins the strongest saved one by itself). Passwords never go back to the page.
+WifiKnown g_known[WIFI_KNOWN];
+uint8_t g_nKnown = 0;
+static void knownSave() {
+  preferences.begin("wifi", false);
+  for (uint8_t i = 0; i < WIFI_KNOWN; i++) {
+    char kk[4] = {'k', (char)('0' + i), 0, 0}, kq[4] = {'q', (char)('0' + i), 0, 0};
+    if (i < g_nKnown) { preferences.putString(kk, g_known[i].ssid); preferences.putString(kq, g_known[i].pass); }
+    else { preferences.remove(kk); preferences.remove(kq); }
+  }
+  preferences.end();
+}
+void wifiKnownAdd(const char* ssid, const char* pass) {   // to the front; the same name replaces its entry
+  if (!ssid || !ssid[0]) return;
+  WifiKnown e; strlcpy(e.ssid, ssid, sizeof(e.ssid)); strlcpy(e.pass, pass ? pass : "", sizeof(e.pass));
+  uint8_t at = g_nKnown;
+  for (uint8_t i = 0; i < g_nKnown; i++) if (strcmp(g_known[i].ssid, e.ssid) == 0) { at = i; break; }
+  if (at == g_nKnown) { if (g_nKnown < WIFI_KNOWN) g_nKnown++; else at = WIFI_KNOWN - 1; }   // full: the oldest goes
+  for (uint8_t i = at; i > 0; i--) g_known[i] = g_known[i - 1];
+  g_known[0] = e;
+  knownSave();
+}
+const char* wifiKnownPass(const char* ssid) {
+  for (uint8_t i = 0; i < g_nKnown; i++) if (strcmp(g_known[i].ssid, ssid) == 0) return g_known[i].pass;
+  return nullptr;
+}
+void wifiKnownForget(const char* ssid) {
+  for (uint8_t i = 0; i < g_nKnown; i++) if (strcmp(g_known[i].ssid, ssid) == 0) {
+    for (uint8_t k = i; k + 1 < g_nKnown; k++) g_known[k] = g_known[k + 1];
+    g_nKnown--; knownSave(); break;
+  }
+  if (strcmp(storedSsid, ssid) == 0) wifiForget();
+}
+
 
 void saveWifiCredentials(const char* ssid, const char* password) {
   preferences.begin("wifi", false);  // Read-write
@@ -346,13 +395,61 @@ static void staBegin() {
   g_staTries++;
   Serial.printf("Wi-Fi: trying %s%s\n", storedSsid, pinned ? " (last channel)" : "");
 }
+bool wifiScanStart(bool pick);
+// D86: the tries that would scan every channel anyway (the first one, then every 5th) look at what is around first:
+// the network in use when it is there, else the strongest saved one (a chalet carried to another house joins by itself)
+static void staTry() {
+  const bool pinned = g_staCh != 0 && (g_staTries % 5) != 4;
+  if (!pinned && g_nKnown > 0 && wifiScanStart(true)) { g_staTries++; staTryAt = millis(); if (staTryAt == 0) staTryAt = 1; return; }
+  staBegin();
+}
+
+// D86: scan for the Wi-Fi tab and for the automatic pick. One scan at a time (the OLED has its own, same flag).
+WifiScanHit g_wifiScan[WIFI_SCAN_MAX]; uint8_t g_nWifiScan = 0; uint32_t g_wifiScanMs = 0;
+static bool g_scanWeb = false, g_scanPick = false;
+bool wifiScanStart(bool pick) {
+  if (wifiScanBusy) { if (pick) g_scanPick = true; else g_scanWeb = true; return true; }
+  if (WiFi.getMode() == WIFI_MODE_AP) WiFi.mode(WIFI_AP_STA);
+  if (WiFi.scanNetworks(true, false) == WIFI_SCAN_FAILED) return false;
+  wifiScanBusy = true; if (pick) g_scanPick = true; else g_scanWeb = true;
+  return true;
+}
+bool wifiScanning() { return wifiScanBusy; }
+static void wifiScanTick() {   // from checkWiFiStatus (every loop pass before the 5 s gate)
+  if (!g_scanWeb && !g_scanPick) return;
+  const int16_t r = WiFi.scanComplete();
+  if (r == WIFI_SCAN_RUNNING) return;
+  const bool pick = g_scanPick; g_scanWeb = false; g_scanPick = false; wifiScanBusy = false;
+  if (r < 0) return;
+  g_nWifiScan = 0; g_wifiScanMs = millis();
+  for (int16_t i = 0; i < r && g_nWifiScan < WIFI_SCAN_MAX; i++) {
+    const String ss = WiFi.SSID(i); if (!ss.length()) continue;
+    bool dup = false; for (uint8_t k = 0; k < g_nWifiScan; k++) if (strcmp(g_wifiScan[k].ssid, ss.c_str()) == 0) { dup = true; if (WiFi.RSSI(i) > g_wifiScan[k].rssi) { g_wifiScan[k].rssi = (int8_t)WiFi.RSSI(i); g_wifiScan[k].ch = (uint8_t)WiFi.channel(i); } break; }
+    if (dup) continue;
+    WifiScanHit& h = g_wifiScan[g_nWifiScan++];
+    strlcpy(h.ssid, ss.c_str(), sizeof(h.ssid)); h.rssi = (int8_t)WiFi.RSSI(i); h.ch = (uint8_t)WiFi.channel(i); h.open = WiFi.encryptionType(i) == WIFI_AUTH_OPEN;
+  }
+  if (!pick || wifiStaConnected || !staWanted()) return;
+  // automatic pick: the network in use when it is there, else the strongest saved one
+  int best = -1; int8_t bestRssi = -127; bool cur = false;
+  for (uint8_t k = 0; k < g_nWifiScan; k++) {
+    if (strcmp(g_wifiScan[k].ssid, storedSsid) == 0) { cur = true; g_staCh = g_wifiScan[k].ch; break; }
+    if (wifiKnownPass(g_wifiScan[k].ssid) != nullptr && g_wifiScan[k].rssi > bestRssi) { best = k; bestRssi = g_wifiScan[k].rssi; }
+  }
+  if (!cur && best >= 0) {
+    Serial.printf("Wi-Fi: %s not found, %s is (%d dBm): switching\n", storedSsid, g_wifiScan[best].ssid, g_wifiScan[best].rssi);
+    saveWifiCredentials(g_wifiScan[best].ssid, wifiKnownPass(g_wifiScan[best].ssid));
+    g_staCh = g_wifiScan[best].ch;
+  }
+  if (cur || best >= 0) staBegin();
+}
 
 // called every 5 s while not connected (checkWiFiStatus)
 static void staRetryTick() {
   if (!staWanted() || wifiScanBusy) return;
   const uint32_t now = millis();
   if (staNextTry == 0 || static_cast<int32_t>(now - staNextTry) < 0) return;
-  staBegin();
+  staTry();
   staNextTry = now + staBackoffMs;
   staBackoffMs = staBackoffMs * 2 > STA_RETRY_MAX_MS ? STA_RETRY_MAX_MS : staBackoffMs * 2;
 }
@@ -365,6 +462,8 @@ void wifiRetryNow() {
 }
 
 void wifiJoin(const char* ssid, const char* pass) {
+  if ((!pass || !pass[0]) && wifiKnownPass(ssid) != nullptr) pass = wifiKnownPass(ssid);   // D86: one tap on a saved network
+  wifiKnownAdd(ssid, pass);
   saveWifiCredentials(ssid, pass);
   storedSsid[sizeof(storedSsid) - 1] = 0; storedPassword[sizeof(storedPassword) - 1] = 0;
   if (settings.wifiModeSetting == 0) { settings.wifiModeSetting = 2; saveSettings(); }   // AP only would never join
@@ -545,6 +644,7 @@ void setupWiFiAP() {
 // Call this in loop to check STA connection status
 void checkWiFiStatus() {
   static unsigned long lastCheck = 0;
+  wifiScanTick();   // D86
   if (millis() - lastCheck < 5000) return;
   lastCheck = millis();
 

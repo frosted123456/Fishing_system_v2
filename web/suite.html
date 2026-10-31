@@ -202,6 +202,7 @@ table.rt th,table.rt td{border-bottom:1px solid var(--line);padding:6px 8px;text
 table.rt th:first-child,table.rt td:first-child{text-align:left}
 table.tbl{border-collapse:collapse;width:100%;font-size:.92rem}table.tbl th,table.tbl td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top}
 table.rt th{color:var(--muted);font-weight:600}
+.wflist{display:grid;gap:6px}.wfrow{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;padding:6px 10px;background:var(--bg)}.wfrow .nm{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.wfrow .sg{color:var(--muted);font-size:.82rem;white-space:nowrap}.wfrow.on{border-color:var(--accent)}.wfrow .btn{min-height:32px;padding:2px 10px;font-size:.88rem}
 .form{display:grid;gap:10px}
 .form label.f{display:grid;gap:4px;font-weight:600}
 .form input[type=number],.form input[type=text],.form select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-height:42px}
@@ -238,6 +239,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <button type="button" role="tab" data-tab="sonar" aria-selected="false">Sonar</button>
     <button type="button" role="tab" data-tab="radio" aria-selected="false">Radio</button>
     <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+    <button type="button" role="tab" data-tab="wifi" aria-selected="false">Wi-Fi</button>
   </nav>
 </header>
 
@@ -408,6 +410,29 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <h2>Hubs</h2>
       <div class="tablewrap"><table class="rt" id="rTable"></table></div>
       <p class="hint" style="margin:10px 0 0">Per hub and per LoRa mode: packets received / slots scheduled at the chalet, RSSI/SNR at the chalet. Beacon columns: the chalet beacon as heard by the hub, beacons lost in the last 64, timing error. Sensitivity (theory, not measured): SF9/500 −123.5, SF8/500 −121, SF7/500 −118.5 dBm.</p>
+    </section>
+  </div>
+</div>
+
+<!-- D86: Wi-Fi tab: the chalet's saved networks, one tap to switch, scan to add -->
+<div class="panel" id="tab-wifi" role="tabpanel" hidden>
+  <div class="wrap sgrid">
+    <section class="card">
+      <h2>Chalet Wi-Fi</h2>
+      <p id="wfNow" class="hint" style="margin:0 0 8px"></p>
+      <h3 style="margin:10px 0 6px;font-size:1rem">Saved networks</h3>
+      <div id="wfKnown" class="wflist"></div>
+      <p class="hint" style="margin:8px 0 0">One tap switches the chalet to that network (its password stays on the chalet). When the network in use is not around, the chalet joins the strongest saved one by itself within a minute or two. If your phone is on the cabin network, the page comes back at <code>http://icefish.local</code> (or the hotspot).</p>
+    </section>
+    <section class="card">
+      <h2>Add a network</h2>
+      <form class="form" id="wfForm">
+        <label class="f">Network name<input type="text" id="wfSsid" maxlength="32" autocomplete="off" autocapitalize="off"></label>
+        <label class="f">Password<input type="text" id="wfPass" maxlength="64" autocomplete="off" autocapitalize="off" placeholder="empty for an open network"></label>
+        <div><button class="btn" type="submit" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)">Save and connect</button> <span class="msg" id="wfMsg"></span></div>
+      </form>
+      <h3 style="margin:14px 0 6px;font-size:1rem">Networks around <button class="btn small" type="button" id="wfScan" style="margin-left:8px">Scan</button></h3>
+      <div id="wfScanList" class="wflist"><p class="hint" style="margin:0">Tap Scan, then a network to fill in its name.</p></div>
     </section>
   </div>
 </div>
@@ -1080,7 +1105,7 @@ function showTab(t) {
   tab = t;
   window.suiteShowTab = showTab;
   document.querySelectorAll('.tabs [role=tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === t)));
-  ['holes', 'sonar', 'radio', 'settings'].forEach(k => { $('tab-' + k).hidden = k !== t; });
+  ['holes', 'sonar', 'radio', 'settings', 'wifi'].forEach(k => { $('tab-' + k).hidden = k !== t; });
   try { history.replaceState(null, '', '#' + t); } catch (e) { /* file:// */ }
   window.suiteTab = t;
   if (t === 'sonar' && SON()) SON().show();
@@ -1088,11 +1113,12 @@ function showTab(t) {
   if (t === 'radio') loadRadio();
   if (t === 'settings') { loadSettings(); renderAbout(); loadRadio(); }
   if (t === 'holes') { renderNodes(); loadGlance(); }
+  if (t === 'wifi') loadWifi();
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
 function initialTab() {
   const h = (location.hash || '').slice(1), p = location.pathname.replace(/^\/+/, '');
-  for (const k of ['holes', 'sonar', 'radio', 'settings']) if (h === k || p === k) return k;
+  for (const k of ['holes', 'sonar', 'radio', 'settings', 'wifi']) if (h === k || p === k) return k;
   return 'holes';
 }
 
@@ -2037,6 +2063,39 @@ $('rtGo').addEventListener('click', () => {
 $('rtPin').addEventListener('click', () => { const hub = +$('rtHub').value; if (!hub) return; api('/api/gps', { pin: hub }).then(j => { $('rtMsg').textContent = j && j.error ? j.error : `Hub ${hub} pinned at the box position.`; loadStatus(); }).catch(() => {}); });
 $('rtRuns').addEventListener('click', e => { const b = e.target.closest('[data-rtdel]'); if (b && confirm('Delete run ' + b.dataset.rtdel + '?')) api('/api/rangetest', { delete: +b.dataset.rtdel }).then(loadRange).catch(() => {}); });
 $('rtStop').addEventListener('click', () => api('/api/rangetest', { stop: true }).then(() => { loadStatus(); loadRange(); }).catch(() => {}));
+
+/* ---------- D86: Wi-Fi tab ---------- */
+let wf = null;
+function wfBars(r) { return r == null ? '' : (r >= -60 ? 'strong' : r >= -72 ? 'good' : r >= -82 ? 'weak' : 'very weak') + ' (' + r + ' dBm)'; }
+function loadWifi() {
+  return api('/api/wifi').then(d => {
+    wf = d;
+    const a = d.active || {}, ap = d.ap || {};
+    $('wfNow').textContent = (a.ssid ? `Network: ${a.ssid} · ${a.connected ? 'connected' + (a.ip ? ' · ' + a.ip : '') : a.state}` : 'No network set') + (ap.on ? ` · hotspot ${ap.ssid || ''} ${ap.ip || ''}` : '');
+    const kn = d.known || [];
+    $('wfKnown').innerHTML = kn.length ? kn.map(k => `<div class="wfrow${k.active ? ' on' : ''}"><span class="nm">${esc(k.ssid)}</span><span class="sg">${k.active ? (a.connected ? 'in use' : a.state) : wfBars(k.rssi)}</span>` +
+      (k.active ? '' : `<button class="btn small" type="button" data-wfjoin="${esc(k.ssid)}" style="background:var(--accent);color:var(--accent-ink);border-color:var(--accent)">Connect</button>`) +
+      `<button class="btn small" type="button" data-wfforget="${esc(k.ssid)}" title="forget this network">✕</button></div>`).join('') : '<p class="hint" style="margin:0">None saved yet. Add one below.</p>';
+    const sc = d.scan || [];
+    if (d.scanning) $('wfScanList').innerHTML = '<p class="hint" style="margin:0">Scanning…</p>';
+    else if (sc.length) $('wfScanList').innerHTML = sc.slice().sort((x, y) => y.rssi - x.rssi).map(n => `<div class="wfrow"><span class="nm">${esc(n.ssid)}</span><span class="sg">${wfBars(n.rssi)} · ch ${n.ch}${n.open ? ' · open' : ''}${kn.some(k => k.ssid === n.ssid) ? ' · saved' : ''}</span><button class="btn small" type="button" data-wfpick="${esc(n.ssid)}">Use</button></div>`).join('') + `<p class="hint" style="margin:4px 0 0">${d.scan_age_s} s ago</p>`;
+  }).catch(() => {});
+}
+$('wfScan').addEventListener('click', () => { api('/api/wifi', { scan: true }).then(() => { $('wfScanList').innerHTML = '<p class="hint" style="margin:0">Scanning…</p>'; setTimeout(loadWifi, 4000); }).catch(() => {}); });
+$('wfForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const ssid = $('wfSsid').value.trim(), pass = $('wfPass').value;
+  if (!ssid) return;
+  $('wfMsg').textContent = 'Connecting…';
+  api('/api/wifi', { join: ssid, pass }).then(d => { $('wfMsg').textContent = d.error ? d.error : 'Saved. The chalet is connecting; this page may move to its new address.'; $('wfPass').value = ''; setTimeout(loadWifi, 1500); }).catch(() => { $('wfMsg').textContent = 'No answer (the chalet may have changed network).'; });
+});
+document.getElementById('tab-wifi').addEventListener('click', e => {
+  const j = e.target.closest('[data-wfjoin]'), f = e.target.closest('[data-wfforget]'), pk = e.target.closest('[data-wfpick]');
+  if (j) { api('/api/wifi', { join: j.dataset.wfjoin }).then(() => setTimeout(loadWifi, 1500)).catch(() => {}); }
+  else if (f) { if (confirm(`Forget ${f.dataset.wfforget}?`)) api('/api/wifi', { forget: f.dataset.wfforget }).then(loadWifi).catch(() => {}); }
+  else if (pk) { $('wfSsid').value = pk.dataset.wfpick; const kn = (wf && wf.known) || []; if (kn.some(k => k.ssid === pk.dataset.wfpick)) api('/api/wifi', { join: pk.dataset.wfpick }).then(() => setTimeout(loadWifi, 1500)).catch(() => {}); else $('wfPass').focus(); }
+});
+setInterval(() => { if (tab === 'wifi' && !document.hidden) loadWifi(); }, 5000);
 
 /* ---------- Start ---------- */
 syncSound();

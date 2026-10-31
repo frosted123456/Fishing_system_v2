@@ -2,6 +2,7 @@
 #include "chalet.h"
 #include <ESPmDNS.h>
 static String statusJson();
+void handleWebApiWifi(); void handleWebApiWifiPost();
 static String pingsMultiJson(const String& ns, const String& ss, uint8_t m, bool lite);
 static uint8_t pingsMax();
 
@@ -61,6 +62,10 @@ void setupWebServer() {
   POST_PIN("/api/sonar/knobs", handleWebApiKnobsPost);
   POST_PIN("/api/sim", handleWebApiSimPost);
   server.on("/api/sonar/pings", HTTP_GET, handleWebApiSonarPings);
+  // D86: Wi-Fi tab (chalet): saved networks, one-tap switch, scan. Passwords never go back to the page.
+  server.on("/wifi", HTTP_GET, handleWebRoot);
+  server.on("/api/wifi", HTTP_GET, handleWebApiWifi);
+  POST_PIN("/api/wifi", handleWebApiWifiPost);
   // D85: the Holes tab's four polls in one request (the server takes one client at a time: four 2 s polls landing
   // together queued behind each other). ?glance=<frame>&nodes=a,b&since=s1,s2&max=24&lite=1 ->
   // {"status":{..},"sonar":{..},"glance":{..},"pings":{..}} (pings only when nodes= is given)
@@ -223,6 +228,49 @@ static String statusJson() {
   String json;
   serializeJson(doc, json);
   return json;
+}
+
+// D86: GET /api/wifi -> {active:{ssid,connected,ip,state}, ap:{ssid,ip}, known:[{ssid,rssi|null,active}], scan:[{ssid,rssi,ch,open}],
+//   scanning, scan_age_s}   POST {"join":name[,"pass":pw]} | {"forget":name} | {"scan":true}
+static void jsonStr(String& s, const char* c) { s += '"'; for (; *c; c++) { if (*c == '"' || *c == '\\') s += '\\'; if ((uint8_t)*c >= 0x20) s += *c; } s += '"'; }
+void handleWebApiWifi() {
+  char state[24]; wifiStateText(state, sizeof(state));
+  String s; s.reserve(900);
+  s = "{\"active\":{\"ssid\":"; jsonStr(s, storedSsid); s += ",\"connected\":"; s += wifiStaConnected ? "true" : "false";
+  s += ",\"ip\":"; jsonStr(s, staIpAddress.c_str()); s += ",\"state\":"; jsonStr(s, state); s += ",\"mode\":"; s += settings.wifiModeSetting; s += "}";
+  s += ",\"ap\":{\"on\":"; s += wifiApActive ? "true" : "false"; s += ",\"ssid\":"; jsonStr(s, WiFi.softAPSSID().c_str()); s += ",\"ip\":"; jsonStr(s, apIpAddress.c_str()); s += "}";
+  s += ",\"known\":[";
+  for (uint8_t i = 0; i < g_nKnown; i++) {
+    int rssi = 0; bool seen = false;
+    for (uint8_t k = 0; k < g_nWifiScan; k++) if (strcmp(g_wifiScan[k].ssid, g_known[i].ssid) == 0) { seen = true; rssi = g_wifiScan[k].rssi; break; }
+    if (i) s += ","; s += "{\"ssid\":"; jsonStr(s, g_known[i].ssid); s += ",\"rssi\":"; s += seen ? String(rssi) : String("null");
+    s += ",\"active\":"; s += strcmp(g_known[i].ssid, storedSsid) == 0 ? "true" : "false"; s += "}";
+  }
+  s += "],\"scan\":[";
+  for (uint8_t k = 0; k < g_nWifiScan; k++) {
+    if (k) s += ","; s += "{\"ssid\":"; jsonStr(s, g_wifiScan[k].ssid); s += ",\"rssi\":"; s += g_wifiScan[k].rssi; s += ",\"ch\":"; s += g_wifiScan[k].ch; s += ",\"open\":"; s += g_wifiScan[k].open ? "true" : "false"; s += "}";
+  }
+  s += "],\"scanning\":"; s += wifiScanning() ? "true" : "false";
+  s += ",\"scan_age_s\":"; s += g_wifiScanMs ? (millis() - g_wifiScanMs) / 1000 : 0; s += "}";
+  server.send(200, "application/json", s);
+}
+void handleWebApiWifiPost() {
+  StaticJsonDocument<256> doc;
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { server.send(400, "application/json", "{\"error\":\"chalet only\"}"); return; }
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  if (doc["scan"] | false) { if (!wifiScanStart(false)) { server.send(500, "application/json", "{\"error\":\"scan failed\"}"); return; } }
+  else if (doc.containsKey("join")) {
+    const char* ssid = doc["join"] | ""; const char* pass = doc["pass"] | "";
+    if (!ssid[0] || strlen(ssid) > 32 || strlen(pass) > 64) { server.send(400, "application/json", "{\"error\":\"name 1-32, password up to 64\"}"); return; }
+    if (!pass[0] && wifiKnownPass(ssid) == nullptr) {   // not saved: only an open network can join without a password
+      bool open = false; for (uint8_t k = 0; k < g_nWifiScan; k++) if (strcmp(g_wifiScan[k].ssid, ssid) == 0) open = g_wifiScan[k].open;
+      if (!open) { server.send(400, "application/json", "{\"error\":\"password needed\"}"); return; }
+    }
+    wifiJoin(ssid, pass);
+  }
+  else if (doc.containsKey("forget")) { const char* ssid = doc["forget"] | ""; if (ssid[0]) wifiKnownForget(ssid); }
+  else { server.send(400, "application/json", "{\"error\":\"scan, join or forget\"}"); return; }
+  server.send(200, "application/json", "{\"ok\":true}");
 }
 
 /*

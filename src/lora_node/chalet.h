@@ -534,6 +534,17 @@ void saveWifiCredentials(const char* ssid, const char* password);
 void checkSerialWifiConfig();
 void wifiRetryNow();
 void wifiJoin(const char* ssid, const char* pass);
+// D86: saved networks + scan (wifi.cpp)
+static const uint8_t WIFI_KNOWN = 4, WIFI_SCAN_MAX = 12;
+struct WifiKnown { char ssid[33]; char pass[65]; };
+struct WifiScanHit { char ssid[33]; int8_t rssi; uint8_t ch; bool open; };
+extern WifiKnown g_known[WIFI_KNOWN]; extern uint8_t g_nKnown;
+extern WifiScanHit g_wifiScan[WIFI_SCAN_MAX]; extern uint8_t g_nWifiScan; extern uint32_t g_wifiScanMs;
+void wifiKnownAdd(const char* ssid, const char* pass);
+const char* wifiKnownPass(const char* ssid);
+void wifiKnownForget(const char* ssid);
+bool wifiScanStart(bool pick);
+bool wifiScanning();
 void wifiForget();
 void wifiStateText(char* out, size_t n);
 extern bool wifiScanBusy;

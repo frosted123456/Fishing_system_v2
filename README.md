@@ -440,6 +440,14 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 
 Forgot the PIN: serial `PIN CLEAR`.
 
+**Wi-Fi tab**
+
+The chalet keeps up to 4 networks with their passwords (house, parents, cabin). Saved networks: one tap on Connect
+switches the chalet; ✕ forgets one. Add a network: name and password, or Scan and tap Use on a network around.
+When the network in use is not found, the chalet joins the strongest saved one by itself within a minute or two
+(first retry after boot, then every 5 min). Passwords never come back to the page. If your phone is on the cabin
+network when you switch, the page comes back at `http://icefish.local` or on the hotspot.
+
 ### 6.4 Alerts
 
 | Event | Chalet | Phone |

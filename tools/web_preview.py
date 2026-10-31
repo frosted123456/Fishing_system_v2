@@ -159,7 +159,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path); q = parse_qs(u.query)
-        if u.path in ("/", "/sonar", "/radio", "/settings"):
+        if u.path in ("/", "/sonar", "/radio", "/settings", "/wifi"):
             return self.send(200, page_html(), "text/html; charset=utf-8")
         if u.path == "/api/status":
             return self.send(200, json.dumps(status()))
@@ -172,6 +172,12 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, json.dumps(self.pings(int(q.get("node", ["0"])[0]), int(q.get("since", ["0"])[0]), int(q.get("max", ["40"])[0]))))
         if u.path == "/api/sonar/glance":
             return self.send(200, json.dumps(glance(int(q.get("since", ["0"])[0]))))
+        if u.path == "/api/wifi":   # D86: Wi-Fi tab
+            return self.send(200, json.dumps({"active": {"ssid": "BELL494", "connected": True, "ip": "192.168.2.41", "state": "connected", "mode": 2},
+                "ap": {"on": True, "ssid": "IceFish-100", "ip": "192.168.4.1"},
+                "known": [{"ssid": "BELL494", "rssi": -61, "active": True}, {"ssid": "Chalet-Lac", "rssi": None, "active": False}, {"ssid": "ParentsWifi", "rssi": -78, "active": False}],
+                "scan": [{"ssid": "BELL494", "rssi": -61, "ch": 1, "open": False}, {"ssid": "ParentsWifi", "rssi": -78, "ch": 6, "open": False}, {"ssid": "Guest", "rssi": -85, "ch": 11, "open": True}],
+                "scanning": False, "scan_age_s": 12}))
         if u.path == "/api/poll":   # D85: the Holes tab's merged poll
             d = {"status": status(), "sonar": json.loads(self.listing()), "glance": glance(int(q.get("glance", ["0"])[0]))}
             if "nodes" in q:
@@ -194,6 +200,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path); b = self.body()
+        if u.path == "/api/wifi": return self.send(200, json.dumps({"ok": True}))
         if u.path == "/api/sonar":
             if "focus" in b: state["focus"] = int(b["focus"])
             if "sim" in b: state["sim"] = bool(b["sim"])
