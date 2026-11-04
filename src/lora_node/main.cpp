@@ -14,6 +14,9 @@
  *    only #include <Arduino.h> and missing prototypes were added.)
  */
 #include "chalet.h"
+#if SONAR_REAL
+#include <bench_web.h>   // D87: phone bench page on the hub hotspot (SONAR_BENCH builds)
+#endif
 #include <arm_button.h>   // v2 (D61): arming button + armed / disarmed state (lib/IceMesh, host-tested)
 #include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
 #include <esp_system.h>   // D65: esp_reset_reason()
@@ -383,7 +386,8 @@ void loop() {
       // 7A FIX: Skip web server and WiFi status checks in LR mode
       // ESP-NOW LR requires STA mode radio which is unchanged in setupEspNow()
       // We only disable web server polling since there's no AP to serve
-      if (wifiApActive && settings.webServerEnabled) loopWebServer();   // v2: hub hotspot on demand (PRG hold 3 s)
+      if ((wifiApActive || WiFi.status() == WL_CONNECTED) && settings.webServerEnabled) loopWebServer();   // v2: hub hotspot on demand (PRG hold 3 s); D87e: or the bench on the house network
+      loopSonarBenchHotspot();   // D87: bench build keeps it on
       loopLocalSensor();
       checkSerialWifiConfig();
 
@@ -2999,13 +3003,50 @@ void loopArmButton() {
 // held back; a ping due while one is on the air / planned within SONAR_PING_EST_US, or an ESP-NOW frame is in
 // flight, moves to the next 250 ms tick (once: the second time it pings anyway and counts "busy at ping").
 // Bench (SONAR_BENCH=1): one BENCH line per 2 s on Serial; STAT / KNOB / REG / CAL / INFO commands (wifi.cpp ->
-// sonarSerialCommand). No REC / RAW / phone page here: the chalet page is the viewer.
+// sonarSerialCommand). D87: the recorder of the WROOM (REC ON/OFF, REC WEB, RECEVERY, RAWEVERY, NOTE, RAW, KNOBS?)
+// and the phone bench page, served by the hub's own web server under /bench/ on its hotspot (on from boot and kept
+// on in the bench build): same lines, same file format, tools/sonar_log.py reads it as is.
 // =============================================================================================
 static bool g_sonarHwOk = false;
 static icemesh::sonar::SonarSource* sonarReal = nullptr;   // the own hole's processing (real codes), ~15 KB
 static uint32_t g_rfWaitN = 0, g_rfWaitUsMax = 0, g_rfBusyAtPing = 0;   // as the WROOM BENCH line
 static bool sonarStatAsk = false;
 static char sonarBenchBuf[512];
+// D87 recorder (the WROOM's, src/sensor_node/main.cpp; kept textually in sync)
+static bool sonarRec = false;          // serial recording (REC ON)
+static bool sonarRecWeb = false;       // phone page recording (REC WEB ON), bench build
+static uint16_t sonarRecEvery = 1;     // record every Nth ping
+static uint16_t sonarRawEverySec = 30; // RAW line every N s while recording (0 = only on demand)
+static bool sonarRawAsk = false;
+static uint32_t sonarRecLines = 0;
+static bool sonarRecAny() { return sonarRec || sonarRecWeb; }
+#if SONAR_REAL
+static String sonarWebCommand(const String& c);
+#endif
+// D87b SWEEP: an automated preset run for the drum / dock. Each step sets one knob, takes SWEEP_PINGS pings into the
+// recording (SONAR + PINGX each, one RAW after the 3rd), with a NOTE per step; the knobs are put back at the end.
+// Serial "SWEEP" or the page's Sweep button; "SWEEP STOP" ends it early. Recording must be on (serial or phone).
+struct SweepStep { const char* label; int8_t knob; uint8_t val; };
+static const SweepStep SWEEP[] = {
+  {"base (knobs as set)", -1, 0},
+  {"gain 0 (10 V/V)", icemesh::sonar::P_GAIN, 0}, {"gain 1 (12.5 V/V)", icemesh::sonar::P_GAIN, 1},
+  {"gain 2 (15 V/V)", icemesh::sonar::P_GAIN, 2}, {"gain 3 (20 V/V)", icemesh::sonar::P_GAIN, 3},
+  {"cycles 8", icemesh::sonar::P_PULSE_CYCLES, 8}, {"cycles 24", icemesh::sonar::P_PULSE_CYCLES, 24}, {"cycles 32", icemesh::sonar::P_PULSE_CYCLES, 32},
+  {"freq 1 (rotate)", icemesh::sonar::P_FREQ_MODE, 1}, {"freq 2 (200 kHz only)", icemesh::sonar::P_FREQ_MODE, 2},
+  {"thresh 3", icemesh::sonar::P_THRESH, 3}, {"thresh 11", icemesh::sonar::P_THRESH, 11},
+  {"avg 1", icemesh::sonar::P_AVG, 1}, {"avg 4", icemesh::sonar::P_AVG, 4},
+  {"vdrv 12 V", icemesh::sonar::P_VDRV, 12},
+};
+static const uint8_t SWEEP_N = sizeof(SWEEP) / sizeof(SWEEP[0]), SWEEP_PINGS = 6;
+static int8_t g_sweepStep = -1; static uint8_t g_sweepPings = 0; static uint8_t g_sweepSaved[icemesh::sonar::P_COUNT];
+static bool g_sweepRestore = false;
+static void recLine(const char* line, bool force = false) {   // one recording line to every active sink
+  if (sonarRec || force) Serial.println(line);
+  #if SONAR_REAL
+  if ((sonarRecWeb || force) && SONAR_BENCH) bench::push(line);
+  #endif
+  if (sonarRecAny()) sonarRecLines++;
+}
 
 void setupSonarReal() {
   #if SONAR_REAL
@@ -3015,6 +3056,42 @@ void setupSonarReal() {
   Serial.printf("Sonar TUSS4470: %s\n", g_sonarHwOk ? "found" : "NOT answering (check wiring / SONAR_PIN_*)");
   if (g_sonarHwOk) Serial.printf("Sonar ADC: clock %lu Hz, measured %lu Hz, free heap %u B\n",
                                  (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), (unsigned)ESP.getFreeHeap());
+  #if SONAR_BENCH
+  // D87: phone bench page on the hub's own hotspot and web server (the WROOM opens its own AP; the hub has both already)
+  if (currentRole == ROLE_GATEWAY_ONSHORE && settings.webServerEnabled) {
+    hubHotspotOn();   // on from boot; kept on by loopSonarBenchHotspot()
+    char ssid[32]; apName(ssid, sizeof(ssid));
+    const bool ok = bench::attach(server, "/bench", NODE_ID, sonarWebCommand);
+    Serial.printf("Bench page: %s (hotspot \"%s\", http://192.168.4.1/bench/)\n", ok ? "on" : "FAILED", ssid);
+    // D87e: the page on the house / cabin network too (the hub hotspot was not seen by Frank's phone): the hub's station
+    // interface joins the saved network (secrets.h STA_SSID, or serial WIFI:ssid:pass) and the page is at
+    // http://icefish-hub<id>.local/bench/ (or the IP printed below). ESP-NOW keeps working when the router is on channel 1.
+    loadWifiCredentials();
+    if (storedSsid[0]) { WiFi.begin(storedSsid, storedPassword); Serial.printf("Bench: joining %s for the page (WIFI:ssid:pass to change)\n", storedSsid); }
+    else Serial.println(F("Bench: no cabin network saved (serial WIFI:ssid:pass): the page is on the hotspot only"));
+  } else Serial.println(F("Bench page: hub role with the web server only"));
+  #endif
+  #endif
+}
+// D87: the bench build keeps the hub hotspot up (it switches itself off after 30 min otherwise)
+void loopSonarBenchHotspot() {
+  #if SONAR_REAL && SONAR_BENCH
+  static unsigned long last = 0, lastSta = 0; static bool wasUp = false;
+  if (currentRole != ROLE_GATEWAY_ONSHORE) return;
+  if (millis() - lastSta >= 5000UL) {   // D87e: say it once when the network comes up
+    lastSta = millis();
+    const bool up = WiFi.status() == WL_CONNECTED;
+    if (up && !wasUp) { Serial.printf("Bench page on the network: http://%s/bench/ (http://icefish-hub%u.local/bench/)\n", WiFi.localIP().toString().c_str(), (unsigned)NODE_ID); }
+    wasUp = up;
+  }
+  if (millis() - last < 60000UL) return;
+  last = millis();
+  hubHotspotOn();   // extends the timer; starts it if it was switched off
+  hubHotspotReport();
+  if (storedSsid[0]) {   // D87e: the cabin / house network, retried every minute
+    if (WiFi.status() == WL_CONNECTED) Serial.printf("Bench page on the network: http://%s/bench/ (http://icefish-hub%u.local/bench/)\n", WiFi.localIP().toString().c_str(), (unsigned)NODE_ID);
+    else { Serial.printf("Bench: %s not joined yet, retrying\n", storedSsid); WiFi.begin(storedSsid, storedPassword); }
+  }
   #endif
 }
 
@@ -3022,9 +3099,9 @@ void setupSonarReal() {
 static void sonarBenchFormat(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   char edge[16];
   if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
-  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(clock %lu)%s t0=%d%s raw_max=%u%s edge=%s ping=%lums%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
+  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(clock %lu)%s t0=%d%s raw_max=%u%s edge=%s ping=%lums%s%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
                 (unsigned long)pi.adc_hz, (unsigned long)tuss::clockHz(), pi.clk_ok ? "" : (pi.nolimit ? "(SHORT)" : "(LIMITED)"), pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
-                edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
+                edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", pi.vdrv_ready ? "" : " VDRV LOW", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                 o.ring_alarm ? "(RING ALARM)" : "", o.spikes, o.long_echoes);
   static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(sonarBenchBuf) - 32; i++)
@@ -3046,23 +3123,167 @@ static void sonarInfoLines() {
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
                    SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, localBatteryMv, (unsigned long)ESP.getFreeHeap());
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
-  Serial.println(buf);
+  recLine(buf, !sonarRecAny());
   k = snprintf(buf, sizeof(buf), "KNOBS %lu", millis());
   for (uint8_t i = 0; i < icemesh::sonar::P_COUNT && k > 0 && k < (int)sizeof(buf) - 24; i++)
     k += snprintf(buf + k, sizeof(buf) - k, " %s=%u", icemesh::sonar::paramInfo(i).key, sonarPrm[i]);
-  Serial.println(buf);
+  recLine(buf, !sonarRecAny());
 }
+#if SONAR_REAL
+// D87: SONAR / PINGX / RAW lines as the WROOM writes them
+static void sonarRecordLine(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS], const tuss::PingInfo& pi) {
+  if (!sonarRecAny()) return;
+  static const char H[] = "0123456789ABCDEF";
+  static char line[96 + 3 * (2 * icemesh::sonar::BINS + 1)];
+  int k = snprintf(line, 96, "SONAR %lu %u %d %d %ld %u %lu", millis(), pi.nfreq, pi.rot_f, pi.t0, (long)pi.edge_um, pi.raw_max, (unsigned long)pi.us);
+  for (uint8_t f = 0; f < pi.nfreq && f < icemesh::sonar::sp::NFREQ; f++) {
+    line[k++] = ' ';
+    for (int b = 0; b < icemesh::sonar::BINS; b++) { line[k++] = H[codes[f][b] >> 4]; line[k++] = H[codes[f][b] & 15]; }
+  }
+  line[k] = 0;
+  recLine(line);
+}
+static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
+  if (!sonarRecAny()) return;
+  char buf[640];
+  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
+                   "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u",
+                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
+                   (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
+                   o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes);
+  for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
+    k += snprintf(buf + k, sizeof(buf) - k, " t=%.3f:%u:%.1f:%.2f:%.3f", (double)o.t[i].depth, o.t[i].label, (double)o.t[i].s, (double)o.t[i].vel, (double)o.t[i].width);
+  recLine(buf);
+}
+// one full capture, 3 hex digits per 12-bit sample (~8.4 kB for 2800 samples). Blocks the serial port ~0.75 s.
+static void recRaw(const tuss::PingInfo& pi, bool force) {
+  const uint16_t* smp; size_t n; uint32_t hz;
+  tuss::lastRaw(smp, n, hz);
+  if (!smp || !n) { recLine("NOTE 0 RAW: no capture yet", true); return; }
+  static const char H[] = "0123456789ABCDEF";
+  char* buf = (char*)malloc(80 + 3 * n);
+  if (!buf) { recLine("NOTE 0 RAW: out of memory", true); return; }
+  int k = snprintf(buf, 80, "RAW %lu %lu %lu %d %u ", millis(), (unsigned long)hz, (unsigned long)pi.adc_hz, pi.t0, (unsigned)n);
+  for (size_t i = 0; i < n; i++) { const uint16_t v = smp[i] & 0x0FFF; buf[k++] = H[v >> 8]; buf[k++] = H[(v >> 4) & 15]; buf[k++] = H[v & 15]; }
+  buf[k] = 0;
+  recLine(buf, force);
+  free(buf);
+}
+static void sweepApply(int8_t step) {   // one step's knob (restoring the previous step's first), NOTE, counters
+  // every step starts from the saved set, so the steps are independent (gain 3 does not keep cycles 32)
+  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (sonarPrm[i] != g_sweepSaved[i]) sonarKnobSet(i, g_sweepSaved[i]);
+  if (step >= 0 && step < (int8_t)SWEEP_N && SWEEP[step].knob >= 0) sonarKnobSet((uint8_t)SWEEP[step].knob, SWEEP[step].val);
+  if (sonarReal) sonarReal->proc.prm = sonarPrm;
+  g_sweepStep = step; g_sweepPings = 0;
+  char t[96];
+  if (step >= 0 && step < (int8_t)SWEEP_N) snprintf(t, sizeof(t), "NOTE %lu SWEEP step %d/%d: %s", millis(), step + 1, SWEEP_N, SWEEP[step].label);
+  else snprintf(t, sizeof(t), "NOTE %lu SWEEP done, knobs restored", millis());
+  recLine(t, true);
+  if (step >= 0 && step < (int8_t)SWEEP_N) { sonarInfoLines(); }   // KNOBS line with the step's values
+}
+static String sweepCommand(const String& rest) {
+  String a = rest; a.toUpperCase();
+  if (a == "STOP") { if (g_sweepStep >= 0) sweepApply(-1); return "SWEEP stopped, knobs restored"; }
+  if (!sonarRecAny()) return "SWEEP: start a recording first (REC ON or the page's Start recording), then SWEEP";
+  if (g_sweepStep >= 0) return "SWEEP already running (SWEEP STOP to end it)";
+  memcpy(g_sweepSaved, sonarPrm.v, icemesh::sonar::P_COUNT);
+  sweepApply(0);
+  return "SWEEP started: " + String(SWEEP_N) + " steps x " + String(SWEEP_PINGS) + " pings, one RAW each (~" + String(SWEEP_N * SWEEP_PINGS * 2) + " s at 1 ping/s)";
+}
+static void sweepOnPing() {   // after each recorded ping
+  if (g_sweepStep < 0) return;
+  g_sweepPings++;
+  if (g_sweepPings == 3) sonarRawAsk = true;
+  if (g_sweepPings >= SWEEP_PINGS) sweepApply(g_sweepStep + 1 < (int8_t)SWEEP_N ? g_sweepStep + 1 : -1);
+}
+#endif
 
 // Serial: STAT, REG <hex addr> [<hex value>], CAL [17 numbers], INFO (the WROOM's words and replies). KNOB is the
 // existing hub command (wifi.cpp): it sets the chalet's knob set here (sonarPrm, saved) and the sonar follows.
+static String sonarCommandReply(const String& in, bool fromWeb, bool& handled);
 bool sonarSerialCommand(const String& in) {
   if (!SONAR_REAL) return false;
+  bool handled = false;
+  const String r = sonarCommandReply(in, false, handled);
+  if (handled && r.length()) Serial.println(r);
+  return handled;
+}
+// D87: the page's command handler: every sonar word plus KNOB (the hub's own, wifi.cpp: sets the saved set)
+#if SONAR_REAL
+static String sonarWebCommand(const String& c) {
+  bool handled = false;
+  String r = sonarCommandReply(c, true, handled);
+  if (!handled) {
+    String U = c; U.trim(); U.toUpperCase();
+    if (U.startsWith("KNOB")) { handleSerialCommandLine(c); r = "Knob set (saved on this hub)"; handled = true; }
+  }
+  if (!handled) r = "Sonar: REC ON|OFF, REC WEB ON|OFF, RECEVERY n, RAWEVERY s, NOTE text, RAW, SWEEP [STOP], INFO, STAT, KNOB name value, REG addr [value], CAL [17 numbers]";
+  if (SONAR_BENCH && r.length()) Serial.println(r);
+  return r;
+}
+#endif
+static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
+  (void)fromWeb;
+  handled = true;
   String l = in; l.trim();
   const int sp0 = l.indexOf(' ');
   String w = sp0 > 0 ? l.substring(0, sp0) : l; w.toUpperCase();
   String rest = sp0 > 0 ? l.substring(sp0 + 1) : String(""); rest.trim();
+  String U = l; U.toUpperCase();
   String r;
-  if (w == "STAT") {
+  if (U == "REC ON" || U == "REC OFF") {   // D87
+    sonarRec = (U == "REC ON");
+    if (sonarRec) sonarInfoLines();
+    r = String("Serial recording ") + (sonarRec ? "ON" : "off");
+  } else if (U.startsWith("REC WEB ON") || U == "REC WEB OFF") {
+    #if SONAR_REAL
+    if (!SONAR_BENCH || !bench::active()) r = "Phone recording needs the bench build (hub_sonar_bench)";
+    else {
+      const bool on = U.startsWith("REC WEB ON");
+      if (on && !sonarRecWeb) {
+        sonarRecWeb = true; sonarRecLines = 0;
+        sonarInfoLines();
+        String t = "NOTE " + String(millis()) + " recording start, phone time " + (l.length() > 10 ? l.substring(10) : String("?"));
+        t.trim(); recLine(t.c_str());
+        sonarRawAsk = true;   // one RAW capture right at the start
+      } else if (!on && sonarRecWeb) {
+        String t = "NOTE " + String(millis()) + " recording stop"; recLine(t.c_str());
+        sonarRecWeb = false;
+      }
+      r = String("Phone recording ") + (sonarRecWeb ? "ON" : "off");
+    }
+    #else
+    r = "no sonar in this build";
+    #endif
+  } else if (w == "RECEVERY") {
+    const long v = rest.toInt(); if (v >= 1 && v <= 20) sonarRecEvery = (uint16_t)v;
+    r = "Record every " + String(sonarRecEvery) + " ping(s)";
+  } else if (w == "RAWEVERY") {
+    const long v = rest.toInt(); if (v >= 0 && v <= 600 && rest.length()) sonarRawEverySec = (uint16_t)v;
+    r = "RAW every " + String(sonarRawEverySec) + " s while recording (0 = on demand only)";
+  } else if (w == "NOTE") {
+    String t = "NOTE " + String(millis()) + " " + rest;
+    t.replace("\n", " "); t.replace("\r", " ");
+    recLine(t.c_str(), true);
+    return "Noted";
+  } else if (w == "RAW") {
+    sonarRawAsk = true; r = "RAW capture after the next ping";
+  } else if (w == "SWEEP") {   // D87b
+    #if SONAR_REAL
+    r = sweepCommand(rest);
+    #else
+    r = "no sonar in this build";
+    #endif
+  } else if (w == "KNOBS?") {   // JSON for the page
+    String j = "[";
+    for (uint8_t k = 0; k < icemesh::sonar::P_COUNT; k++) {
+      const icemesh::sonar::ParamInfo& pi = icemesh::sonar::paramInfo(k);
+      if (k) j += ",";
+      j += "{\"key\":\""; j += pi.key; j += "\",\"label\":\""; j += pi.name; j += "\",\"min\":"; j += String(pi.lo);
+      j += ",\"max\":"; j += String(pi.hi); j += ",\"unit\":\""; j += pi.unit; j += "\",\"val\":"; j += String(sonarPrm[k]); j += "}";
+    }
+    return j + "]";
+  } else if (w == "STAT") {
     sonarStatAsk = true;
     r = tuss::ok() ? String(sonarBenchBuf[0] ? sonarBenchBuf : "STAT: next ping") : String("TUSS4470 not answering (SPI wiring / SONAR_PIN_*)");
   } else if (w == "INFO") {
@@ -3073,6 +3294,7 @@ bool sonarSerialCommand(const String& in) {
     if (sp > 0) tuss::writeReg(addr, (uint8_t)strtol(rest.substring(sp + 1).c_str(), nullptr, 16));
     char b[48]; snprintf(b, sizeof(b), "TUSS4470 reg 0x%02X = 0x%02X", addr, tuss::readReg(addr));
     r = b;
+    if (sonarRecAny()) { String t = "NOTE " + String(millis()) + " " + r; recLine(t.c_str()); }
   } else if (w == "CAL") {
     uint16_t pts[17]; tuss::getCalibration(pts);
     if (rest.length()) {
@@ -3082,9 +3304,8 @@ bool sonarSerialCommand(const String& in) {
       else r = "CAL needs 17 numbers 0..4095 (raw 0, 256 ... 4096 -> corrected); stored curve unchanged\n";
     }
     r += "ADC calibration:"; for (int k = 0; k < 17; k++) { r += " "; r += String(pts[k]); }
-  } else return false;
-  Serial.println(r);
-  return true;
+  } else { handled = false; return String(); }
+  return r;
 }
 
 // D62: the real hole's bait: the chalet's value when set (D43), else no bait labels / flags (D47; the fake own hole
@@ -3120,8 +3341,19 @@ static void sonarRealTick(bool focus) {
     icemesh::sonar::Block out[2];
     const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 2);
     for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
+    static uint32_t recCount = 0; static unsigned long lastRaw = 0;   // D87 recorder
+    if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecordLine(codes, pi); recPingX(pi, sonarReal->lastProc()); sweepOnPing(); }
+    else if (g_sweepStep >= 0 && !sonarRecAny()) sweepApply(-1);   // recording stopped mid-sweep: put the knobs back
+    if (sonarRawAsk || (sonarRecAny() && sonarRawEverySec && millis() - lastRaw >= sonarRawEverySec * 1000UL)) {
+      recRaw(pi, sonarRawAsk && !sonarRecAny());   // asked while not recording: print it anyway
+      sonarRawAsk = false; lastRaw = millis();
+    }
     if (sonarStatAsk || SONAR_BENCH) sonarBenchFormat(pi, sonarReal->lastProc());
-    if (sonarStatAsk || (SONAR_BENCH && millis() - lastBench >= 2000UL)) {
+    #if SONAR_BENCH
+    bench::setStatus(sonarBenchBuf, pi.nfreq == 3 ? codes[1] : codes[0], icemesh::sonar::BINS, 0.025f, sonarRecWeb,
+                     sonarRecLines, sonarRecEvery, sonarRawEverySec, localBatteryMv);
+    #endif
+    if (sonarStatAsk || (SONAR_BENCH && !sonarRec && millis() - lastBench >= 2000UL)) {   // BENCH lines pause while the serial records
       sonarStatAsk = false; lastBench = millis();
       Serial.println(sonarBenchBuf);
     }

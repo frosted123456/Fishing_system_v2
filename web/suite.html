@@ -1004,7 +1004,7 @@ const KHELP = {
   confirm: ['Pings to confirm', 'An echo is reported after this many pings in a row. Higher = fewer flickers, slower.'],
   keep: ['Keep a lost fish for', 'Pings a fish stays on screen after its echo vanished.'],
   gate: ['Max move per ping', 'A fish moving more than this between pings becomes a new one.'],
-  dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: ~0.9 m. Bucket: 0.1 m.'],
+  dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: 0.5 m (ring-down measured 0.33 m, D88). Bucket: 0.1 m.'],
   bsmooth: ['Bottom line smoothing', 'Lower = steadier bottom line, slower to follow a real change.'],
   learn: ['Still-scene fading speed', 'How fast things that do not move (bed, weeds) fade to the muted colours.'],
   range: ['Colour range', 'Loudness span mapped to the colours. Smaller = more contrast.'],
@@ -1026,7 +1026,7 @@ const KHELP = {
   echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
   vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
 };
-const WATER = { lake: { dead: 9, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
+const WATER = { lake: { dead: 5, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
 function renderKnobs() {
   if (!K) return;
   document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));

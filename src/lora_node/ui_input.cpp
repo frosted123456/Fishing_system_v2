@@ -744,15 +744,57 @@ void hubHotspotOn() {
   if (currentRole == ROLE_GATEWAY_OFFSHORE) return;
   char ssid[32]; apName(ssid, sizeof(ssid));
   if (!wifiApActive) {
+    // D87c: the result is checked and the AP state printed (first hardware test of the hub hotspot: the SSID was not seen)
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(ssid, WIFI_PASSWORD, ESPNOW_CHANNEL, 0, AP_MAX_CONNECTIONS);
+    delay(100);
+    bool ok = WiFi.softAP(ssid, WIFI_PASSWORD, ESPNOW_CHANNEL, 0, AP_MAX_CONNECTIONS);
+    if (!ok) { delay(300); WiFi.mode(WIFI_AP_STA); delay(200); ok = WiFi.softAP(ssid, WIFI_PASSWORD, ESPNOW_CHANNEL, 0, AP_MAX_CONNECTIONS); }
+    delay(100);
     esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
     apIpAddress = WiFi.softAPIP().toString();
-    wifiApActive = true;
-    Serial.printf("Hotspot ON: %s / %s, http://%s\n", ssid, WIFI_PASSWORD, apIpAddress.c_str());
+    wifiApActive = ok;
+    if (ok) Serial.printf("Hotspot ON: %s / %s, http://%s\n", ssid, WIFI_PASSWORD, apIpAddress.c_str());
+    else Serial.println(F("Hotspot: softAP() FAILED (mode / Wi-Fi driver); HOTSPOT ON to retry"));
+    hubHotspotReport();
   }
   hubHotspotUntil = millis() + HUB_HOTSPOT_MS;
   if (hubHotspotUntil == 0) hubHotspotUntil = 1;
+}
+
+// D87c: what the Wi-Fi driver says about the AP (serial, after start and on "HOTSPOT")
+void hubHotspotReport() {
+  wifi_mode_t m = WIFI_MODE_NULL; esp_wifi_get_mode(&m);
+  wifi_config_t c; memset(&c, 0, sizeof(c));
+  const bool have = esp_wifi_get_config(WIFI_IF_AP, &c) == ESP_OK;
+  uint8_t pri = 0; wifi_second_chan_t sec; esp_wifi_get_channel(&pri, &sec);
+  Serial.printf("Hotspot state: mode %s, AP ssid \"%s\" (driver \"%.32s\"), channel %u, hidden %u, auth %u, beacon %u ms, max %u, stations %u, ip %s\n",
+                m == WIFI_MODE_AP ? "AP" : m == WIFI_MODE_APSTA ? "AP+STA" : m == WIFI_MODE_STA ? "STA (no AP!)" : "off",
+                WiFi.softAPSSID().c_str(), have ? (const char*)c.ap.ssid : "?", pri, have ? c.ap.ssid_hidden : 0, have ? (unsigned)c.ap.authmode : 0,
+                have ? c.ap.beacon_interval : 0, have ? c.ap.max_connection : 0, (unsigned)WiFi.softAPgetStationNum(), WiFi.softAPIP().toString().c_str());
+}
+
+// D87d: experiments for a hotspot the phone does not see although the driver says it is up (hub, first hardware test).
+// TEST:  ESP-NOW off, Wi-Fi restarted in AP-only mode, AP "IceFish-Test" -> is a bare AP visible at all on this board?
+// TEST2: Wi-Fi restarted in AP+STA with the AP started FIRST, then ESP-NOW initialised on the station (the chalet's order).
+// The mesh is off after either; reboot the board when done.
+#include <esp_now.h>
+void hubHotspotTest(bool apFirstThenEspNow) {
+  Serial.println(apFirstThenEspNow ? F("Hotspot TEST2: AP+STA, AP first, then ESP-NOW") : F("Hotspot TEST: AP only, no ESP-NOW"));
+  esp_now_deinit();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF); delay(500);
+  WiFi.mode(apFirstThenEspNow ? WIFI_AP_STA : WIFI_AP); delay(200);
+  const bool ok = WiFi.softAP("IceFish-Test", WIFI_PASSWORD, ESPNOW_CHANNEL, 0, 4);
+  delay(200);
+  Serial.printf("softAP: %s\n", ok ? "ok" : "FAILED");
+  wifiApActive = ok; apIpAddress = WiFi.softAPIP().toString(); hubHotspotUntil = 0;
+  if (apFirstThenEspNow) {
+    esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    const esp_err_t e = esp_now_init();
+    Serial.printf("esp_now_init: %d\n", (int)e);
+  }
+  hubHotspotReport();
+  Serial.println(F("Look for \"IceFish-Test\" on the phone now (30 s). Reboot the board afterwards."));
 }
 
 void hubHotspotOff() {

@@ -482,6 +482,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   }
   info.nfreq = nf;
   info.fault = (uint8_t)(readReg(0x1C) & 0x06);   // DEV_STAT: PULSE_NUM_FLT (bit 2) / DRV_PULSE_FLT (bit 1) of the last burst
+  info.vdrv_ready = (lastStatus() & 0x20) ? 1 : 0;   // D88: status bits of that same frame (bit 5 VDRV_READY)
   info.edge_um = g_edge_seen ? (int32_t)((float)(g_cap_edge - g_cap_burst) / 80e6f * sound / 2.0f * 1e6f) : -1;
   info.us = micros() - t_start;
   return true;

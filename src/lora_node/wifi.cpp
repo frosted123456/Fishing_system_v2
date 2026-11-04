@@ -115,9 +115,16 @@ void checkSerialWifiConfig() {
   line.trim();
   if (!line.length()) return;
   if (line[0] == '$') { gpsFeedSerialLine(line.c_str()); return; }   // D73: GPS module wired to the RX header pin (UART0)
+  if (sonarSerialCommand(line)) return;   // D62: STAT / REG / CAL / INFO / REC ... of the real sonar (SONAR_REAL builds)
+  handleSerialCommandLine(line);
+}
+
+// D87: one command line, from the serial port or the hub bench page (KNOB). Every command of the box.
+void handleSerialCommandLine(String line) {
+  line.trim();
+  if (!line.length()) return;
   { String u = line.substring(0, 4); u.toUpperCase(); if (u == "HOLE") { line = "HOLE" + line.substring(4); line.toUpperCase(); } }
-  
-  if (sonarSerialCommand(line)) return;   // D62: STAT / REG / CAL / INFO of the real sonar (SONAR_REAL builds)
+
   if (line.startsWith("WIFI:")) {
     // Format: WIFI:ssid:password
     int firstColon = line.indexOf(':', 5);
@@ -250,9 +257,10 @@ void checkSerialWifiConfig() {
     // v2: hub hotspot on demand (same as holding PRG 3 s)
     String a = line.substring(7); a.trim(); a.toUpperCase();
     if (currentRole == ROLE_GATEWAY_OFFSHORE) Serial.println(F("The chalet hotspot is always on (see WIFI settings)"));
+    else if (a == "TEST" || a == "TEST2") hubHotspotTest(a == "TEST2");   // D87d: bare AP experiments (reboot to get the mesh back)
     else if (a == "ON") hubHotspotOn();
     else if (a == "OFF") hubHotspotOff();
-    else Serial.printf("Hotspot %s. Usage: HOTSPOT ON|OFF\n", wifiApActive ? "ON" : "off");
+    else { Serial.printf("Hotspot %s. Usage: HOTSPOT ON|OFF\n", wifiApActive ? "ON" : "off"); hubHotspotReport(); }
   } else if (line.startsWith("DEMO")) {
     // v2 demo network (chalet): DEMO <hubs 0-4> [holes 1-4] | DEMO OFF
     String a = line.substring(4); a.trim(); a.toUpperCase();

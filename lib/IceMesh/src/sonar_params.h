@@ -57,7 +57,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"confirm", "Confirm pings", 1, 10, 3, ""},
     {"keep", "Keep without echo", 1, 20, 5, "pings"},
     {"gate", "Max target move", 5, 100, 32, "cm/ping"},
-    {"dead", "Dead zone", 0, 50, 9, "x0.1 m"},
+    {"dead", "Dead zone", 0, 50, 5, "x0.1 m"},
     {"bsmooth", "Bottom smoothing", 5, 100, 25, "%"},
     {"learn", "Static scene learning", 1, 100, 12, "x0.001"},
     {"range", "Colour range", 20, 80, 46, "dB"},

@@ -70,7 +70,7 @@
 #if defined(BTN_PIN) && BTN_PIN >= 0 && SONAR_REAL && (BTN_PIN == SONAR_PIN_BOOST || BTN_PIN == SONAR_PIN_O4)
 #error "BTN_PIN collides with a sonar pin (the pod v0.3 env must set BTN_PIN=-1)"
 #endif
-#include "bench_web.h"         // v2 (D56): phone test page, bench build only
+#include <bench_web.h>   // D87: shared with the Heltec (lib/SonarTuss)         // v2 (D56): phone test page, bench build only
 #include <sonar_sim.h>      // v2: fake sonar for the sonar test mode (lib/IceMesh)
 #include <eb_link.h>        // v2: ESP-NOW backbone relay (lib/IceMesh)
 #include <rx_ring.h>
@@ -1646,9 +1646,9 @@ void sonarRecord(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::
 static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   if (!sonarRecAny()) return;
   char buf[640];
-  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
+  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
                    "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u",
-                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
+                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
                    (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                    o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes);
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
@@ -1697,9 +1697,9 @@ static char sonarBenchBuf[512];
 static void sonarBenchFormat(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   char edge[16];
   if (pi.edge_um >= 0) snprintf(edge, sizeof(edge), "%.3fm", pi.edge_um / 1e6); else snprintf(edge, sizeof(edge), "-");
-  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(clock %lu)%s t0=%d%s raw_max=%u%s edge=%s ping=%lums%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
+  int k = snprintf(sonarBenchBuf, sizeof(sonarBenchBuf), "BENCH adc=%luHz(clock %lu)%s t0=%d%s raw_max=%u%s edge=%s ping=%lums%s%s | bottom=%.2fm bot_snr=%.0fdB noise=%.0fdB ring=%.2fm%s spikes=%u long=%u |",
                 (unsigned long)pi.adc_hz, (unsigned long)tuss::clockHz(), pi.clk_ok ? "" : (pi.nolimit ? "(SHORT)" : "(LIMITED)"), pi.t0, pi.t0_ok ? "" : "(FALLBACK)", pi.raw_max, pi.raw_max >= 4095 ? "(CLIPPED)" : "",
-                edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
+                edge, (unsigned long)(pi.us / 1000), pi.fault & 4 ? " BURST FAULT(pulse count)" : pi.fault & 2 ? " BURST FAULT(driver stuck)" : "", pi.vdrv_ready ? "" : " VDRV LOW", (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                 o.ring_alarm ? "(RING ALARM)" : "", o.spikes, o.long_echoes);
   static const char* const L[] = {"fish", "bait", "nearbottom", "cover"};
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(sonarBenchBuf) - 32; i++)
@@ -1939,7 +1939,7 @@ void sonarLoop() {
           #if SONAR_BENCH
           sonarBenchFormat(pi, src.lastProc());
           bench::setStatus(sonarBenchBuf, pi.nfreq == 3 ? codes[1] : codes[0], icemesh::sonar::BINS, 0.025f, sonarRecWeb,
-                           sonarRecLines, sonarRecEvery, sonarRawEverySec);
+                           sonarRecLines, sonarRecEvery, sonarRawEverySec, batteryMv);
           #endif
           static unsigned long lastBench = 0;
           if (sonarStatAsk || (SONAR_BENCH && !sonarRec && millis() - lastBench >= 2000UL)) {

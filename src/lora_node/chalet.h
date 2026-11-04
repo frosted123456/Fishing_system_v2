@@ -512,7 +512,9 @@ void handleWebApiSonarBg();
 void sonarHubLoop();
 // v2 (D62) real sonar on the own hole (SONAR_REAL=1): setup after the radio, serial commands (wifi.cpp -> here)
 void setupSonarReal();                        // tuss::begin() once, logs found / not answering
-bool sonarSerialCommand(const String& line);  // STAT / REG / CAL / INFO (same words as the WROOM); true = handled
+bool sonarSerialCommand(const String& line);  // STAT / REG / CAL / INFO / REC... (same words as the WROOM); true = handled
+void handleSerialCommandLine(String line);    // D87: every serial command (also the bench page's KNOB)
+void loopSonarBenchHotspot();                 // D87: bench build keeps the hub hotspot on
 // D62: ESP-NOW frames handed to the radio vs sent (send callback), for the radio-quiet sonar capture (as the WROOM, D54)
 extern volatile uint32_t g_nowQueued, g_nowDone;
 extern volatile unsigned long g_nowDoneMs;
@@ -575,6 +577,8 @@ extern RelayReq relayReqs[16];
 extern bool chSimAllSet; extern uint8_t chSimAllValue, simRate;
 uint8_t simRequested(uint8_t node);
 void hubHotspotOn();
+void hubHotspotReport();   // D87c: AP state on the serial
+void hubHotspotTest(bool apFirstThenEspNow);   // D87d: HOTSPOT TEST / TEST2
 void hubHotspotOff();
 void resetNetworkSettings();
 void handleKeyPress(char key);

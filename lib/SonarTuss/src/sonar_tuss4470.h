@@ -119,6 +119,8 @@ struct PingInfo {
                           // restarts, see capture()): clk_ok = 0 and the driver keeps the limit on for the next pings
   uint8_t clk_ok;         // 1 = delivered rate within 0.3 % of the clock rate
   uint8_t nolimit;        // 1 = this capture ran with the conversion limit cleared (continuous sampling). S3: always 1
+  uint8_t vdrv_ready;     // D88: VDRV_READY status bit at the end of the ping: 0 = the regulator never reached the vdrv
+                          // knob (VPWR / MT3608 too low for it: the knob then changes nothing, D55 table)
 };
 
 // D70 wiring check (serial SELFTEST / the chalet page): see shieldTest() in the .cpp

@@ -129,6 +129,18 @@ class SonarProc {
     }
     int pk = best; for (int i = best; i < std::min(N, best + 8); i++) if (d[i] > d[pk]) pk = i;
     int on = pk; while (on > b0 && static_cast<sreal>(d[on - 1]) > static_cast<sreal>(d[pk]) - R(10)) on--;
+    // D88: the onset must be a RISE, not a level. When the walk-back reaches the search start without ever
+    // dropping 10 dB below the peak (drum: wall echoes keep the whole stretch above the bottom - 10 dB; lake:
+    // a ring-down tail still high at bmin), the bottom was reported AT bmin. Take the steepest 2-bin rise
+    // between the search start and the peak instead. Unchanged when the walk finds its floor (every scene test).
+    if (on == b0 && static_cast<sreal>(d[b0]) > static_cast<sreal>(d[pk]) - R(10) && pk > b0 + 1) {
+      sreal br = R(-1e30); int at = pk;
+      for (int i = b0 + 1; i < pk; i++) {
+        const sreal s = static_cast<sreal>(d[i + 1]) - static_cast<sreal>(d[i - 1]);
+        if (s > br) { br = s; at = i; }
+      }
+      on = at;
+    }
     const sreal bNow = static_cast<sreal>(on) * BIN_M();
     if (!have_bottom_) { bottom_ = bNow; have_bottom_ = true; }
     else if (std::fabs(bNow - bottom_) < R(0.3)) { bottom_ += R(prm[P_BOTTOM_SMOOTH] / 100.0) * (bNow - bottom_); bj_ = 0; }
@@ -293,8 +305,18 @@ class SonarProc {
     // Its normal length is learned on the first pings, then slowly; much longer for a while = alarm
     // (slush / frazil ice on the face, transducer touching the ice). Does not change anything above.
     {
+      // D88: the ring-down is a DECAY from time zero. It ends where the level stops falling: at the noise floor
+      // + 10 dB, or at the first echo that stands 3 dB over the last 3 bins (drum: wall echoes from 0.25 m kept
+      // the old walk going to 1.0-1.5 m and raised a RING ALARM; lake: a fish in the first metre ends it early,
+      // which only shortens a monitor value).
       int i = 1; const int iMax = std::min(N - 1, roundi(R(1.5) / BIN_M()));
-      while (i < iMax && static_cast<sreal>(d[i]) > nf + R(10)) i++;
+      while (i < iMax && static_cast<sreal>(d[i]) > nf + R(10)) {
+        if (i >= 3) {
+          const sreal back = std::max(static_cast<sreal>(d[i - 1]), std::max(static_cast<sreal>(d[i - 2]), static_cast<sreal>(d[i - 3])));
+          if (static_cast<sreal>(d[i]) > back + R(3)) break;
+        }
+        i++;
+      }
       const sreal rl = static_cast<sreal>(i) * BIN_M();
       if (ring_n_ < RING_LEARN) { ring_base_ = (ring_base_ * static_cast<sreal>(ring_n_) + rl) / static_cast<sreal>(ring_n_ + 1); ring_n_++; }
       const bool longer = ring_n_ >= RING_LEARN && rl > ring_base_ + ringAlarmExtra();
