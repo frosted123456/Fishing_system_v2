@@ -25,7 +25,9 @@ inline uint8_t staticLevel(float v) { return v < 0.06f ? 0 : (v < 0.20f ? 1 : (v
 //          every BG_EVERY pings; a new BG version when the static scene changed in > BG_CHANGE bins.
 class SonarSource {
  public:
-  enum { BASE_EVERY = 8, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12, QUIET_BASE_EVERY = 32 };   // BASE every 2 s at 4 pings/s; 8 s when nothing changes (D79)
+  enum { BASE_EVERY = 8, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12, QUIET_BASE_EVERY = 32, ECHO_EVERY = 4 };
+  bool echo_on = false;     // D93: in focus, one raw echogram line (BT_ECHO, 66 B) every ECHO_EVERY pings. Off by default (the
+                            // simulations and tests keep their airtime); the real hub / tip-up firmware turns it on   // BASE every 2 s at 4 pings/s; 8 s when nothing changes (D79)
   SonarScene scene;
   SonarProc proc;
   uint32_t blocks_out = 0, pings_dropped = 0, base_quiet = 0;
@@ -37,7 +39,7 @@ class SonarSource {
   void begin(uint8_t node, const SceneConfig& cfg, uint16_t start_index) {
     node_ = node; scene.begin(cfg); proc.reset(); proc.bait_m = cfg.bait_m;
     index_ = start_index; n_pend_ = 0; since_base_ = BASE_EVERY; since_bg_ = BG_EVERY; bg_seg_ = 0;
-    bg_ver_ = 0; bg_valid_ = false; data_blocks_ = 0; act_bits_ = 0; was_focus_ = false; last_fish_ = 0;
+    bg_ver_ = 0; bg_valid_ = false; data_blocks_ = 0; act_bits_ = 0; was_focus_ = false; last_fish_ = 0; since_echo_ = ECHO_EVERY;
     tick_n_ = 0; rot_f_ = 0; last_status_ = 0; status_ = 0; last_base_status_ = 0xFF; last_base_bottom_ = 0xFFFF;
     memset(slot_id_, 0, sizeof(slot_id_)); memset(slot_used_, 0, sizeof(slot_used_));
     memset(&last_, 0, sizeof(last_)); memset(&out_, 0, sizeof(out_)); memset(bg_, 0, sizeof(bg_));
@@ -117,6 +119,13 @@ class SonarSource {
         bg_seg_ = static_cast<uint8_t>((bg_seg_ + 1) % BG_SEGMENTS);
         since_bg_ = 0;
       }
+      // D93: the raw line of this ping (the caller passes out[4] so it is never squeezed out by DATA + BG + BASE)
+      if (echo_on && ++since_echo_ >= ECHO_EVERY && n_out < max_out) {
+        EchoLine e; echoFromBins(e, node_, last_.index, SonarProc::binDb(), static_cast<float>(out_.nf));
+        const size_t len = encodeEcho(e, out[n_out].data, MAX_BLOCK);
+        if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
+        since_echo_ = 0;
+      }
     }
     // BASE every 2 s (also in focus: it carries the status flags), at once for a new fish (not in focus)
     // or when a fish comes near the bait (D43)
@@ -147,7 +156,7 @@ class SonarSource {
     for (uint8_t i = 0; i < out_.n; i++) {
       const TrackOut& t = out_.t[i];
       const sreal dd = t.depth - bait, ad = dd < 0 ? -dd : dd;
-      if (t.label == LBL_FISH && t.miss == 0 && (ad < R(0.4) || (ad < R(0.6) && dd * t.vel < R(0)))) st |= ST_NEAR_BAIT;
+      if (t.label != LBL_BAIT && t.label != LBL_COVER && t.miss == 0 && (ad < R(0.4) || (ad < R(0.6) && dd * t.vel < R(0)))) st |= ST_NEAR_BAIT;   // D92: any fish, near-bottom ones too
       if (t.label == LBL_COVER && ad < R(0.4)) st |= ST_BAIT_COVER;
     }
     if (out_.bottom > R(0) && out_.bottom - bait < R(0.3)) st |= ST_BAIT_COVER;
@@ -301,7 +310,7 @@ class SonarSource {
   uint16_t index_ = 0;
   Ping pend_[MAX_PINGS];
   uint8_t n_pend_ = 0;
-  uint16_t since_base_ = 0, since_bg_ = 0;
+  uint16_t since_base_ = 0, since_bg_ = 0, since_echo_ = 0;
   uint8_t last_base_status_ = 0xFF; uint16_t last_base_bottom_ = 0xFFFF;   // D79: what the last summary said
   uint8_t bg_seg_ = 0, bg_ver_ = 0;
   bool bg_valid_ = false;

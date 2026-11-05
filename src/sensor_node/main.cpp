@@ -191,6 +191,7 @@ static bool g_sonarHwTried = false, g_sonarHwOk = false;
 static bool sonarHwBegin();                        // tuss::begin() once; true = TUSS4470 answers
 volatile bool sonarCtrlSim = false;
 volatile uint8_t sonarCtrlFocus = 0;
+volatile bool sonarCtrlPrimary = false;   // D93: this hole is THE focus (not a 'live too' extra): raw echogram lines go out
 // v2 (D42): sonar knobs from the hub's sonar control (the chalet's set), applied by sonarLoop and saved
 volatile bool sonarKnobsNew = false;
 uint8_t sonarKnobsBuf[SONAR_CTRL_PARAMS];
@@ -1083,6 +1084,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     const bool extras = len >= (int)sizeof(SonarCtrlMessage);
     // D81 (5.4): up to three holes stream at once; this node only needs to know whether it is one of them
     sonarCtrlFocus = (c->focus_node == NODE_ID || (extras && (c->focus_extra[0] == NODE_ID || c->focus_extra[1] == NODE_ID))) ? NODE_ID : c->focus_node;
+    sonarCtrlPrimary = c->focus_node == NODE_ID;
     sonarCtrlSim = (c->sim_on != 0);
     if (c->n_params > 0 && c->n_params <= SONAR_CTRL_PARAMS) {
       memcpy(sonarKnobsBuf, c->params, c->n_params); sonarKnobsN = c->n_params; sonarKnobsNew = true;
@@ -1841,8 +1843,10 @@ void sonarLoop() {
   if (!knobsLoaded) {   // the last set received, kept across deep sleep / reboot
     knobsLoaded = true;
     Preferences p; p.begin("sonar", true);
-    uint8_t v[icemesh::sonar::P_COUNT]; const size_t n = p.getBytes("p", v, sizeof(v)); p.end();
-    for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) knobs.set(i, v[i]);
+    uint8_t v[icemesh::sonar::P_COUNT], d[icemesh::sonar::P_COUNT];
+    const size_t n = p.getBytes("p", v, sizeof(v)), nd = p.getBytes("d", d, sizeof(d)); p.end();
+    // D95: a knob saved at its then-default follows the new default (see settings.cpp on the hub)
+    for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) { const uint8_t was = i < nd ? d[i] : icemesh::sonar::paramLegacyDefault(i); if (v[i] == was && was != icemesh::sonar::paramInfo(i).def) continue; knobs.set(i, v[i]); }
     src.proc.prm = knobs;
   }
   // v2 (D43) real sonar: started once; a node with a working TUSS4470 runs its sonar whenever its hub
@@ -1863,7 +1867,8 @@ void sonarLoop() {
     for (uint8_t i = 0; i < sonarKnobsN && i < icemesh::sonar::P_COUNT; i++) changed |= knobs.set(i, sonarKnobsBuf[i]);
     if (changed) {
       src.proc.prm = knobs;
-      Preferences p; p.begin("sonar", false); p.putBytes("p", knobs.v, icemesh::sonar::P_COUNT); p.end();
+      uint8_t d[icemesh::sonar::P_COUNT]; for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) d[i] = icemesh::sonar::paramInfo(i).def;
+      Preferences p; p.begin("sonar", false); p.putBytes("p", knobs.v, icemesh::sonar::P_COUNT); p.putBytes("d", d, icemesh::sonar::P_COUNT); p.end();   // D95
       DEBUG_PRINTLN(F("Sonar knobs updated by the chalet"));
       if (sonarRecAny()) recKnobs(knobs);
     }
@@ -1908,7 +1913,7 @@ void sonarLoop() {
   uint8_t tickBudget = 2;                                                    // review: a ping slower than the tick must not keep loop() here
   while (tickBudget-- && millis() - lastTick >= 250UL) {                     // 4 pings/s
     lastTick += 250UL;
-    icemesh::sonar::Block out[2];
+    icemesh::sonar::Block out[4];   // D93
     static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0;
     const uint32_t t0 = micros();
     uint8_t n;
@@ -1917,7 +1922,8 @@ void sonarLoop() {
         static unsigned long warned = 0;
         if (millis() - warned >= 5000UL) { warned = millis(); Serial.println(F("BENCH: TUSS4470 NOT answering -> fake data. Check SPI wiring, SONAR_PIN_*, 3.3 V / 5 V to the shield")); }
       }
-      n = src.tick(focus == NODE_ID, out, 2);   // fake raw ping -> processing -> blocks
+      src.echo_on = sonarCtrlPrimary;   // D93
+      n = src.tick(focus == NODE_ID, out, 4);   // fake raw ping -> processing -> blocks
     } else {   // real ping when due (adaptive rate), processing, blocks; recording on serial if asked
       static uint8_t tick_n = 0;
       static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
@@ -1929,7 +1935,8 @@ void sonarLoop() {
         radioQuietForPing();
         while (bench::active() && millis() - bench::lastServedMs() < 15) yield();   // let the page's reply leave the radio first
         if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
-          n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 2);
+          src.echo_on = sonarCtrlPrimary;   // D93
+          n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 4);
           static uint32_t recCount = 0; static unsigned long lastRaw = 0;
           if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecord(codes, pi); recPingX(pi, src.lastProc()); }
           if (sonarRawAsk || (sonarRecAny() && sonarRawEverySec && millis() - lastRaw >= sonarRawEverySec * 1000UL)) {

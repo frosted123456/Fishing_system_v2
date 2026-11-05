@@ -1011,7 +1011,9 @@ void handleWebApiSonarPings() {
   const int node = server.arg("node").toInt();
   const uint32_t since = strtoul(server.arg("since").c_str(), nullptr, 10);
   if (node <= 0 || node > 255) { server.send(400, "application/json", "{\"error\":\"node\"}"); return; }
-  server.send(200, "application/json", meshSonarPingsJson((uint8_t)node, since, m, lite));
+  const bool with_echo = server.hasArg("echo");   // D93: &echo=<seq> adds the echogram lines newer than seq
+  const uint32_t echo_since = with_echo ? strtoul(server.arg("echo").c_str(), nullptr, 10) : 0;
+  server.send(200, "application/json", meshSonarPingsJson((uint8_t)node, since, m, lite, with_echo, echo_since));
 }
 
 void handleWebApiSonarBg() {

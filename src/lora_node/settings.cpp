@@ -11,21 +11,37 @@
 // command (CMD_SONAR_PARAM), and the whole set again when a hub shows up after boot. Hub: keeps them
 // (NVS), uses them for its own fake sonars and repeats them to its tip-ups in the sonar control message.
 // =============================================================================================
+static void sonarKnobsSave();
 void sonarKnobsLoad() {
+  // D95: the saved set is applied knob by knob, except where the saved value is the default the firmware had when it
+  // was saved ("d"): that knob was never set by hand, so a NEW default (freq 2 in D94, dead 5 in D88) takes over on
+  // the first boot after a flash. A knob the user did set keeps its value. (Before, a flashed default never reached
+  // a board that had a saved set, and only Defaults / KNOB on the page did.)
   Preferences p;
   p.begin("sonar", true);
-  uint8_t v[icemesh::sonar::P_COUNT];
+  uint8_t v[icemesh::sonar::P_COUNT], d[icemesh::sonar::P_COUNT];
   const size_t n = p.getBytes("p", v, sizeof(v));
+  const size_t nd = p.getBytes("d", d, sizeof(d));
   p.end();
-  for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) sonarPrm.set(i, v[i]);   // clamped; newer knobs keep their default
+  bool changed = false;
+  for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) {
+    const uint8_t def = icemesh::sonar::paramInfo(i).def;
+    const uint8_t was = i < nd ? d[i] : icemesh::sonar::paramLegacyDefault(i);   // the default when it was saved
+    if (v[i] == was && was != def) { changed = true; continue; }   // untouched knob, new default: keep the default
+    sonarPrm.set(i, v[i]);   // clamped; newer knobs keep their default
+  }
+  if (changed || nd != icemesh::sonar::P_COUNT) sonarKnobsSave();   // (re)writes "p" and the current defaults "d"
   sonarPrmGen++;
   if (currentRole == ROLE_GATEWAY_OFFSHORE) meshDemoSetParams(sonarPrm.v, icemesh::sonar::P_COUNT);
 }
 
 static void sonarKnobsSave() {
+  uint8_t d[icemesh::sonar::P_COUNT];
+  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) d[i] = icemesh::sonar::paramInfo(i).def;
   Preferences p;
   p.begin("sonar", false);
   p.putBytes("p", sonarPrm.v, icemesh::sonar::P_COUNT);
+  p.putBytes("d", d, icemesh::sonar::P_COUNT);   // D95: the defaults this set was saved against
   p.end();
 }
 

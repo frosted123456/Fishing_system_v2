@@ -325,7 +325,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
     <div class="legend">
       <span><i style="background:#8FA9B2"></i><i class="sw" style="background:#9A8F7A"></i>Lake bed <i class="sw" style="background:#6FA868"></i>Weeds, structure (still)</span>
-      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong</span>
+      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong (raw echogram on: every echo, 0-60 dB over the floor)</span>
       <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
     </div>
   </section>
@@ -562,7 +562,14 @@ const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
 /* ---------- State ---------- */
 let units = 'ft';
 try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
-const opts = { overlays: true, bgsep: true, cone: true, dz: true };
+const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true };
+// D93: raw echogram lines of the focus hole, one per second: { i: ping index, nf: -dB, c: 122 hex cells (4-bit level over the floor, 4 dB each) }
+let echoes = [], echoSince = 0;
+window.suiteEchoCount = () => echoes.length;   // (preview / tests)
+function echoFor(idx) {   // the newest line at or before this ping (within 8 pings), else null
+  for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d < 8) return echoes[k]; if (d > 32768) continue; if (d >= 8) return null; }
+  return null;
+}
 let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting (Settings tab); 14° per the transducer listing
 const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
 // D57 bottom dead zone: a fish closer to the bottom than this is inside the bottom echo and cannot be seen.
@@ -591,10 +598,17 @@ function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?no
 function loadPings() {
   if (!focus || pingBusy) return; const n = focus;
   pingBusy = true;
-  sfetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40').then(r => r.json()).then(d => {
+  sfetch('/api/sonar/pings?node=' + n + '&since=' + since + '&max=40&echo=' + echoSince).then(r => r.json()).then(d => {
     if (n !== focus) return;
     if (d.last != null && d.last < since) { since = 0; queue = []; }   // D82: the chalet restarted (its counter went back)
     (d.pings || []).forEach(p => { since = Math.max(since, p[0]); queue.push(p); });
+    if (d.elast != null && d.elast < echoSince) { echoSince = 0; echoes = []; }
+    const ne = d.echo || [];
+    if (ne.length) {   // D93: new raw lines: the last columns are drawn again with them underneath
+      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: l[3] }); });
+      if (echoes.length > 120) echoes.splice(0, echoes.length - 120);
+      for (let k = Math.max(0, recs.length - 12); k < recs.length; k++) recs[k].px = null;
+    }
   }).catch(() => {}).then(() => { pingBusy = false; });
 }
 
@@ -717,7 +731,7 @@ $('lpgrid').addEventListener('click', e => { const b = e.target.closest('[data-l
 $('stop').addEventListener('click', () => post({ focus: 0 }));
 
 function setFocus(n) {
-  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false;
+  focus = n; since = 0; queue = []; bg = null; bgKey = ''; recs = []; info = {}; selSlot = null; userPicked = false; echoes = []; echoSince = 0;
   $('main').classList.toggle('nofocus', !n);
   $('ttl').textContent = n ? nameOf(n) : 'Sonar';
   $('sub').textContent = n ? 'Live sonar, about 1 s behind' + (L.sim ? ' · simulated pings' : '') : 'Pick a hole to stream it';
@@ -739,8 +753,12 @@ function pixels(rec) {
   const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
   const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
   const bedBin = rec.b != null ? Math.round(rec.b / BIN) - 2 : N;   // the bottom line of this ping splits bed from weeds
-  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? (i >= bedBin ? SEDIMENT : WEED) : PAL, BGV[l]); } }
   const G = GAIN(), wt = WT[vopt.weak] || 0;   // v2 display knobs: colour gain, hide weak echoes
+  const e = opts.echogram ? echoFor(rec.i) : null;
+  for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv && !e) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? (i >= bedBin ? SEDIMENT : WEED) : PAL, BGV[l]); } }
+  if (e) {   // D93: the raw ping underneath (10 cm cells, 4 dB per level over the floor), the marks on top
+    for (let c = 0; c < 122; c++) { const l = parseInt(e.c[c], 16) || 0; if (l <= 0) continue; const v = clamp((l / 15) * G, 0, 1); if (v < wt) continue; for (let k = 0; k < 4; k++) put(c * 4 + k, PAL, v); }
+  }
   for (const r of rec.r) { const v = RV[r[1]]; if (v >= wt) put(r[0], PAL, v * G); }
   for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
     if (t.slot !== 0 && t.s < wt) continue;
@@ -966,6 +984,7 @@ $('tlist').addEventListener('click', pickRow);
 
 /* ---------- Controls ---------- */
 const TOGGLES = [
+  ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second (10 cm cells, 4 dB per step over the noise floor): the waterfall shows it underneath the marks, like a flasher. Off: only what the detector reported.'],
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
   ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
   ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
@@ -978,7 +997,7 @@ function syncControls() {
   document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
   $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
 }
-tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep') recs.forEach(r => r.px = null); render(); syncControls(); });
+tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep' || k === 'echogram') recs.forEach(r => r.px = null); render(); syncControls(); });
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
 $('play').addEventListener('click', () => { playing = !playing; syncControls(); });
 // v2 (D42) display knobs (this phone / PC only)
@@ -1015,7 +1034,7 @@ const KHELP = {
   pinghz: ['Ping rate when busy', 'Pings per second (x0.25) while fish are around or you watch the hole.'],
   idlehz: ['Ping rate when quiet', 'Pings per second (x0.25) when nothing is in the water. Lower saves battery.'],
   avg: ['Pings averaged', 'Overview mode averages this many bursts: smoother, slower.'],
-  freq: ['Frequencies', '0 = 190/200/210 kHz every ping, 1 = one at a time, 2 = 200 kHz only.'],
+  freq: ['Frequencies', '2 = 200 kHz only (default since D94: the transducer is 14-16 dB down at 190 and 210 kHz, so mixing them cost 4.4 dB of echo and tripled the ping time). 0 = 190/200/210 kHz every ping, 1 = one at a time.'],
   sound: ['Speed of sound', '1350 + value m/s. 53 = 1403 m/s, fresh water near 0 C.'],
   bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
   thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],

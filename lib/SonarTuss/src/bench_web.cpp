@@ -4,7 +4,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_wifi.h>
-#include <deque>
 
 namespace bench {
 
@@ -17,10 +16,30 @@ static bool g_on = false;
 #ifndef BENCH_RING_BYTES
 #define BENCH_RING_BYTES (32 * 1024)   // WROOM tip-up (no mesh server, heap to spare); the hub builds set 12 kB (D88)
 #endif
-static const size_t RING_BYTES = BENCH_RING_BYTES, RING_LINES = 96;
-struct Line { uint32_t seq; String text; };
-static std::deque<Line> g_ring;
-static size_t g_ringBytes = 0;
+// D92: a static byte ring, no heap at all (the deque of Strings made two copies of every 5 kB RAW line and its node
+// allocation aborted the hub on OOM during a sweep). Records: [seq 4 B][len 2 B][text], oldest overwritten; a record
+// never straddles the end (a record that does not fit at the end starts at 0 and the tail is left unused).
+static const size_t RING_BYTES = BENCH_RING_BYTES;
+static uint8_t g_ringBuf[RING_BYTES];
+static size_t g_head = 0, g_tail = 0, g_wrapAt = RING_BYTES;   // tail = oldest record, head = write position, wrapAt = end of valid data before the wrap
+static uint32_t g_ringCount = 0;
+static bool g_wrapped = false;                                  // head is below tail: valid data is tail..wrapAt then 0..head
+static const size_t REC_HDR = 6;
+static inline uint32_t rd32(size_t at) { return (uint32_t)g_ringBuf[at] | ((uint32_t)g_ringBuf[at + 1] << 8) | ((uint32_t)g_ringBuf[at + 2] << 16) | ((uint32_t)g_ringBuf[at + 3] << 24); }
+static inline uint16_t rd16(size_t at) { return (uint16_t)(g_ringBuf[at] | (g_ringBuf[at + 1] << 8)); }
+static void ringPopOldest() {
+  if (!g_ringCount) return;
+  g_tail += REC_HDR + rd16(g_tail + 4);
+  if (--g_ringCount == 0) { g_head = g_tail = 0; g_wrapAt = RING_BYTES; g_wrapped = false; }
+  else if (g_wrapped && g_tail >= g_wrapAt) { g_tail = 0; g_wrapAt = RING_BYTES; g_wrapped = false; }
+}
+// the record at `pos` (a record start, first = g_tail), then pos moves to the next one; the caller walks exactly
+// g_ringCount records (a position test cannot tell a full wrapped ring's head from its tail)
+static void ringRead(size_t& pos, uint32_t& seq, const char*& text, uint16_t& len) {
+  if (g_wrapped && pos >= g_wrapAt) pos = 0;
+  seq = rd32(pos); len = rd16(pos + 4); text = (const char*)g_ringBuf + pos + REC_HDR;
+  pos += REC_HDR + len;
+}
 static uint32_t g_seq = 0;
 
 static String g_status = "{}";
@@ -104,16 +123,18 @@ static void handleLog() {
   g_srv->sendHeader("Cache-Control", "no-store");
   g_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
   g_srv->send(200, "text/plain", "");
-  String head = "#first " + String(g_ring.empty() ? g_seq + 1 : g_ring.front().seq) + "\n";
-  g_srv->sendContent(head);
-  size_t sent = 0;
-  for (const Line& l : g_ring) {
-    if (l.seq <= since) continue;
-    String s = String(l.seq) + "\t";
-    g_srv->sendContent(s);
-    g_srv->sendContent(l.text);
+  char hb[32];
+  snprintf(hb, sizeof(hb), "#first %lu\n", (unsigned long)(g_ringCount ? rd32(g_tail) : g_seq + 1));
+  g_srv->sendContent(hb);
+  size_t sent = 0, pos = g_tail; uint32_t seq; const char* text; uint16_t len;
+  for (uint32_t left = g_ringCount; left; left--) {
+    ringRead(pos, seq, text, len);
+    if (seq <= since) continue;
+    snprintf(hb, sizeof(hb), "%lu\t", (unsigned long)seq);
+    g_srv->sendContent(hb);
+    g_srv->sendContent(text, len);   // D92: straight from the ring, no String copy
     g_srv->sendContent("\n");
-    sent += l.text.length();
+    sent += len;
     if (sent > 40 * 1024) break;   // the page pulls the rest next time
   }
   g_srv->sendContent("");
@@ -165,16 +186,28 @@ uint32_t lastSeq() { return g_seq; }
 
 void push(const char* line) {
   if (!g_on) return;
-  const size_t len = strlen(line);
-  while (!g_ring.empty() && (g_ringBytes + len > RING_BYTES || g_ring.size() + 1 > RING_LINES)) {   // make room first
-    g_ringBytes -= g_ring.front().text.length();
-    g_ring.pop_front();
+  size_t len = strlen(line);
+  if (len > 0xFFFF) len = 0xFFFF;
+  const size_t need = REC_HDR + len;
+  if (need > RING_BYTES) { ++g_seq; return; }     // never fits (the page counts the gap)
+  const uint32_t seq = ++g_seq;
+  // make room: the record goes at head if it fits before the end, else at 0 (wrap); evict the oldest until free
+  for (;;) {
+    if (!g_ringCount) { g_head = g_tail = 0; g_wrapAt = RING_BYTES; g_wrapped = false; break; }
+    if (!g_wrapped) {                             // valid data is tail..head, free is head..end and 0..tail
+      if (g_head + need <= RING_BYTES) break;     // fits at the end
+      if (need <= g_tail) { g_wrapAt = g_head; g_head = 0; g_wrapped = true; break; }   // wrap: fits before tail
+      ringPopOldest();                            // (tail moves up, or everything is gone)
+    } else {                                      // wrapped: valid data is tail..wrapAt and 0..head, free is head..tail
+      if (g_head + need <= g_tail) break;
+      ringPopOldest();
+    }
   }
-  if (ESP.getMaxAllocHeap() < len + 512) { ++g_seq; return; }   // heap too fragmented: drop (the page counts the gap). D88: one copy is made, not two
-  Line l; l.seq = ++g_seq; l.text = line;
-  if (l.text.length() != len) return;             // out of memory: drop the line
-  g_ringBytes += len;
-  g_ring.push_back(l);
+  uint8_t* w = g_ringBuf + g_head;
+  w[0] = (uint8_t)seq; w[1] = (uint8_t)(seq >> 8); w[2] = (uint8_t)(seq >> 16); w[3] = (uint8_t)(seq >> 24);
+  w[4] = (uint8_t)len; w[5] = (uint8_t)(len >> 8);
+  memcpy(w + REC_HDR, line, len);
+  g_head += need; g_ringCount++;
 }
 
 void setStatus(const char* bench_line, const uint8_t* codes, uint16_t nbins, float bin_m, bool recording,

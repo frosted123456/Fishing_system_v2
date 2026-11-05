@@ -40,7 +40,7 @@ class SonarOutbox {
     int slot = -1;
     for (uint8_t i = 0; i < CAP && slot < 0; i++) {
       const Item& it = items_[i];
-      if (it.used && it.node == node && it.type == type && type != BT_DATA && (type != BT_BG || it.seg == seg)) slot = i;
+      if (it.used && it.node == node && it.type == type && type != BT_DATA && (type != BT_BG || it.seg == seg)) slot = i;   // (an ECHO line replaces the node's older one: only the newest matters)
     }
     for (uint8_t i = 0; i < CAP && slot < 0; i++) if (!items_[i].used) slot = i;
     if (slot < 0) { slot = victim(); dropped++; }
@@ -62,6 +62,7 @@ class SonarOutbox {
     added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, false, frame, p));
     added = static_cast<uint16_t>(added + fillPass(w, BT_DATA, true, frame, p));
     added = static_cast<uint16_t>(added + fillPass(w, BT_BG, false, frame, p));
+    added = static_cast<uint16_t>(added + fillPass(w, BT_ECHO, false, frame, p));   // D93: after everything the detector produced, never repeated
     if (repeats) added = static_cast<uint16_t>(added + fillPass(w, BT_BASE, true, frame, p));
     return added;
   }
@@ -107,8 +108,8 @@ class SonarOutbox {
     for (uint8_t i = 0; i < CAP; i++)
       if (items_[i].used && (items_[i].sends[0] > 0 || items_[i].sends[1] > 0) && (best < 0 || items_[i].order < items_[best].order)) best = i;
     if (best >= 0) return best;
-    static const uint8_t order[3] = {BT_BG, BT_DATA, BT_BASE};
-    for (uint8_t p = 0; p < 3; p++) {
+    static const uint8_t order[4] = {BT_ECHO, BT_BG, BT_DATA, BT_BASE};   // D93: a raw line is the first to go
+    for (uint8_t p = 0; p < 4; p++) {
       for (uint8_t i = 0; i < CAP; i++)
         if (items_[i].used && items_[i].type == order[p] && (best < 0 || items_[i].order < items_[best].order)) best = i;
       if (best >= 0) return best;
@@ -144,6 +145,8 @@ struct NodeSonar {
   uint8_t bg[BINS];
 };
 
+struct StoredEcho { uint32_t seq; EchoLine e; };   // D93: one echogram line as received (e.node, e.index, e.nf_neg, cells)
+
 struct StoredPing {
   uint32_t seq; uint8_t node; Ping p;
   uint8_t nf_neg, hard;                 // from the DATA block header
@@ -158,13 +161,13 @@ inline uint16_t packTarget(const Target& t) {
   return static_cast<uint16_t>((t.depth_cm > DEPTH_MAX ? DEPTH_MAX : t.depth_cm) | ((t.level & 3u) << 11) | (t.track == 0 ? (1u << 13) : 0u));
 }
 
-template <uint8_t MAXN = 16, uint16_t RING = 128, uint8_t HIST = 90>
+template <uint8_t MAXN = 16, uint16_t RING = 128, uint8_t HIST = 90, uint8_t ECHO_RING = 48>
 class SonarStore : public SonarSink {
  public:
   uint32_t blocks_ok = 0, blocks_bad = 0, old_pings = 0;
 
   SonarStore() { clear(); }
-  void clear() { memset(nodes_, 0, sizeof(nodes_)); head_ = 0; count_ = 0; seq_ = 0; memset(hn_, 0, sizeof(hn_)); memset(hh_, 0, sizeof(hh_)); }
+  void clear() { memset(nodes_, 0, sizeof(nodes_)); head_ = 0; count_ = 0; seq_ = 0; memset(hn_, 0, sizeof(hn_)); memset(hh_, 0, sizeof(hh_)); ehead_ = 0; ecount_ = 0; eseq_ = 0; }
 
   // Summaries of `node`, oldest first (up to HIST, one per 2 s). Returns the count.
   uint8_t history(uint8_t node, BaseRec* out, uint8_t max) const {
@@ -212,6 +215,15 @@ class SonarStore : public SonarSink {
         record(ns, frame, false);
         break;
       }
+      case BT_ECHO: {   // D93: kept in its own ring (any node; in practice the focus hole), newest wins on a duplicate index
+        EchoLine e;
+        if (!decodeEcho(blk, len, e)) { blocks_bad++; return; }
+        if (ecount_ > 0) { const StoredEcho& last = ering_[(ehead_ + ECHO_RING - 1) % ECHO_RING]; if (last.e.node == node && last.e.index == e.index) { old_pings++; return; } }
+        StoredEcho& se = ering_[ehead_]; se.seq = ++eseq_; se.e = e;
+        ehead_ = static_cast<uint8_t>((ehead_ + 1) % ECHO_RING);
+        if (ecount_ < ECHO_RING) ecount_++;
+        break;
+      }
       case BT_BG: {
         uint8_t n2, ver, seg;
         uint8_t tmp[BINS];
@@ -235,6 +247,17 @@ class SonarStore : public SonarSink {
   const NodeSonar* at(uint8_t i) const { return (i < MAXN && nodes_[i].used) ? &nodes_[i] : nullptr; }
   uint8_t capacity() const { return MAXN; }
   uint32_t lastSeq() const { return seq_; }
+
+  // D93: echogram lines of `node` with seq > since, oldest first. Returns the count written to out.
+  uint16_t echoSince(uint8_t node, uint32_t since, const StoredEcho** out, uint16_t max) const {
+    uint16_t n = 0;
+    for (uint16_t k = 0; k < ecount_ && n < max; k++) {
+      const StoredEcho& se = ering_[(ehead_ + ECHO_RING - ecount_ + k) % ECHO_RING];
+      if (se.e.node == node && se.seq > since) out[n++] = &se;
+    }
+    return n;
+  }
+  uint32_t lastEchoSeq() const { return eseq_; }
 
   // Pings of `node` with seq > since, oldest first. Returns the count written to out.
   uint16_t pingsSince(uint8_t node, uint32_t since, const StoredPing** out, uint16_t max) const {
@@ -307,6 +330,9 @@ class SonarStore : public SonarSink {
   uint8_t hn_[MAXN], hh_[MAXN];
   uint16_t head_, count_;
   uint32_t seq_;
+  StoredEcho ering_[ECHO_RING];   // D93: 48 x 68 B = 3.3 kB
+  uint8_t ehead_, ecount_;
+  uint32_t eseq_;
 };
 
 }  // namespace sonar

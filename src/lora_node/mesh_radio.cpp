@@ -1569,7 +1569,34 @@ String meshSonarListJson() {
 
 // {"node":N,"last":seq,"pings":[[seq,index,bottom,[[track,depth,strength,width],..],[[bin,level],..],hard,nf_neg,
 //                                 [[track,flick_q,spread_q,elen,mature],..]],..]}   (see sonar_codec.h for units)
-String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool lite) {
+// D93: the echogram lines of `node` newer than `since` as [seq, index, nf_neg, "122 hex nibbles"] (newest `max` of them)
+static void appendEchoJson(String& s, uint8_t node, uint32_t since, uint8_t max) {
+  static sonar::StoredEcho copy[16];
+  uint16_t n = 0; uint32_t last = 0;
+  if (max > 16) max = 16;
+  {
+    Lock l;
+    const sonar::StoredEcho* ptr[48];
+    n = g_sonar->echoSince(node, since, ptr, 48);
+    const uint16_t skip = n > max ? static_cast<uint16_t>(n - max) : 0;
+    for (uint16_t i = skip; i < n; i++) copy[i - skip] = *ptr[i];
+    n = static_cast<uint16_t>(n - skip);
+    last = g_sonar->lastEchoSeq();
+  }
+  s += ",\"elast\":"; s += last; s += ",\"echo\":[";
+  static const char H[] = "0123456789ABCDEF";
+  for (uint16_t i = 0; i < n; i++) {
+    char b[40]; snprintf(b, sizeof(b), "%s[%lu,%u,%u,\"", i ? "," : "", static_cast<unsigned long>(copy[i].seq), copy[i].e.index, copy[i].e.nf_neg);
+    s += b;
+    char cells[sonar::ECHO_CELLS + 1];
+    for (uint8_t c = 0; c < sonar::ECHO_CELLS; c++) cells[c] = H[sonar::echoCell(copy[i].e, c)];
+    cells[sonar::ECHO_CELLS] = 0;
+    s += cells; s += "\"]";
+  }
+  s += "]";
+}
+
+String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool lite, bool with_echo, uint32_t echo_since) {
   String s;
   if (g_sonar == nullptr) return F("{\"pings\":[]}");
   if (max_pings > 64) max_pings = 64;
@@ -1585,7 +1612,7 @@ String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool 
     n = static_cast<uint16_t>(n - skip);
     last = g_sonar->lastSeq();
   }
-  s.reserve(80 + n * (lite ? 130 : 260));
+  s.reserve(80 + n * (lite ? 130 : 260) + (with_echo ? 16 * 150 : 0));
   s = "{\"node\":"; s += node; s += ",\"last\":"; s += last; s += ",\"pings\":[";
   for (uint16_t i = 0; i < n; i++) {
     const sonar::Ping& p = copy[i].p;
@@ -1610,7 +1637,9 @@ String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool 
     }
     s += "]]";
   }
-  s += "]}";
+  s += "]";
+  if (with_echo) appendEchoJson(s, node, echo_since, 16);   // D93
+  s += "}";
   return s;
 }
 

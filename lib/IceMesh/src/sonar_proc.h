@@ -52,13 +52,14 @@ class SonarProc {
   Params prm;               // knobs (sonar_params.h); defaults = prototype
   sreal pulse_m = R(0.0561); // D57: ping length in range (c * cycles / f / 2), set by the caller per ping
   sreal dt = R(0.25);       // s between processed pings (prototype 4/s); the caller sets it when the rate changes
-  enum { RING_LEARN = 40, RING_ALARM_PINGS = 8 };
+  sreal gateScale() const { const sreal k = dt / sp::DT(); return k < R(1) ? R(1) : (k > R(8) ? R(8) : k); }   // D91: 1 at 4 pings/s, 4 at 1 ping/s
+  enum { RING_LEARN = 40, RING_ALARM_PINGS = 8, COVER_PINGS = 240, EARLY_COVER_PINGS = 12 };   // D89: a still near-bottom echo is "cover" after 240 pings (1 min at 4/s), not 30
   static sreal ringAlarmExtra() { return R(0.15); }   // m longer than normal (est., re-check on real ice)
 
   SonarProc() { reset(); }
   void reset() {
     have_bottom_ = have_nf_ = have_hi_ = have_ratio_ = have_tail_ = have_static_ = false;
-    bottom_ = nf_ = hi_ = ratio_ = tail_ = R(0); bj_ = 0; n_tracks_ = 0; nid_ = 1;
+    bottom_ = nf_ = hi_ = ratio_ = tail_ = R(0); bj_ = 0; n_tracks_ = 0; nid_ = 1; ping_n_ = 0; bait_id_ = 0;
     ring_n_ = 0; ring_run_ = 0; ring_base_ = R(0); rot_mask_ = 0; hist_n_ = 0;
   }
 
@@ -66,6 +67,7 @@ class SonarProc {
   void step(const uint8_t codes[sp::NFREQ][BINS], uint8_t nfreq, Out& out) {
     using namespace sp;
     Scratch& S = scratch();
+    ping_n_++;
     float* d = S.d; float* lin = S.lin; float* c = S.c; float* sm = S.sm;
     for (int f = 0; f < NFREQ; f++) for (int i = 0; i < N; i++) S.D[f][i] = codeToDb(codes[f < nfreq ? f : 0][i]);
     if (nfreq >= 3) {
@@ -86,7 +88,10 @@ class SonarProc {
       uint8_t* raw = S.mask;   // scratch: this ping before filtering, as codes (history kept in codes: 2 x 488 B)
       for (int i = 0; i < N; i++) raw[i] = dbToCode(d[i]);
       if (prm[P_SPIKE_DB] && hist_n_ >= 2) {
-        const int W = std::max(1, roundi(R(prm[P_GATE_CM] / 100.0) / BIN_M()));
+        // D91: the gate knob is cm per 250 ms tick; at the idle rate (1 ping/s) a ping is 4 ticks, so the window
+        // scales with dt. Before, W stayed 32 cm per PING: at 1 ping/s anything moving faster than 0.32 m/s (a jigged
+        // lure, a cruising fish, the spoon in the drum) was "another sonar's ping" and ERASED before any detection.
+        const int W = std::max(1, roundi(R(prm[P_GATE_CM] / 100.0) * gateScale() / BIN_M()));
         const uint8_t X = static_cast<uint8_t>(std::min(255, roundi(R(prm[P_SPIKE_DB]) / Q())));
         for (int i = 0; i < N; i++) {
           // reference = what was there in BOTH previous pings (max over +-W bins, then the smaller of the 2 pings):
@@ -105,8 +110,26 @@ class SonarProc {
       memcpy(h2_, h1_, BINS); memcpy(h1_, raw, BINS); if (hist_n_ < 2) hist_n_++;
     }
 
+    // D90: where the ring-down ends on THIS ping: the first bin at the noise floor + 10 dB, or the first rise of 3 dB
+    // over the previous 3 bins (an echo). The reference floor is the learned one, or on the first ping the mean of
+    // the last 40 bins. The bottom search and the target window both start past it: with bmin / dead inside the
+    // ring-down (Shallow and Bucket presets in the 0.8 m drum, 32-cycle ring-down to 0.55 m) the strongest window
+    // WAS the ring-down itself: bottom = bmin, no water column left and nothing could ever be a target.
+    int rEnd = 1;
+    {
+      sreal ref = nf_;
+      if (!have_nf_) { sreal w = R(0); for (int i = N - 40; i < N; i++) w += static_cast<sreal>(d[i]); ref = w / R(40); }
+      const int rMax = std::min(N - 1, roundi(R(1.0) / BIN_M()));   // never past 1 m (measured ring-down 0.33-0.55 m): a bad floor estimate must not push the bottom search past a shallow bottom
+      while (rEnd < rMax && static_cast<sreal>(d[rEnd]) > ref + R(10)) {
+        if (rEnd >= 3) {
+          const sreal back = std::max(static_cast<sreal>(d[rEnd - 1]), std::max(static_cast<sreal>(d[rEnd - 2]), static_cast<sreal>(d[rEnd - 3])));
+          if (static_cast<sreal>(d[rEnd]) > back + R(3)) break;
+        }
+        rEnd++;
+      }
+    }
     // Bottom: strongest 8-bin energy window, then walk back to the onset
-    const int b0 = roundi(R(prm[P_BOTTOM_MIN] / 10.0) / BIN_M());   // default 6 -> 0.6 m (prototype)
+    const int b0 = std::min(N - 10, std::max(roundi(R(prm[P_BOTTOM_MIN] / 10.0) / BIN_M()), rEnd));   // default 6 -> 0.6 m (prototype)
     sreal e = R(0); int best = b0; sreal bestE = R(-1);
     for (int i = b0; i < b0 + 8; i++) e += static_cast<sreal>(lin[i]);
     for (int i = b0; i + 8 < N; i++) { if (e > bestE) { bestE = e; best = i; } e += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }
@@ -121,7 +144,10 @@ class SonarProc {
         for (int i = b0; i < b0 + 8; i++) e2 += static_cast<sreal>(lin[i]);
         for (int i = b0; i + 8 < N; i++) {
           const bool local = i > b0 && i + 9 < N && e2 >= static_cast<sreal>(lin[i - 1]) + e2 - static_cast<sreal>(lin[i + 7]);
-          if (local && std::abs(i - best) > 8 && e2 > altE && R(10) * std::log10(std::max(e2, R(1e-20))) > bestDb - R(12) && secondEcho(lin, i, N)) { altE = e2; alt = i; }
+          // D92: a candidate at half the strongest window's depth has a 'second echo' that IS the strongest window (a lure or a
+          // fish at mid-water over a bottom with a weak second echo): such a candidate never replaces the bottom
+          const bool halfOfBest = std::abs(2 * i - best) <= 12;
+          if (local && !halfOfBest && std::abs(i - best) > 8 && e2 > altE && R(10) * std::log10(std::max(e2, R(1e-20))) > bestDb - R(12) && secondEcho(lin, i, N)) { altE = e2; alt = i; }
           e2 += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]);
         }
         if (alt >= 0) best = alt;
@@ -150,7 +176,7 @@ class SonarProc {
     // Noise floor: median of the quiet water below the bottom
     int a = bI + roundi(R(0.9) / BIN_M()), z = std::min(N, 2 * bI - roundi(R(0.4) / BIN_M()));
     int na = 0;
-    if (z - a < 30 && bI + 30 < N) { a = N - 40; z = N; }   // shallow: the far range is quiet water
+    if (z - a < 30 && bI + 61 < N) { a = N - 40; z = N; }   // shallow: the far range is quiet water (D92: 61 = echo 21 bins + the 40-bin window, so a bottom at 11.1-11.4 m takes the D47 path instead of its own echo)
     if (z - a < 30) {
       // D47: bottom near the end of the range (deep hole): no water below it in the record. Take the
       // quietest 40-bin stretch between the dead zone and the bottom instead of the bottom echo itself.
@@ -182,7 +208,7 @@ class SonarProc {
     sm[0] = c[0]; sm[N - 1] = c[N - 1];
     for (int i = 1; i < N - 1; i++) sm[i] = static_cast<float>((static_cast<sreal>(c[i - 1]) + static_cast<sreal>(c[i]) + static_cast<sreal>(c[i + 1])) / R(3));
     Peak* pk_ = S.peaks; int np = 0; uint16_t long_echoes = 0;
-    const int i0 = std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M())), i1 = bI - 5;
+    const int i0 = std::max(std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M())), rEnd), i1 = bI - 5;   // D90: past the ring-down too
     for (int i = i0; i < i1; i++) {
       if (!(sm[i] >= sm[i - 1] && sm[i] > sm[i + 1])) continue;
       const sreal snr = static_cast<sreal>(d[i]) - nf; if (snr < R(prm[P_SNR_DB])) continue;
@@ -225,7 +251,7 @@ class SonarProc {
     int nfresh = 0;
     for (int i = 0; i < np; i++) {
       const Peak& p = pk_[i];
-      int bt = -1; sreal bd = R(prm[P_GATE_CM] / 100.0);
+      int bt = -1; sreal bd = R(prm[P_GATE_CM] / 100.0) * gateScale();   // D91: per tick, scaled to the ping interval
       for (int k = 0; k < n_tracks_; k++) {
         if (used[k]) continue;
         const Track& T = tracks_[k];
@@ -240,7 +266,7 @@ class SonarProc {
         const uint32_t id = nid_++;
         if (n_tracks_ + nfresh < MAX_TRACKS) {
           Track& T = S.fresh[nfresh++];
-          T.id = id; T.depth = p.depth; T.vel = R(0); T.age = 1; T.miss = 0; T.hn = 0; T.hh = 0; T.label = LBL_FISH;
+          T.id = id; T.depth = p.depth; T.vel = R(0); T.age = 1; T.miss = 0; T.hn = 0; T.hh = 0; T.label = LBL_FISH; T.early = ping_n_ <= 2 ? 1 : 0;
           T.push(p);
         }
       }
@@ -250,10 +276,17 @@ class SonarProc {
     for (int k = 0; k < n_tracks_; k++) if (tracks_[k].miss <= prm[P_KEEP]) { if (w != k) tracks_[w] = tracks_[k]; w++; }
     for (int k = 0; k < nfresh && w < MAX_TRACKS; k++) tracks_[w++] = S.fresh[k];
     n_tracks_ = w;
-    for (int k = 0; k < n_tracks_; k++) tracks_[k].label = labelOf(tracks_[k]);
+    assignLabels();   // D92: one bait track with hysteresis, the rest by position
 
     // Static scene, learned everywhere except around tracked targets
-    if (!have_static_) { for (int i = 0; i < N; i++) { static_[i] = d[i]; sig_[i] = 4.0f; } have_static_ = true; }
+    // D90: the water column of the first ping is NOT the static scene: anything there at start-up (weeds, or a fish, or
+    // the test target already in the drum) starts as "changed" and is shown; a still echo becomes cover after
+    // COVER_PINGS and is learned into the scene then. Before: static = the first ping, so an object present at
+    // start-up could never be sent (near-bottom targets need binChanged) and only ever showed as green background.
+    if (!have_static_) {
+      for (int i = 0; i < N; i++) { static_[i] = (i >= i0 && i < i1) ? static_cast<float>(std::min(static_cast<sreal>(d[i]), nf + R(3))) : d[i]; sig_[i] = 2.5f; }   // D90: 2.5 dB start (was 4): the "changed" gate then opens ~10 dB over the scene, like the snr knob over the floor
+      have_static_ = true;
+    }
     uint8_t* mask = S.mask; memset(mask, 0, N);
     for (int k = 0; k < n_tracks_; k++) {
       const Track& T = tracks_[k];
@@ -351,6 +384,7 @@ class SonarProc {
 
   // Per-bin results of the last step() of ANY SonarProc (shared scratch): read right after step().
   static const float* binValue() { return scratch().vpix; }    // live echo, prototype colour scale 0..1
+  static const float* binDb() { return scratch().d; }          // D93: this ping in dB (after the spike filter), for the echogram line
   static const float* binStatic() { return scratch().bgv; }    // learned static scene (grey) 0..1
   static const float* binChanged() { return scratch().al; }    // 0..1: live echo differs from the static scene
 
@@ -359,6 +393,7 @@ class SonarProc {
   struct Hist { sreal depth, s, width, v; float f0, f2; };
   struct Track {
     uint32_t id; sreal depth, vel; uint32_t age; uint8_t miss, hn, hh, label;
+    uint8_t early;   // D92: born on one of the first 2 pings (was in the water at start-up: a rock or weed, cover soon)
     Hist h[HIST];
     void push(const Peak& p) {
       Hist& x = h[hh]; x.depth = p.depth; x.s = p.s; x.width = p.width; x.v = p.v; x.f0 = p.f0; x.f2 = p.f2;
@@ -421,12 +456,37 @@ class SonarProc {
     for (int i = 1; i < n; i++) { const sreal v = w[i]; int j = i - 1; while (j >= 0 && w[j] > v) { w[j + 1] = w[j]; j--; } w[j + 1] = v; }
     return n ? w[n >> 1] : R(0);
   }
+  // D92: labels. The bait is ONE track: the one already labelled bait keeps the label while it lives and stays within
+  // 0.5 m of the bait depth (a jig stroke does not turn the lure into a fish); when there is none, the track nearest
+  // the bait depth inside 0.32 m, after 4 pings, becomes it. Every other track in the bait window is a FISH (before:
+  // any track within 0.32 m was "the bait", so a fish arriving AT the lure was relabelled bait and the near-bait alarm
+  // went quiet at the moment it mattered). Near-bottom: a still echo is cover after COVER_PINGS (D89), or after 12
+  // pings when the track was there from the first pings (a rock or weed top at start-up: it comes back as a target
+  // the moment it moves, since its old spot is then in the learned scene and the new one is "changed").
+  void assignLabels() {
+    int bait = -1;
+    if (bait_m > R(0)) {
+      for (int k = 0; k < n_tracks_; k++) if (bait_id_ && tracks_[k].id == bait_id_ && std::fabs(tracks_[k].depth - bait_m) < R(0.5)) bait = k;
+      if (bait < 0) {
+        sreal best = R(0.32);
+        for (int k = 0; k < n_tracks_; k++) {
+          const Track& T = tracks_[k];
+          const sreal dd = std::fabs(T.depth - bait_m);
+          if (dd < best && T.age >= 4 && T.hn >= 4 && spread(T) < R(2.5)) { best = dd; bait = k; }
+        }
+      }
+    }
+    bait_id_ = bait >= 0 ? tracks_[bait].id : 0;
+    for (int k = 0; k < n_tracks_; k++) tracks_[k].label = k == bait ? static_cast<uint8_t>(LBL_BAIT) : labelOf(tracks_[k]);
+  }
   uint8_t labelOf(const Track& T) const {
     const int n = T.hn < 30 ? T.hn : 30;
     sreal lo = R(1e30), hi = R(-1e30);
     for (int k = 0; k < n; k++) { const sreal dd = T.back(k).depth; if (dd < lo) lo = dd; if (dd > hi) hi = dd; }
-    if (bait_m > R(0) && std::fabs(T.depth - bait_m) < R(0.32) && T.age >= 4 && T.hn >= 4 && spread(T) < R(2.5)) return LBL_BAIT;
-    if (T.depth > bottom_ - R(0.5)) return (T.age > 30 && hi - lo < R(0.06)) ? LBL_COVER : LBL_NEAR_BOTTOM;
+    if (T.depth > bottom_ - R(0.5)) {
+      const uint32_t still_for = T.early ? EARLY_COVER_PINGS : COVER_PINGS;
+      return (T.age > still_for && hi - lo < R(0.06)) ? LBL_COVER : LBL_NEAR_BOTTOM;
+    }
     return LBL_FISH;
   }
 
@@ -436,6 +496,8 @@ class SonarProc {
   Track tracks_[MAX_TRACKS];
   int n_tracks_;
   uint32_t nid_;
+  uint32_t ping_n_;         // D92: pings since reset()
+  uint32_t bait_id_;        // D92: the track that IS the bait (0 = none)
   float static_[BINS], sig_[BINS];
   uint16_t ring_n_; uint8_t ring_run_; sreal ring_base_;
   uint8_t rot_[sp::NFREQ][BINS]; uint8_t rot_mask_;

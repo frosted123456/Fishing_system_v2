@@ -3039,7 +3039,6 @@ static const SweepStep SWEEP[] = {
 };
 static const uint8_t SWEEP_N = sizeof(SWEEP) / sizeof(SWEEP[0]), SWEEP_PINGS = 6;
 static int8_t g_sweepStep = -1; static uint8_t g_sweepPings = 0; static uint8_t g_sweepSaved[icemesh::sonar::P_COUNT];
-static bool g_sweepRestore = false;
 static void recLine(const char* line, bool force = false) {   // one recording line to every active sink
   if (sonarRec || force) Serial.println(line);
   #if SONAR_REAL
@@ -3171,8 +3170,11 @@ static void recRaw(const tuss::PingInfo& pi, bool force) {
 }
 static void sweepApply(int8_t step) {   // one step's knob (restoring the previous step's first), NOTE, counters
   // every step starts from the saved set, so the steps are independent (gain 3 does not keep cycles 32)
-  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (sonarPrm[i] != g_sweepSaved[i]) sonarKnobSet(i, g_sweepSaved[i]);
-  if (step >= 0 && step < (int8_t)SWEEP_N && SWEEP[step].knob >= 0) sonarKnobSet((uint8_t)SWEEP[step].knob, SWEEP[step].val);
+  // D92: RAM only. sonarKnobSet() saves to NVS and sends to the holes: a crash mid-sweep left the step's knob (cycles 32
+  // on 2026-11-04) as the saved default. The sweep's own steps never touch the saved set now.
+  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (sonarPrm[i] != g_sweepSaved[i]) sonarPrm.set(i, g_sweepSaved[i]);
+  if (step >= 0 && step < (int8_t)SWEEP_N && SWEEP[step].knob >= 0) sonarPrm.set((uint8_t)SWEEP[step].knob, SWEEP[step].val);
+  sonarPrmGen++;
   if (sonarReal) sonarReal->proc.prm = sonarPrm;
   g_sweepStep = step; g_sweepPings = 0;
   char t[96];
@@ -3338,8 +3340,9 @@ static void sonarRealTick(bool focus) {
   const uint32_t t0 = micros();
   tuss::PingInfo pi;
   if (tuss::ping(sonarPrm, focus, codes, pi)) {
-    icemesh::sonar::Block out[2];
-    const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 2);
+    icemesh::sonar::Block out[4];   // D93: DATA + BG + BASE + ECHO can coincide on one ping
+    sonarReal->echo_on = meshFocusNode() == NODE_ID;   // D93: raw lines for THE focus hole only, not the 'live too' extras (66 B/s each)
+    const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 4);
     for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     static uint32_t recCount = 0; static unsigned long lastRaw = 0;   // D87 recorder
     if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecordLine(codes, pi); recPingX(pi, sonarReal->lastProc()); sweepOnPing(); }
@@ -3406,8 +3409,9 @@ void sonarHubLoop() {
     if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
     while (millis() - ownTick >= 250UL) {
       ownTick += 250UL;
-      icemesh::sonar::Block out[2];
-      const uint8_t n = ownSonar->tick(ownFocus, out, 2);
+      icemesh::sonar::Block out[4];
+      ownSonar->echo_on = focus == NODE_ID;   // D93
+      const uint8_t n = ownSonar->tick(ownFocus, out, 4);
       for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     }
   }
@@ -3486,10 +3490,11 @@ void sonarHubLoop() {
   while (budget-- && millis() - lastTick >= 250UL) {               // 4 pings/s per virtual node
     lastTick += 250UL;
     for (uint8_t k = 0; k < activeVirt; k++) {
-      icemesh::sonar::Block out[2];
+      icemesh::sonar::Block out[4];
       const uint32_t t0 = micros();
       if (!(hubHoleSim(sonarVirt[k].node()) & MESH_SIM_SONAR)) continue;
-      const uint8_t n = sonarVirt[k].tick(meshIsFocus(sonarVirt[k].node()), out, 2);
+      sonarVirt[k].echo_on = focus == sonarVirt[k].node();   // D93: the demo's focus hole too
+      const uint8_t n = sonarVirt[k].tick(meshIsFocus(sonarVirt[k].node()), out, 4);
       const uint32_t dt = micros() - t0;
       if (dt > sonarTickUsMax) sonarTickUsMax = dt;
       sonarTickUsSum += dt; sonarTickCount++;

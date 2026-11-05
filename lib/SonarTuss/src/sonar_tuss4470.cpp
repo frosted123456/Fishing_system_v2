@@ -361,7 +361,7 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   writeReg(0x1B, 0x00);
   const size_t n = got / 2;
   g_raw_n = 0;
-  if (n < 200) return false;
+  if (n < 200 || timeout || n + 64 < want) return false;   // D92: a short capture leaves bins at -100 dB and poisons the noise floor: drop it
   g_raw_n = n; g_raw_hz = hz;
   // I2S-ADC quirk on the classic ESP32: samples come in swapped pairs; 12 data bits, channel in the top 4
   uint16_t mx = 0;
@@ -392,7 +392,7 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   writeReg(0x1B, 0x00);
   const size_t n = got;
   g_raw_n = 0;
-  if (n < 200) return false;
+  if (n < 200 || fail || n + 64 < want) return false;   // D92: a short capture leaves bins at -100 dB and poisons the noise floor: drop it
   g_raw_n = n; g_raw_hz = hz;
   uint16_t mx = 0;   // 12-bit data already unpacked; no pair swap on the S3
   for (size_t i = 0; i < n; i++) { g_raw[i] = cal(g_raw[i] & 0x0FFF); if (g_raw[i] > mx) mx = g_raw[i]; }

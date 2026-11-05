@@ -408,7 +408,7 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 | Follow the action | On by default. The live view goes to the hole with the most action. FISH ON wins for 2 min. Up to 2 more holes stream at the same time when the radio has room ("LIVE too") |
 | Hole cards on top | Every sonar hole with its water-column preview. Tap one to watch it live; your pick stays 5 min, then Follow takes over again |
 | Flasher | Live, about 1 s behind. Pause to freeze |
-| Last 60 seconds | Waterfall, 4 pings per second |
+| Last 60 seconds | Waterfall, 4 pings per second. With **Raw echogram** on (Display, default on), the hole you watch also sends its raw ping once a second (10 cm cells, 4 dB steps over the noise floor) and the waterfall shows it underneath the detector's marks, like a flasher: an echo the detector did not report is still visible. Off: only what the detector reported |
 | ft / m | Depth units on this phone |
 | Display | Depth scale, colour gain, weak echoes |
 | Processing | Noise filter, water type (lake / shallow / bucket), Advanced, Defaults, Send to holes again |

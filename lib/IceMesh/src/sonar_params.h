@@ -68,7 +68,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"},
     {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
     {"avg", "Bursts averaged", 1, 4, 2, "per ping"},
-    {"freq", "Frequency mode", 0, 2, 0, "0 3/ping 1 rot 2 200k"},
+    {"freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"},
     {"sound", "Sound speed", 0, 255, 53, "+1350 m/s"},
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
     {"thresh", "Edge threshold", 0, 15, 7, "reg 0x17"},
@@ -80,6 +80,14 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"echolen", "Max fish echo length", 0, 60, 30, "x0.1 ping (0 off)"},
   };
   return T[id < P_COUNT ? id : 0];
+}
+
+// D95: the default a knob had in firmware that saved knobs WITHOUT the defaults record ("d", up to D94): a saved value
+// equal to it was never set by hand and follows the new default on the first boot. Only the knobs whose default changed.
+inline uint8_t paramLegacyDefault(uint8_t id) {
+  if (id == P_FREQ_MODE) return 0;      // D94: 2
+  if (id == P_DEADZONE_DM) return 9;    // D88: 5
+  return paramInfo(id).def;
 }
 
 struct Params {

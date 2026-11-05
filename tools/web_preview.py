@@ -140,7 +140,7 @@ class H(BaseHTTPRequestHandler):
                "on": n["sim"], "virtual": n["id"] >= 128} for n in status()["nodes"]]
         return {"virtual": state["sim"], "rate": state["simrate"], "all": -1, "holes": hs}
 
-    def pings(self, node, since, mx):
+    def pings(self, node, since, mx, echo_since=None):
         """Pings of one hole newer than `since` (the preview streams the focus hole only; the others answer empty)."""
         k = now_index(); out = []
         if node == frames[0]["list"]["focus"]:
@@ -148,7 +148,28 @@ class H(BaseHTTPRequestHandler):
                 out += [p for p in f["pings"] if p[0] > since]
             if k < 2: out = list(frames[k]["pings"])
         out = out[-mx:]
-        return {"node": node, "last": out[-1][0] if out else since, "pings": out}
+        r = {"node": node, "last": out[-1][0] if out else since, "pings": out}
+        if echo_since is not None:   # D93: one synthetic echogram line per 4 pings, from the ping's bottom / targets
+            lines = []
+            for p in out:
+                if p[1] % 4: continue
+                cells = [0] * 122
+                for c in range(5): cells[c] = max(0, 15 - 3 * c)                # ring-down (~0.5 m)
+                if p[2] < 2047:
+                    b = p[2] // 10
+                    for c in range(b, min(122, b + 3)): cells[c] = 15 - 2 * (c - b)   # bottom + tail
+                    for c in range(b + 3, min(122, b + 9)): cells[c] = max(0, 8 - (c - b - 3))
+                for t in p[3]:
+                    c = t[1] // 10
+                    if 0 <= c < 122: cells[c] = max(cells[c], 6 + t[2] * 9 // 31); 
+                    if 0 <= c + 1 < 122: cells[c + 1] = max(cells[c + 1], 4)
+                import random
+                rnd = random.Random(p[0])
+                cells = [min(15, v + (1 if rnd.random() < 0.08 else 0)) for v in cells]
+                lines.append([p[0], p[1], 90, "".join("0123456789ABCDEF"[v] for v in cells)])
+            lines = [l for l in lines if l[0] > echo_since][-16:]
+            r["elast"] = lines[-1][0] if lines else echo_since; r["echo"] = lines
+        return r
 
     def body(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
@@ -169,7 +190,7 @@ class H(BaseHTTPRequestHandler):
             if "nodes" in q:   # D82: several holes in one answer
                 ns = [int(x) for x in q["nodes"][0].split(",") if x]; ss = [int(x) for x in q.get("since", [""])[0].split(",") if x]
                 return self.send(200, json.dumps({"nodes": [self.pings(n, ss[i] if i < len(ss) else 0, int(q.get("max", ["40"])[0])) for i, n in enumerate(ns[:3])]}))
-            return self.send(200, json.dumps(self.pings(int(q.get("node", ["0"])[0]), int(q.get("since", ["0"])[0]), int(q.get("max", ["40"])[0]))))
+            return self.send(200, json.dumps(self.pings(int(q.get("node", ["0"])[0]), int(q.get("since", ["0"])[0]), int(q.get("max", ["40"])[0]), int(q["echo"][0]) if "echo" in q else None)))
         if u.path == "/api/sonar/glance":
             return self.send(200, json.dumps(glance(int(q.get("since", ["0"])[0]))))
         if u.path == "/api/wifi":   # D86: Wi-Fi tab
