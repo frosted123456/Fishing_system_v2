@@ -325,7 +325,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
     <div class="legend">
       <span><i style="background:#8FA9B2"></i><i class="sw" style="background:#9A8F7A"></i>Lake bed <i class="sw" style="background:#6FA868"></i>Weeds, structure (still)</span>
-      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong (raw echogram on: every echo, 0-60 dB over the floor)</span>
+      <span><i style="background:linear-gradient(90deg,#1B7778,#58AE7C,#D3C04A,#EE8B2F,#D8432F)"></i>Echoes that changed, weak to strong (raw echogram on: every echo above the "Weak echoes" level, full colour at 40 dB over the floor; grey band = blind zone, dimmed below the bottom)</span>
       <span><i style="background:#C9A25C;height:3px"></i>Bottom line</span>
     </div>
   </section>
@@ -354,12 +354,12 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <ul class="toggles" id="vknobs">
       <li><span class="name">Depth scale</span><select id="vDepth" aria-label="Depth scale"></select><span class="desc">Auto follows the bottom; a fixed scale zooms on the top of the water.</span></li>
       <li><span class="name">Colour gain</span><input type="range" id="vGain" min="-6" max="6" step="1" aria-label="Colour gain"><span class="desc">Brighter or darker echoes on this screen only.</span></li>
-      <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only.</span></li>
+      <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only. Raw echogram: water is anything under 4 / 8 / 12 / 20 dB over the noise floor; full colour at 40 dB.</span></li>
     </ul>
     <details class="knobs"><summary>Processing on the holes (every sonar hole)</summary>
       <ul class="toggles">
         <li><span class="name">Noise filter</span><div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High</button></div><span class="desc">Low shows more (and more junk), High shows only clear echoes. Start Normal.</span></li>
-        <li><span class="name">Water</span><div class="seg" role="group" aria-label="Water depth" id="kWater"><button type="button" data-water="lake">Lake</button><button type="button" data-water="shallow">Shallow (under 2 m)</button><button type="button" data-water="bucket">Bucket test</button></div><span class="desc">Where the bottom is looked for and how close to the transducer echoes count.</span></li>
+        <li><span class="name">Water</span><div class="seg" role="group" aria-label="Water depth" id="kWater"><button type="button" data-water="lake">Lake</button><button type="button" data-water="shallow">Shallow (under 2 m)</button><button type="button" data-water="bucket">Barrel test (under 1.2 m)</button></div><span class="desc">Where the bottom is looked for and how close to the transducer echoes count.</span></li>
       </ul>
       <label class="tog" style="margin:8px 0"><input type="checkbox" id="kAdv"> Advanced (all 22 settings)</label>
       <ul class="toggles" id="knobs" hidden></ul>
@@ -533,6 +533,15 @@ function VD() {   // depth shown (m): fixed, or auto = recent bottom + 20 % (+0.
 }
 const ROWS = () => Math.min(N, Math.ceil(VD() / BIN));
 const WT = [0, 0.12, 0.25, 0.4];   // hide echoes weaker than this (display value 0..1)
+// D101: raw echogram sensitivity, same "Weak echoes" select: cells at or below this level (4 dB each over the noise
+// floor) are water, not painted; the levels above are stretched over the whole palette so the floor (~40 dB) is
+// orange and the ring-down (60 dB) white. Show all 12 dB, hide faint 20, hide weak 28, strong only 36.
+const ETH = [1, 2, 3, 5];
+// D107: full colour at 40 dB over the floor (level 10), not 60 (15), like an EK500 (36 dB span) or a Garmin at normal
+// gain: a ball 25 dB over the floor was painted dark teal (40 % of a 60 dB scale) next to a 38 dB floor in orange,
+// so the one thing worth seeing looked like water. Now the ball is yellow-orange, the floor red-white.
+const ETOP = 10;
+let knobDeadM = 0.3;   // blind zone (dead knob, 0.1 m steps): the echogram is blanked there, it is the transmit ring-down
 const GAIN = () => Math.pow(1.15, vopt.gain || 0);
 const $ = id => document.getElementById(id);
 const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
@@ -566,8 +575,8 @@ const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true
 // D93: raw echogram lines of the focus hole, one per second: { i: ping index, nf: -dB, c: 122 hex cells (4-bit level over the floor, 4 dB each) }
 let echoes = [], echoSince = 0;
 window.suiteEchoCount = () => echoes.length;   // (preview / tests)
-function echoFor(idx) {   // the newest line at or before this ping (within 8 pings), else null
-  for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d < 8) return echoes[k]; if (d > 32768) continue; if (d >= 8) return null; }
+function echoFor(idx) {   // the newest line at or before this ping (within 16 pings = 4 s: a dropped line leaves no hole, D101), else null
+  for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d < 16) return echoes[k]; if (d > 32768) continue; if (d >= 16) return null; }
   return null;
 }
 let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting (Settings tab); 14° per the transducer listing
@@ -582,7 +591,10 @@ let selSlot = null, userPicked = false, playing = true;
 const fmtD = m => units === 'ft' ? (m * 3.28084).toFixed(1) + ' ft' : m.toFixed(2) + ' m';
 const fmtNum = m => units === 'ft' ? (m * 3.28084).toFixed(1) : m.toFixed(2);
 const nameOf = n => names[n] || ('Hole ' + n);
-function labelOf(t, bottom) { return t.slot === 0 ? 'At bait depth' : (bottom != null && t.d > bottom - 0.5 ? 'Near bottom' : 'Fish'); }
+// D103: same band as SonarProc::nearBottomBand(): 0.5 m on a lake, 0.3 x depth floored at 0.2 m in very shallow water
+// (a 0.7 m drum: 0.2 m), so a ball hung 0.25-0.45 m over the drum floor reads "Fish" here as the hub labels it.
+const nearBottomBand = bottom => Math.min(0.5, Math.max(0.2, 0.3 * bottom));
+function labelOf(t, bottom) { return t.slot === 0 ? 'At bait depth' : (bottom != null && t.d > bottom - nearBottomBand(bottom) ? 'Near bottom' : 'Fish'); }
 function toDb(s) { return 46 * Math.pow(s, 1 / 0.75); }   // approx. inverse of the prototype colour scale (46 dB span)
 
 /* ---------- Server ---------- */
@@ -605,9 +617,9 @@ function loadPings() {
     if (d.elast != null && d.elast < echoSince) { echoSince = 0; echoes = []; }
     const ne = d.echo || [];
     if (ne.length) {   // D93: new raw lines: the last columns are drawn again with them underneath
-      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: l[3] }); });
-      if (echoes.length > 120) echoes.splice(0, echoes.length - 120);
-      for (let k = Math.max(0, recs.length - 12); k < recs.length; k++) recs[k].px = null;
+      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0 }); });   // D112: k = cell size 10 / 5 / 2.5 cm
+      if (echoes.length > 260) echoes.splice(0, echoes.length - 260);   // D107: a line per ping on ESP-NOW: keep the whole 60 s waterfall
+      for (let k = Math.max(0, recs.length - 24); k < recs.length; k++) recs[k].px = null;
     }
   }).catch(() => {}).then(() => { pingBusy = false; });
 }
@@ -757,7 +769,13 @@ function pixels(rec) {
   const e = opts.echogram ? echoFor(rec.i) : null;
   for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv && !e) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? (i >= bedBin ? SEDIMENT : WEED) : PAL, BGV[l]); } }
   if (e) {   // D93: the raw ping underneath (10 cm cells, 4 dB per level over the floor), the marks on top
-    for (let c = 0; c < 122; c++) { const l = parseInt(e.c[c], 16) || 0; if (l <= 0) continue; const v = clamp((l / 15) * G, 0, 1); if (v < wt) continue; for (let k = 0; k < 4; k++) put(c * 4 + k, PAL, v); }
+    // D101: like a fish finder, not a heat map. Water = anything at or below the sensitivity level, left dark; the
+    // rest stretched over the palette; the blind zone (ring-down) a flat grey band; below the bottom echo dimmed so
+    // the second bottom echo (and a barrel's wall reverb) does not look like a fish.
+    const F = 4 >> (e.k || 0), CM = 0.025 * F;   // D112: bins per cell (4 / 2 / 1) and the cell size in m
+    const th = ETH[vopt.weak] || ETH[0], c0 = Math.round(knobDeadM / CM), cb = rec.b != null ? Math.ceil((rec.b + 0.1) / CM) : 122;
+    for (let i = 0; i < Math.min(N, Math.round(knobDeadM / BIN)); i++) { px[i * 4] = 36; px[i * 4 + 1] = 48; px[i * 4 + 2] = 54; }
+    for (let c = c0; c < 122; c++) { const l = parseInt(e.c[c], 16) || 0; if (l <= th) continue; const v = clamp(((l - th) / (ETOP - th)) * G * (c >= cb ? 0.45 : 1), 0, 1); for (let k = 0; k < F; k++) put(c * F + k, PAL, v); }
   }
   for (const r of rec.r) { const v = RV[r[1]]; if (v >= wt) put(r[0], PAL, v * G); }
   for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
@@ -984,7 +1002,7 @@ $('tlist').addEventListener('click', pickRow);
 
 /* ---------- Controls ---------- */
 const TOGGLES = [
-  ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second (10 cm cells, 4 dB per step over the noise floor): the waterfall shows it underneath the marks, like a flasher. Off: only what the detector reported.'],
+  ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second on LoRa, every ping on ESP-NOW (cells of 2.5 cm in a barrel, 5 cm to 6 m, 10 cm deeper, 4 dB per step over the noise floor): the waterfall shows it underneath the marks, like a fish finder. Water (under the "Weak echoes" level) stays dark, the blind zone is a grey band, below the bottom is dimmed. Off: only what the detector reported.'],
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
   ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
   ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
@@ -1023,13 +1041,13 @@ const KHELP = {
   confirm: ['Pings to confirm', 'An echo is reported after this many pings in a row. Higher = fewer flickers, slower.'],
   keep: ['Keep a lost fish for', 'Pings a fish stays on screen after its echo vanished.'],
   gate: ['Max move per ping', 'A fish moving more than this between pings becomes a new one.'],
-  dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: 0.5 m (ring-down measured 0.33 m, D88). Bucket: 0.1 m.'],
+  dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: 0.5 m (ring-down measured 0.33 m, D88). Barrel test: 0.3 m.'],
   bsmooth: ['Bottom line smoothing', 'Lower = steadier bottom line, slower to follow a real change.'],
   learn: ['Still-scene fading speed', 'How fast things that do not move (bed, weeds) fade to the muted colours.'],
   range: ['Colour range', 'Loudness span mapped to the colours. Smaller = more contrast.'],
   tvg: ['Deep echo boost', 'Boosts deeper echoes to make up for spreading. On for normal use.'],
   cycles: ['Ping length, overview', 'Longer ping = more energy, longer ringing. Base mode.'],
-  fcycles: ['Ping length, watching', 'Shorter ping = sharper detail while you watch one hole.'],
+  fcycles: ['Ping length, watching', 'Longer ping = stronger echoes (07nov sweep: 8 -> 32 cycles = +11 dB), shorter = sharper detail. Default 32.'],
   gain: ['Receiver gain', '0-3 = 10 / 12.5 / 15 / 20x. Lower if the bench line says CLIPPED.'],
   pinghz: ['Ping rate when busy', 'Pings per second (x0.25) while fish are around or you watch the hole.'],
   idlehz: ['Ping rate when quiet', 'Pings per second (x0.25) when nothing is in the water. Lower saves battery.'],
@@ -1038,27 +1056,31 @@ const KHELP = {
   sound: ['Speed of sound', '1350 + value m/s. 53 = 1403 m/s, fresh water near 0 C.'],
   bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
   thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
-  bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; bucket: just past the ringing.'],
+  drive: ['Drive stage', '0 = the TUSS4470 drives the transducer itself (shield, pod as ordered). 1 = transformer: only with the transformer parts fitted on the pod v0.8 (docs: TRANSFORMER_200K.md); a direct-drive board pings nothing in this mode.'],
+  ftrim: ['Burst frequency', 'Ping frequency, 180 + this value in kHz (20 = 200 kHz). The bench page Tune button measures the best one for your transducer.'],
+  bmax: ['Look for the bottom above', 'The bottom is searched shallower than this (x0.1 m, 0 = everywhere). Only for the barrel test: there the floor\'s second echo can be stronger than the floor itself (a lake never does that).'],
+  bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; barrel test: 0.2 m (the ring-down end found on each ping moves it deeper anyway).'],
   vdrv: ['Drive voltage', 'Transducer drive, volts (max 20). Must stay 1.5 V below the MT3608 setting (21.5 V for 20; the shield diode drops ~0.8 V).'],
   jitter: ['Ping timing jitter', 'Random wait (0 to this many ms) before each ping so neighbouring tip-ups never ping in step. Needed for the interference filter. 0 = off.'],
   spike: ['Interference filter', 'Removes a blip that appears on one ping only, at a depth where the two pings before were this much quieter (another tip-up\'s ping). Lower = removes more, may thin a fast fish. 0 = off.'],
   echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
-  vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench).'],
+  vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench). 2 = external drive supply on the VDRV pin (up to 36 V, only once that supply is wired: see SONAR_DRIVER.md, D108).'],
 };
-const WATER = { lake: { dead: 5, bmin: 6 }, shallow: { dead: 3, bmin: 2 }, bucket: { dead: 1, bmin: 1 } };
+const WATER = { lake: { dead: 5, bmin: 6, bmax: 0, gain: 3 }, shallow: { dead: 3, bmin: 2, bmax: 0, gain: 2 }, bucket: { dead: 3, bmin: 2, bmax: 12, gain: 2 } };   // D117: Lake = receiver gain 20 V/V (+2.2 dB SNR on the 07nov sweep; in the barrel it stretched the ring-down tail)   // D104: bucket = the barrel test, bottom under 1.2 m
 function renderKnobs() {
   if (!K) return;
   document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
   const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
   if (kv.cycles) dzK.cycles = kv.cycles; if (kv.sound != null) dzK.sound = kv.sound;
-  const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin) || null;
+  if (kv.dead != null && kv.dead * 0.1 !== knobDeadM) { knobDeadM = kv.dead * 0.1; recs.forEach(r => { r.px = null; }); }   // D101: blind band
+  const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin && WATER[w].bmax === (kv.bmax || 0) && WATER[w].gain === kv.gain) || null;
   document.querySelectorAll('#kWater [data-water]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.water === water)));
   $('knobs').hidden = !$('kAdv').checked;
   if (document.activeElement && document.activeElement.closest && document.activeElement.closest('#knobs')) return;
   $('knobs').innerHTML = K.knobs.map(k => { const h = KHELP[k.key] || [k.name, '']; return `<li><span class="name">${h[0]}</span><input type="number" data-knob="${k.key}" min="${k.lo}" max="${k.hi}" value="${k.v}" style="width:5.5em" aria-label="${h[0]}"><span class="desc">${h[1]} <i>${k.unit}${k.v !== k.def ? ' · default ' + k.def : ''}</i></span></li>`; }).join('');
 }
 $('kAdv').addEventListener('change', renderKnobs);
-$('kWater').addEventListener('click', e => { const b = e.target.closest('[data-water]'); if (!b) return; const w = WATER[b.dataset.water]; postKnobs({ key: 'dead', v: w.dead }).then(() => postKnobs({ key: 'bmin', v: w.bmin })); });
+$('kWater').addEventListener('click', e => { const b = e.target.closest('[data-water]'); if (!b) return; const w = WATER[b.dataset.water]; postKnobs({ key: 'dead', v: w.dead }).then(() => postKnobs({ key: 'bmin', v: w.bmin })).then(() => postKnobs({ key: 'bmax', v: w.bmax })).then(() => postKnobs({ key: 'gain', v: w.gain })); });
 function loadKnobs() { sfetch('/api/sonar/knobs').then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
 function postKnobs(o) { return sfetch('/api/sonar/knobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
 $('knobs').addEventListener('change', e => { const i = e.target.closest('[data-knob]'); if (i) postKnobs({ key: i.dataset.knob, v: +i.value }); });

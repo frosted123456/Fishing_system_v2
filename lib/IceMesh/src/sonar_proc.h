@@ -12,6 +12,9 @@
 #include <string.h>
 #include "sonar_scene.h"
 #include "sonar_params.h"
+#ifdef SONAR_DEBUG_BOTTOM
+#include <cstdio>   // host replay only (tools/sonar_chain.cpp): the bottom decision per ping on stderr
+#endif
 
 namespace icemesh {
 namespace sonar {
@@ -55,11 +58,29 @@ class SonarProc {
   sreal gateScale() const { const sreal k = dt / sp::DT(); return k < R(1) ? R(1) : (k > R(8) ? R(8) : k); }   // D91: 1 at 4 pings/s, 4 at 1 ping/s
   enum { RING_LEARN = 40, RING_ALARM_PINGS = 8, COVER_PINGS = 240, EARLY_COVER_PINGS = 12 };   // D89: a still near-bottom echo is "cover" after 240 pings (1 min at 4/s), not 30
   static sreal ringAlarmExtra() { return R(0.15); }   // m longer than normal (est., re-check on real ice)
+  // D103: the "near bottom" band (m above the detected bottom; a still echo inside it is cover after COVER_PINGS).
+  // Floor 0.2 m = the bottom echo's own extent above its onset (pulse 0.06-0.11 m at 16-32 cycles + onset +-2 bins
+  // + hard-bottom tail: the drum's bottom-tail track sits 0.16 m above the floor); slope 0.3 x depth = the room a
+  // sloped bottom (range spread ~2 d tan(beam) sin(slope) ~ 0.1 d) and bottom-hugging cover take under the beam
+  // footprint; cap 0.5 m = the D89 structure (weeds, rocks) margin. Any ice-fishing depth (> 1.7 m) keeps 0.5 m; a
+  // 0.7-0.9 m drum gets 0.2-0.27 m, so a ball hung 0.25-0.45 m over the floor is a FISH there as it would be on the
+  // lake (sent on every ping, never cover) instead of "near bottom" (cover after 12 / 240 pings, then never sent).
+  // The page's labelOf() (web/suite.html) applies the same band.
+  // D116: start from a bottom known from before (the firmware keeps the last steady one in NVS: same hole after a restart).
+  // The gate (D115) then holds it from the first ping when there is an echo there; 8 pings without one = free search.
+  // So a lure in the water at start-up cannot become the bottom, and a wrong seed (another hole) costs 2 s.
+  void seedBottom(sreal m) { if (m > R(0.1)) { bottom_ = m; have_bottom_ = true; gate_miss_ = 0; esc_ = 0; jump_ = false; } }
+  bool hasBottom() const { return have_bottom_; }
+  sreal lockedBottom() const { return bottom_; }
+  static sreal nearBottomBand(sreal bottom) {
+    const sreal b = R(0.3) * bottom;
+    return b < R(0.2) ? R(0.2) : (b > R(0.5) ? R(0.5) : b);
+  }
 
   SonarProc() { reset(); }
   void reset() {
     have_bottom_ = have_nf_ = have_hi_ = have_ratio_ = have_tail_ = have_static_ = false;
-    bottom_ = nf_ = hi_ = ratio_ = tail_ = R(0); bj_ = 0; n_tracks_ = 0; nid_ = 1; ping_n_ = 0; bait_id_ = 0;
+    bottom_ = nf_ = hi_ = ratio_ = tail_ = R(0); bj_ = 0; gate_miss_ = 0; esc_ = 0; jump_ = false; n_tracks_ = 0; nid_ = 1; ping_n_ = 0; bait_id_ = 0;
     ring_n_ = 0; ring_run_ = 0; ring_base_ = R(0); rot_mask_ = 0; hist_n_ = 0;
   }
 
@@ -116,45 +137,132 @@ class SonarProc {
     // ring-down (Shallow and Bucket presets in the 0.8 m drum, 32-cycle ring-down to 0.55 m) the strongest window
     // WAS the ring-down itself: bottom = bmin, no water column left and nothing could ever be a target.
     int rEnd = 1;
+    sreal floorRef = nf_;   // the floor as known so far: the learned one, or on the first ping the mean of the last 40 bins
+    if (!have_nf_) { sreal w = R(0); for (int i = N - 40; i < N; i++) w += static_cast<sreal>(d[i]); floorRef = w / R(40); }
     {
-      sreal ref = nf_;
-      if (!have_nf_) { sreal w = R(0); for (int i = N - 40; i < N; i++) w += static_cast<sreal>(d[i]); ref = w / R(40); }
-      const int rMax = std::min(N - 1, roundi(R(1.0) / BIN_M()));   // never past 1 m (measured ring-down 0.33-0.55 m): a bad floor estimate must not push the bottom search past a shallow bottom
+      const sreal ref = floorRef;
+      int rMax = std::min(N - 1, roundi(R(1.0) / BIN_M()));   // never past 1 m (measured ring-down 0.33-0.55 m): a bad floor estimate must not push the bottom search past a shallow bottom
+      // D104: no cap at the locked bottom any more (D102 had rMax = bI - 6): it fed back. A first bottom found in the tail
+      // (transducer in air or just dipped: nothing past the ring-down) pulled rEnd shallower, the next search started
+      // inside the ring-down, found the ring-down, and the bottom locked at bmin for good (bench 07nov: 0.10 m, 64 dB
+      // SNR, Bucket preset; Shallow crawled to 0.24 m then jumped to the multiple). The 6 dB rule below covers the slow edge.
+      // D102: the tail is a monotonic decay, so an echo also ends it when it climbs 6 dB over the LOWEST level seen so
+      // far (from bin 3): a floor edge that rises gradually (< 3 dB per bin: tilted face, wide echo) over a 19 V tail
+      // that never reaches floor + 10 dB before the floor walked THROUGH the floor echo to the 1 m cap, and the bottom
+      // search then started past the floor (replay of 07nov_29po with the tail 5 dB up and the edge spread over 8 bins).
+      sreal lowest = R(1e30);
       while (rEnd < rMax && static_cast<sreal>(d[rEnd]) > ref + R(10)) {
         if (rEnd >= 3) {
           const sreal back = std::max(static_cast<sreal>(d[rEnd - 1]), std::max(static_cast<sreal>(d[rEnd - 2]), static_cast<sreal>(d[rEnd - 3])));
           if (static_cast<sreal>(d[rEnd]) > back + R(3)) break;
+          if (static_cast<sreal>(d[rEnd]) > lowest + R(6)) break;
+          if (static_cast<sreal>(d[rEnd]) < lowest) lowest = d[rEnd];
         }
         rEnd++;
       }
     }
     // Bottom: strongest 8-bin energy window, then walk back to the onset
     const int b0 = std::min(N - 10, std::max(roundi(R(prm[P_BOTTOM_MIN] / 10.0) / BIN_M()), rEnd));   // default 6 -> 0.6 m (prototype)
+    // D104: optional deepest bottom (bmax, x0.1 m, 0 = whole range). A barrel or a bucket is the one place where the floor's
+    // multiple can be MUCH stronger than the floor (07nov 11:57: floor -70 dB at 0.88 m, multiple -57 dB at 1.73 m, tilted
+    // face): no rule can tell that from a ball hung at half depth 10-13 dB under the floor (33po ball file), but the user
+    // knows the barrel is under 1.2 m. The Bucket preset sets it; Lake and Shallow leave it at 0.
+    const int nB = prm[P_BOTTOM_MAX] > 0 ? std::min(N, std::max(b0 + 10, roundi(R(prm[P_BOTTOM_MAX] / 10.0) / BIN_M()) + 8)) : N;
     sreal e = R(0); int best = b0; sreal bestE = R(-1);
     for (int i = b0; i < b0 + 8; i++) e += static_cast<sreal>(lin[i]);
-    for (int i = b0; i + 8 < N; i++) { if (e > bestE) { bestE = e; best = i; } e += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }
-    // D47 second-echo check (roadmap #14): a true bottom at depth D usually has a second echo near 2D
-    // (surface -> bottom -> surface -> bottom). If the strongest window has none but a weaker candidate
-    // (within 12 dB) does, that candidate is the bottom (a fish school or the bait can out-echo soft mud).
-    // Only applies when 2D is inside the range; the prototype scenes are unchanged (bottom = strongest).
+    for (int i = b0; i + 8 < nB; i++) { if (e > bestE) { bestE = e; best = i; } e += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }
+    // D102 (was D47 / D92 / D98): the bottom is the FIRST strong echo that has a multiple, not the strongest window.
+    // In the plastic drum at 19 V the floor's second echo (surface -> floor -> surface -> floor, at 2D + h with h the
+    // transducer's immersion, 0.15 m on 07nov_29po) comes back as strong as the first (-55 vs -55 dB) or stronger
+    // (flat hard floor under a flat surface: no spreading loss to speak of), so the strongest window was the multiple
+    // at 1.57 m, the floor at 0.72 m was reported as a fish, and the bottom flipped every few seconds. D47 could not
+    // help: it only ran when the strongest window had no second echo (the drum has a third at 3D + 2h), it looked for
+    // the multiple at 2D exactly (secondEcho was +-4 bins: 2D + h is outside) and the floor was 'halfOfBest' (D92).
+    // Rule: candidates are the local 8-bin windows at or past the ring-down, within 12 dB of the strongest, with a real
+    // peak (floor + 15 dB). The SHALLOWEST candidate whose 2x (+-6 bins) holds an echo window (floor + 10 dB, 6 dB over
+    // the bins before it) is the bottom: the fundamental always comes first, a lure or a fish has no multiple at twice
+    // its depth while a bottom does. When no candidate has a multiple (deep lake, 2x out of range, soft mud) the
+    // strongest stays, as in the prototype. What D92's halfOfBest becomes: a target at HALF the bottom's depth (the ball
+    // at 17 in over the 33 in floor, a lure at mid-water) has a 'multiple' that IS the bottom, so a found multiple m
+    // counts only when it is not itself the fundamental: either the series goes on (third echo at 3D + 2h = 2m - D:
+    // a target at D/2 has nothing at 3D/2, the drum floor always has its third) or the multiple is no stronger than
+    // the candidate + 2 dB (a lake multiple loses on each extra bounce; the ball at half depth is 10-13 dB under the
+    // floor). A target weaker than the bottom by more than 12 dB (the prototype's lure at 15 ft, D92's case) never
+    // enters the candidate list at all. Not a test: "the multiple has no multiple of its own": the drum shows a 4x
+    // (33po: -69 dB) stronger than its 3x (-73), so the echo at 2D does have one.
     if (bestE > R(0)) {
-      const sreal bestDb = R(10) * std::log10(bestE);
-      if (!secondEcho(lin, best, N)) {
-        sreal e2 = R(0); int alt = -1; sreal altE = R(-1);
-        for (int i = b0; i < b0 + 8; i++) e2 += static_cast<sreal>(lin[i]);
-        for (int i = b0; i + 8 < N; i++) {
-          const bool local = i > b0 && i + 9 < N && e2 >= static_cast<sreal>(lin[i - 1]) + e2 - static_cast<sreal>(lin[i + 7]);
-          // D92: a candidate at half the strongest window's depth has a 'second echo' that IS the strongest window (a lure or a
-          // fish at mid-water over a bottom with a weak second echo): such a candidate never replaces the bottom
-          const bool halfOfBest = std::abs(2 * i - best) <= 12;
-          if (local && !halfOfBest && std::abs(i - best) > 8 && e2 > altE && R(10) * std::log10(std::max(e2, R(1e-20))) > bestDb - R(12) && secondEcho(lin, i, N)) { altE = e2; alt = i; }
-          e2 += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]);
+      const sreal echoMin = db2p(floorRef + R(10));   // D98: a multiple has to be a real echo: 10 dB over the floor per bin (15 broke the school-over-soft-mud scene)
+      const sreal peakMin = floorRef + R(15);         // a candidate has to be a real echo too
+      const sreal bandE = bestE / R(15.85);           // within 12 dB of the strongest window
+      int pick = -1;
+      sreal eW = R(0), ePrev = R(-1);
+      for (int i = b0; i < b0 + 8; i++) eW += static_cast<sreal>(lin[i]);
+      for (int i = b0; i + 8 < nB && pick < 0; i++) {
+        const sreal eNext = i + 9 < nB ? eW + static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]) : R(-1);
+        const bool local = eW >= ePrev && eW > eNext;   // one window per echo: the sliding energy's local maximum
+        if (local && eW >= bandE && peakOf(d, i, N) >= peakMin) {
+          const int m = secondEcho(lin, i, N, echoMin);   // start of the multiple's window, -1 = none
+          if (m >= 0) {
+            const sreal eM = winE(lin, m);
+            const bool series = echoAt(lin, 2 * m - i, N, echoMin, 4) >= 0;                  // third echo at 3D + 2h
+            const bool weaker = eM <= eW * R(1.58);   // a normal multiple: at most 2 dB over its fundamental
+#ifdef SONAR_DEBUG_BOTTOM
+            fprintf(stderr, "cand: i=%d (%.1f dB under best) multiple@%d (%.1f dB vs cand) third %s weaker %s\n", i, 10 * std::log10(bestE / eW), m, 10 * std::log10(eM / eW), series ? "yes" : "no", weaker ? "yes" : "no");
+#endif
+            if (series || weaker) pick = i;
+          }
         }
-        if (alt >= 0) best = alt;
+        ePrev = eW; eW = eNext;
       }
+#ifdef SONAR_DEBUG_BOTTOM
+      fprintf(stderr, "bottom: best=%d (pk %.1f dB) pick=%d\n", best, (double)peakOf(d, best, N), pick);
+#endif
+      if (pick >= 0) best = pick;
+    }
+    // D115: bottom tracking gate (Echoview / Ping1D practice). Once a bottom is locked, the bottom is the strongest
+    // echo window starting within +-0.1 m of it as long as there is a real one there (peak >= floor + 15 dB); the free search above
+    // only takes over after 8 pings without one (2 s: the transducer moved, a new hole). A strong target anywhere else
+    // (the ball at 0.50 m, 3 dB over a shadowed floor, became 'bottom' in replays; a fish school on the lake) can no
+    // longer pull the bottom away while the floor is still there.
+    const int freeBest = best;   // D116: what the free search (D102 / D104) says on this ping
+    if (have_bottom_ && bestE > R(0)) {
+      const int bL = roundi(bottom_ / BIN_M());
+      const int g0 = std::max(b0, bL - 4), g1 = std::min(nB - 8, bL + 4);   // +-10 cm: the window starts at the onset, so it sits on the bottom echo
+      int gb = -1; sreal gE = R(-1), ge = R(0);
+      static sreal gw[9];   // window energies at g0..g1 (+-4 bins)
+      if (g1 > g0) {
+        for (int i = g0; i < g0 + 8; i++) ge += static_cast<sreal>(lin[i]);
+        for (int i = g0; i <= g1; i++) { gw[i - g0] = ge; if (ge > gE) gE = ge; if (i + 8 < N) ge += static_cast<sreal>(lin[i + 8]) - static_cast<sreal>(lin[i]); }
+        // the window that starts CLOSEST to the locked bottom among those within 10 dB of the gate's strongest: a strong
+        // target just above the floor (in the gate, stronger than the shadowed floor) no longer wins the gate
+        int bd = 99;
+        for (int i = g0; i <= g1; i++) if (gw[i - g0] * R(10) >= gE && std::abs(i - bL) < bd) { bd = std::abs(i - bL); gb = i; }
+      }
+      if (gb >= 0 && peakOf(d, gb, N) >= floorRef + R(15)) { best = gb; gate_miss_ = 0; }
+      else if (gate_miss_ < 255) gate_miss_++;
+      if (gate_miss_ > 0 && gate_miss_ <= 8 && gb >= 0) best = gb;   // hold the gate a little longer (a fish or the ball shadowing the floor)
+      // D116: nothing is below the bottom. If the free search keeps finding a real echo DEEPER than the lock (by more than
+      // the echo's own length, 20 cm), not a multiple of it (2x / 3x), and at least 3 dB STRONGER than what the gate holds,
+      // for 12 pings in a row (3 s), the lock was on something in the water (a lure or a fish at start-up, a still bait):
+      // move to it now. A correct lock never sees that: deeper echoes are its multiples or weaker clutter.
+      const bool deeper = freeBest > bL + 8;
+      // (a multiple is weaker than its fundamental on a lake; one 10 dB STRONGER is the real bottom under a lure at half
+      // depth, the bait set at mid-water: that case must escape too. A barrel's multiple can be stronger: bmax, D104)
+      const sreal pFree = peakOf(d, freeBest, N), pLock = peakOf(d, best, N);
+      const bool mult = (std::abs(freeBest - 2 * bL) <= 6 || std::abs(freeBest - 3 * bL) <= 8) && pFree <= pLock + R(10);
+      if (best != freeBest && deeper && !mult && pFree >= pLock + R(3)) {
+        if (++esc_ >= 12) { best = freeBest; esc_ = 0; gate_miss_ = 9; jump_ = true; }
+      } else esc_ = 0;
     }
     int pk = best; for (int i = best; i < std::min(N, best + 8); i++) if (d[i] > d[pk]) pk = i;
-    int on = pk; while (on > b0 && static_cast<sreal>(d[on - 1]) > static_cast<sreal>(d[pk]) - R(10)) on--;
+    // D115: a window that starts past the echo's peak (the gate holding a lock that sits on the echo's tail) has its
+    // maximum at its first bin: climb back to the real peak, or the onset walk below stops on the rising side at once
+    while (pk > b0 && d[pk - 1] >= d[pk]) pk--;
+    // D115: the walk back to the onset also stops where the level starts to RISE again (3 dB over the lowest so far):
+    // a target sitting on the floor echo's leading edge (ball 6 cm above the floor) was walked into, and the bottom
+    // jumped up to the target.
+    int on = pk; { sreal lowest = static_cast<sreal>(d[pk]);
+      while (on > b0 && static_cast<sreal>(d[on - 1]) > static_cast<sreal>(d[pk]) - R(10) && static_cast<sreal>(d[on - 1]) <= lowest + R(3)) { on--; if (static_cast<sreal>(d[on]) < lowest) lowest = d[on]; } }
     // D88: the onset must be a RISE, not a level. When the walk-back reaches the search start without ever
     // dropping 10 dB below the peak (drum: wall echoes keep the whole stretch above the bottom - 10 dB; lake:
     // a ring-down tail still high at bmin), the bottom was reported AT bmin. Take the steepest 2-bin rise
@@ -167,8 +275,15 @@ class SonarProc {
       }
       on = at;
     }
+#ifdef SONAR_DEBUG_BOTTOM
+    fprintf(stderr, "search: rEnd=%d b0=%d best=%d pk=%d on=%d (pk %.1f dB) ring=%.3f\n", rEnd, b0, best, pk, on, (double)d[pk], rEnd * 0.025);
+#endif
     const sreal bNow = static_cast<sreal>(on) * BIN_M();
-    if (!have_bottom_) { bottom_ = bNow; have_bottom_ = true; }
+    // D104: no echo, no bottom. A ping whose best window peaks under floor + 15 dB (transducer in air, out of the water,
+    // or the floor out of the beam) does not move the bottom: before, the first such ping seeded the bottom in the tail.
+    const bool echoOk = static_cast<sreal>(d[pk]) >= floorRef + R(15);
+    if (!echoOk) { /* keep the last bottom */ }
+    else if (!have_bottom_ || jump_) { bottom_ = bNow; have_bottom_ = true; jump_ = false; bj_ = 0; }
     else if (std::fabs(bNow - bottom_) < R(0.3)) { bottom_ += R(prm[P_BOTTOM_SMOOTH] / 100.0) * (bNow - bottom_); bj_ = 0; }
     else if (++bj_ > 4) { bottom_ = bNow; bj_ = 0; }
     const int bI = roundi(bottom_ / BIN_M());
@@ -284,7 +399,11 @@ class SonarProc {
     // COVER_PINGS and is learned into the scene then. Before: static = the first ping, so an object present at
     // start-up could never be sent (near-bottom targets need binChanged) and only ever showed as green background.
     if (!have_static_) {
-      for (int i = 0; i < N; i++) { static_[i] = (i >= i0 && i < i1) ? static_cast<float>(std::min(static_cast<sreal>(d[i]), nf + R(3))) : d[i]; sig_[i] = 2.5f; }   // D90: 2.5 dB start (was 4): the "changed" gate then opens ~10 dB over the scene, like the snr knob over the floor
+      // D97: the column starts at the blind-zone knob, not at this ping's ring-down end: on the 2026-11-05 ball test the
+      // ring-end rule stopped at the ball's own layer (0.55-0.7 m) on the first ping, the layer went into the scene as
+      // "ring-down", and the tracked ball was never sent (near-bottom targets go out only while they differ from the scene)
+      const int c0 = std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M()));
+      for (int i = 0; i < N; i++) { static_[i] = (i >= c0 && i < i1) ? static_cast<float>(std::min(static_cast<sreal>(d[i]), nf + R(3))) : d[i]; sig_[i] = 2.5f; }   // D90: 2.5 dB start (was 4): the "changed" gate then opens ~10 dB over the scene, like the snr knob over the floor
       have_static_ = true;
     }
     uint8_t* mask = S.mask; memset(mask, 0, N);
@@ -385,6 +504,8 @@ class SonarProc {
   // Per-bin results of the last step() of ANY SonarProc (shared scratch): read right after step().
   static const float* binValue() { return scratch().vpix; }    // live echo, prototype colour scale 0..1
   static const float* binDb() { return scratch().d; }          // D93: this ping in dB (after the spike filter), for the echogram line
+  const float* binStaticDb() const { return static_; }        // the learned static scene in dB (diagnostics)
+  const float* binSig() const { return sig_; }
   static const float* binStatic() { return scratch().bgv; }    // learned static scene (grey) 0..1
   static const float* binChanged() { return scratch().al; }    // 0..1: live echo differs from the static scene
 
@@ -410,9 +531,10 @@ class SonarProc {
     Track fresh[MAX_TRACKS];
   };
   static Scratch& scratch() {
-    static Scratch* s = nullptr;   // heap, allocated on first use (keeps it out of builds that never run it)
+    static Scratch* s = nullptr;   // D99: points at a static block (no heap); the TVG table is filled on first use
     if (s == nullptr) {
-      s = new Scratch();
+      static Scratch fixed;   // D99: 36 kB in .bss instead of a `new` at the first ping (which aborted a hub with ~35 kB of heap left; no fragmentation either)
+      s = &fixed;
       for (int i = 0; i < BINS; i++) {
         const sreal r = std::max(static_cast<sreal>(i) * sp::BIN_M(), R(0.3));
         s->tvg[i] = static_cast<float>(R(40) * std::log10(r) + R(2) * sp::ALPHA() * r);
@@ -426,16 +548,33 @@ class SonarProc {
     return x * sp::smooth(R(3), R(9), dv - nf_);
   }
 
-  // energy of the 8 bins around 2x the window start, compared to the window itself: a second bottom echo
-  // is 15-35 dB weaker (prototype: hardness from the same ratio); anything above -40 dB and 6 dB over
-  // its surroundings counts. false when 2x is out of range (then nothing can be checked).
-  static bool secondEcho(const float* lin, int i, int N) {
-    const int s2 = 2 * i - 4;
-    if (s2 + 12 >= N || i < 8) return false;
-    sreal e1 = R(0), e2 = R(0), around = R(0);
-    for (int k = 0; k < 8; k++) { e1 += static_cast<sreal>(lin[i + k]); e2 += static_cast<sreal>(lin[s2 + k]); }
-    for (int k = -12; k < -4; k++) around += static_cast<sreal>(lin[s2 + k]);
-    return e2 > e1 * R(1e-4) && e2 > around * R(4);
+  // the multiple of a bottom echo: an 8-bin echo window around 2x the window start. A lake multiple is 15-35 dB weaker
+  // than the first echo (prototype: hardness from the same ratio), the drum's is as strong; anything 6 dB over the 8 bins
+  // before it and above `echoMin` per bin counts. -1 when 2x is out of range (then nothing can be checked).
+  static sreal peakOf(const float* d, int i, int N) { sreal m = R(-1000); for (int k = i; k < i + 8 && k < N; k++) if (static_cast<sreal>(d[k]) > m) m = d[k]; return m; }
+  static sreal winE(const float* lin, int s) { sreal e = R(0); for (int k = 0; k < 8; k++) e += static_cast<sreal>(lin[s + k]); return e; }
+  // D102: the start of the strongest 8-bin echo window within +-span bins of `t`, -1 when there is none or `t` is out of
+  // range. An echo window averages above `echoMin` (D98: floor + 10 dB per bin: before, any 6 dB rise over the 8 bins
+  // just before it counted, so with a tilted transducer a noise blip at 2x promoted a clutter band at 1.9 m to 'bottom'
+  // and the real floor at 0.85 m was then reported as a fish) and stands 6 dB over the 8 bins ending 4 bins before it.
+  static int echoAt(const float* lin, int t, int N, sreal echoMin, int span) {
+    int at = -1; sreal eAt = R(-1);
+    if (t - span - 12 < 0 || t + span + 8 > N) return -1;
+    for (int s = t - span; s <= t + span; s++) {
+      const sreal e = winE(lin, s);
+      if (e <= eAt) continue;
+      sreal around = R(0); for (int k = s - 12; k < s - 4; k++) around += static_cast<sreal>(lin[k]);
+      if (e > around * R(4) && e > echoMin * R(8)) { eAt = e; at = s; }
+    }
+    return at;
+  }
+  // D102: the multiple of the window at `i` sits at 2D + h (h = the transducer's immersion, 0..0.15 m), so +-6 bins
+  // around 2i (D47/D98 looked at 2i - 4 .. 2i + 3 only and missed the drum's multiple at 2D + 6 bins). It must also stay
+  // within 40 dB of the window (the prototype's hardness range).
+  static int secondEcho(const float* lin, int i, int N, sreal echoMin) {
+    if (i < 8) return -1;
+    const int m = echoAt(lin, 2 * i, N, echoMin, 6);
+    return m >= 0 && winE(lin, m) > winE(lin, i) * R(1e-4) ? m : -1;
   }
 
   sreal flick(const Track& T) const {   // last 12, oldest first like slice(-12)
@@ -483,9 +622,19 @@ class SonarProc {
     const int n = T.hn < 30 ? T.hn : 30;
     sreal lo = R(1e30), hi = R(-1e30);
     for (int k = 0; k < n; k++) { const sreal dd = T.back(k).depth; if (dd < lo) lo = dd; if (dd > hi) hi = dd; }
-    if (T.depth > bottom_ - R(0.5)) {
+    if (T.depth > bottom_ - nearBottomBand(bottom_)) {   // D103: 0.5 m on a lake, 0.2-0.27 m in a drum
       const uint32_t still_for = T.early ? EARLY_COVER_PINGS : COVER_PINGS;
       return (T.age > still_for && hi - lo < R(0.06)) ? LBL_COVER : LBL_NEAR_BOTTOM;
+    }
+    // D105: a mid-water echo that has not moved (3 cm) NOR changed strength (2 dB) over the last 30 pings, after a minute,
+    // is still structure, not a fish: a barrel rib at 0.42 m (07nov 12:24/12:28, there with and without the ball, the same
+    // in the 33 in no-ball file) stayed "Fish 1.4 ft" for good; on a lake a branch, a stuck line or a sinker with no bait
+    // depth set does the same. A fish's echo flickers several dB from ping to ping (tilt, fins) even when it holds its
+    // depth; this one varied 0.3 dB. Reversible: it is a fish again the moment it moves or flickers.
+    if (n >= 30 && T.age > COVER_PINGS && hi - lo < R(0.03)) {
+      sreal sl = R(1e30), sh = R(-1e30);
+      for (int k = 0; k < n; k++) { const sreal v = T.back(k).s; if (v < sl) sl = v; if (v > sh) sh = v; }
+      if (sh - sl < R(2)) return LBL_COVER;
     }
     return LBL_FISH;
   }
@@ -493,6 +642,8 @@ class SonarProc {
   bool have_bottom_, have_nf_, have_hi_, have_ratio_, have_tail_, have_static_;
   sreal bottom_, nf_, hi_, ratio_, tail_, top_ = 0, lo_ = 0;
   int bj_;
+  uint8_t gate_miss_ = 0;   // D115: pings without an echo in the bottom gate
+  uint8_t esc_ = 0; bool jump_ = false;   // D116: pings the free search saw a stronger echo below the lock; re-lock now
   Track tracks_[MAX_TRACKS];
   int n_tracks_;
   uint32_t nid_;

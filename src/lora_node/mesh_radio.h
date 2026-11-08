@@ -103,6 +103,7 @@ enum : uint8_t { MESH_TR_AUTO = 0, MESH_TR_LORA = 1, MESH_TR_ESPNOW = 2, MESH_TR
 static const uint8_t MESH_CH_AUTO = 255;
 void meshSetStartChannel(uint8_t ch);        // both, before meshBegin: last channel used (NVS); hub starts searching there
 void meshSetTransport(uint8_t tr);           // chalet: MESH_TR_*
+bool meshFastEcho();                         // D107 hub: link to the chalet on ESP-NOW (raw line every ping)
 uint8_t meshTransport();                     // chalet: configured; hub: as seen in the beacon (Auto before any)
 void meshSetLoraChannel(uint8_t ch);         // chalet: 0-7 fixed or MESH_CH_AUTO (scan at boot, move when busy)
 uint8_t meshLoraChannelSetting();            // chalet

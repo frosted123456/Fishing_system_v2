@@ -440,7 +440,14 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   // the reference firmware writes (0x0F at 20 V) and what has fish on screen. vmode 1 = bit 6 DIS_VDRV_REG_LSTN (no
   // charging while listening) + bit 4 20 mA charge, re-armed by VDRV_TRIGGER in capture(): datasheet 7.3.1, unproven.
   g_vmode = p[P_VMODE];
-  writeReg(0x16, (uint8_t)((g_vmode == 1 ? 0x50 : 0x00) | ((p[P_VDRV] - 5) & 0x0F)));
+  // D108: vmode 2 = EXTERNAL VDRV (bit 5 VDRV_HI_Z: the internal 5-20 V regulator off, the H-bridge runs from whatever
+  // is wired to the VDRV pin, 5-36 V, datasheet 6.3 / 7.3.1 / 9.2). Only with the external supply fitted: VDRV <= VPWR + 0.3 V
+  // at all times (abs. max), VPWR > VDRV + 0.3 V recommended, caps on both rails rated for it. Without it VDRV just sags.
+  // D118: transformer mode (knob drive 1): OUTA / OUTB only drive the gates of the two external FETs, so the regulated
+  // VDRV is the GATE voltage: capped at 10 V whatever vdrv says (logic-level FETs, VGS max typically 20 V; datasheet 6.3:
+  // pre-driver VDRV 5-15 V). vmode 2 (external VDRV, pod v0.8 R49 + 12 V zener D8) is the datasheet's documented way.
+  const uint8_t vlev = (uint8_t)(p[P_DRIVE] == 1 && p[P_VDRV] > 10 ? 10 : p[P_VDRV]);   // D119: 10 V gate drive (VBOOST 13 V in the transformer build)
+  writeReg(0x16, (uint8_t)(g_vmode == 2 ? 0x20 : ((g_vmode == 1 ? 0x50 : 0x00) | ((vlev - 5) & 0x0F))));
   // DEV_CTRL_2 (0x13): bits 1:0 LNA_GAIN codes are NOT in order (0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V,
   // datasheet): knob 0..3 = 10, 12.5, 15, 20 V/V. Bit 2 VOUT_SCALE_SEL = 0 (3.3 V map), both log-amp stages on.
   static const uint8_t LNA_CODE[4] = {1, 3, 0, 2};
@@ -449,11 +456,14 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   writeReg(0x17, (uint8_t)((p[P_THRESH] & 0x0F) | (SONAR_PIN_O4 >= 0 ? 0x10 : 0)));
   // BURST_PULSE bits 5:0 = pulse count, and 0 = CONTINUOUS burst (datasheet): never write 0. Bits 7:6
   // (half-bridge, pre-driver mode) stay 0. The RMT on IO2 sends the real count.
-  writeReg(0x1A, (uint8_t)((cycles < 1 ? 1 : cycles) & 0x3F));
+  writeReg(0x1A, (uint8_t)(((cycles < 1 ? 1 : cycles) & 0x3F) | (p[P_DRIVE] == 1 ? 0x40 : 0x00)));   // D118: bit 6 PRE_DRIVER_MODE
   g_blind_ticks = (uint32_t)(2.0f * p[P_DEADZONE_DM] * 0.1f / sound * 80e6f);
   static uint8_t rot = 0;
   const uint8_t mode = p[P_FREQ_MODE];
-  const uint32_t HZ[3] = {SONAR_FREQ_HZ_0, SONAR_FREQ_HZ_1, SONAR_FREQ_HZ_2};
+  // D111: the 200 kHz mode runs at 180 + ftrim kHz (TUNE finds the transducer's best); 190 / 210 stay 10 kHz either side.
+  // The RMT half period is 40 MHz / f ticks: 1 kHz steps are exact to ~0.5 % around 200 kHz.
+  const uint32_t f1 = 180000UL + 1000UL * (uint32_t)(p[P_FTRIM] <= 40 ? p[P_FTRIM] : 20);
+  const uint32_t HZ[3] = {f1 - 10000UL, f1, f1 + 10000UL};
   uint8_t fset[3]; uint8_t nf;
   if (mode == 0) { fset[0] = 0; fset[1] = 1; fset[2] = 2; nf = 3; info.rot_f = -1; }
   else if (mode == 1) { fset[0] = rot; nf = 1; info.rot_f = (int8_t)rot; rot = (uint8_t)((rot + 1) % 3); }
@@ -482,7 +492,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   }
   info.nfreq = nf;
   info.fault = (uint8_t)(readReg(0x1C) & 0x06);   // DEV_STAT: PULSE_NUM_FLT (bit 2) / DRV_PULSE_FLT (bit 1) of the last burst
-  info.vdrv_ready = (lastStatus() & 0x20) ? 1 : 0;   // D88: status bits of that same frame (bit 5 VDRV_READY)
+  info.vdrv_ready = (g_vmode == 2 || (lastStatus() & 0x20)) ? 1 : 0;   // D108: no regulation to report in external mode   // D88: status bits of that same frame (bit 5 VDRV_READY)
   info.edge_um = g_edge_seen ? (int32_t)((float)(g_cap_edge - g_cap_burst) / 80e6f * sound / 2.0f * 1e6f) : -1;
   info.us = micros() - t_start;
   return true;

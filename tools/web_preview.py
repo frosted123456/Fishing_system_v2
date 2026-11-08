@@ -25,6 +25,22 @@ def page_html():
 
 frames = json.load(open(TRACE))
 t0 = time.time()
+# D101: CHAIN=<json from tools/sonar_chain.cpp> replays a real bench recording on the focus hole (what the chalet
+# would have received: pings, raw echogram lines, background), one recorded ping per second, once; the other holes stay fake.
+CHAIN = json.load(open(os.environ["CHAIN"])) if os.environ.get("CHAIN") else None
+
+def chain_pings(since, mx, echo_since):
+    # Each recorded ping fills 4 columns (1 s of the waterfall) so a 30-ping bench recording spans 30 s; played once, then held.
+    C = int(os.environ.get("CHAIN_COLS", "4"))   # columns per recorded ping: 4 for 1 ping/s recordings, 1 for 4 pings/s
+    ch = CHAIN["chalet"]; ps = ch["pings"]; n = len(ps); k = min(C * n, int((time.time() - t0) * 4))
+    src = lambda i: ps[i // C]
+    out = [[i + 1, i, src(i)["bottom_cm"], src(i)["t"], src(i)["r"], 1, 90, []] for i in range(max(0, k - mx), k) if i + 1 > since]
+    r = {"node": state["focus"], "last": out[-1][0] if out else since, "pings": out}
+    if echo_since is not None:
+        es = {C * e["index"]: e for e in ch["echo"]}
+        lines = [[i + 1, i, es[i]["nf"], es[i]["c"], es[i].get("k", 0)] for i in range(max(0, k - 64), k) if i in es and i + 1 > echo_since][-16:]
+        r["elast"] = lines[-1][0] if lines else echo_since; r["echo"] = lines
+    return r
 state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "sil_until": 0,
          "names": {3: "Pointe", 4: "Baie"}, "test": 0, "adaptive": False,
          "simreq": {}, "simrate": 6,
@@ -35,16 +51,17 @@ state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "s
 # the same knob table as lib/IceMesh/src/sonar_params.h (key, name, lo, hi, def, unit)
 KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contrast", 1, 15, 5, "dB"),
          ("confirm", "Confirm pings", 1, 10, 3, ""), ("keep", "Keep without echo", 1, 20, 5, "pings"),
-         ("gate", "Max target move", 5, 100, 32, "cm/ping"), ("dead", "Dead zone", 0, 50, 9, "x0.1 m"),
+         ("gate", "Max target move", 5, 100, 32, "cm/ping"), ("dead", "Dead zone", 0, 50, 5, "x0.1 m"),
          ("bsmooth", "Bottom smoothing", 5, 100, 25, "%"), ("learn", "Static scene learning", 1, 100, 12, "x0.001"),
          ("range", "Colour range", 20, 80, 46, "dB"), ("tvg", "Range compensation", 0, 1, 1, ""),
-         ("cycles", "Burst cycles, base", 1, 32, 16, "cycles"), ("gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"),
-         ("pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"), ("fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"),
+         ("cycles", "Burst cycles, base", 1, 32, 32, "cycles"), ("gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"),
+         ("pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"), ("fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"),
          ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 2, "per ping"),
-         ("freq", "Frequency mode", 0, 2, 0, "0 3/ping 1 rot 2 200k"), ("sound", "Sound speed", 0, 255, 53, "+1350 m/s"),
+         ("freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"), ("sound", "Sound speed", 0, 255, 53, "+1350 m/s"),
          ("bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"), ("thresh", "Edge threshold", 0, 15, 7, "reg 0x17"),
-         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 >= V+0.3)"), ("vmode", "VDRV mode", 0, 1, 0, "0 on (proven) 1 quiet")]
+         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"), ("vmode", "VDRV mode", 0, 2, 0, "0 on (proven) 1 quiet 2 external VDRV (D108)"), ("bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"), ("ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"), ("drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)")]
 state["knobs"] = {k[0]: k[4] for k in KNOBS}
+if CHAIN and "knobs" in CHAIN: state["knobs"].update({k: v for k, v in CHAIN["knobs"].items() if k in state["knobs"]})   # the recording's knobs
 def knobs_json():
     v = state["knobs"]
     preset = {(7, 4, 2, 6): 0, (10, 5, 3, 5): 1, (14, 7, 5, 4): 2}.get((v["snr"], v["prom"], v["confirm"], v["keep"]), 3)
@@ -143,6 +160,7 @@ class H(BaseHTTPRequestHandler):
     def pings(self, node, since, mx, echo_since=None):
         """Pings of one hole newer than `since` (the preview streams the focus hole only; the others answer empty)."""
         k = now_index(); out = []
+        if CHAIN and node == state["focus"]: return chain_pings(since, mx, echo_since)
         if node == frames[0]["list"]["focus"]:
             for f in frames[: k + 1]:
                 out += [p for p in f["pings"] if p[0] > since]
@@ -208,6 +226,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/sim":
             return self.send(200, json.dumps(self.simj()))
         if u.path == "/api/sonar/bg":
+            if CHAIN: return self.send(200, json.dumps({"node": state["focus"], "ver": 1, "mask": CHAIN["chalet"]["bg_mask"], "bin_mm": 25, "levels": CHAIN["chalet"]["bg"]}))
             return self.send(200, json.dumps(frames[now_index()]["bg"]))
         if u.path == "/api/radio":
             return self.send(200, json.dumps(radio()))

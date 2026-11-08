@@ -42,7 +42,7 @@ static void ringRead(size_t& pos, uint32_t& seq, const char*& text, uint16_t& le
 }
 static uint32_t g_seq = 0;
 
-static String g_status = "{}";
+static char g_statusBuf[2 * 488 + 700] = "{}";   // D100: the status JSON, written in place by setStatus()
 
 static const char PAGE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Sonar bench</title>
@@ -62,7 +62,7 @@ table{width:100%;border-collapse:collapse}td{padding:3px 2px;font-size:14px}td i
 <div class="card"><div class="g" id="vals"></div></div>
 <div class="card"><canvas id="cv" width="600" height="180"></canvas><div class="k">Last ping, 200 kHz: depth left to right (m), echo strength up. Red line = bottom.</div></div>
 <div class="card">
- <div class="row"><button id="rec">Start recording</button><button id="dl">Download</button><button id="raw">RAW now</button><button id="sw" title="automated preset run: gain, cycles, frequency, threshold, averaging, drive (recording must be on)">Sweep</button></div>
+ <div class="row"><button id="rec">Start recording</button><button id="dl">Download</button><button id="raw">RAW now</button><button id="sw" title="automated preset run: gain, cycles, frequency, threshold, averaging, drive (recording must be on)">Sweep</button><button id="swr" title="D123: receiver sweep: band-pass Q 2/3/4/5, quiet listening (vmode 1), gain 3 (~3 min, recording on, transducer still)">RX sweep</button><button id="tn" title="D111: finds the best burst frequency and band-pass code for this transducer (~1 min, bottom in view, keep still)">Tune</button></div>
  <p id="rinfo" class="k">Not recording.</p>
  <div class="row"><input id="note" placeholder="Note: ruler depth, target, temp..." style="flex:1"><button id="nb">Note</button></div>
  <div class="row" style="margin-top:8px"><span class="k">Record every</span><input id="every" type="number" min="1" max="20" value="1" style="width:56px"><span class="k">ping(s), RAW every</span><input id="rawe" type="number" min="0" max="600" value="30" style="width:64px"><span class="k">s</span><button id="ap">Apply</button></div>
@@ -98,20 +98,20 @@ $('rec').onclick=async()=>{busy=true;if(!recOn){if(lines.length&&!confirm('Start
 $('dl').onclick=()=>{if(!lines.length){msg('Nothing recorded yet.');return}const b=new Blob([lines.join('\n')+'\n'],{type:'text/plain'});
  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='sonar_'+(st.node||'')+'_'+stamp().replace(/[:T]/g,'-')+'.txt';document.body.appendChild(a);a.click();a.remove()};
 $('raw').onclick=()=>cmd('RAW');
-$('sw').onclick=async()=>{if(!recOn){msg('Start recording first, then Sweep.');return}if(confirm('Run the preset sweep? ~15 steps, about 3 minutes. Keep the transducer still.'))await cmd('SWEEP')};
+$('tn').onclick=async()=>{if(confirm('Tune the burst frequency and band-pass? About 1 minute. Keep the transducer still with the bottom in view.')){const r=await cmd('TUNE');msg(r)}};$('swr').onclick=async()=>{if(!recOn){msg('Start recording first, then RX sweep.');return}if(confirm('Run the receiver sweep? 8 steps, about 3 minutes. Keep the transducer still, bottom in view.'))msg(await cmd('SWEEP RX'))};$('sw').onclick=async()=>{if(!recOn){msg('Start recording first, then Sweep.');return}if(confirm('Run the preset sweep? ~15 steps, about 3 minutes. Keep the transducer still.'))await cmd('SWEEP')};
 $('nb').onclick=async()=>{const t=$('note').value.trim();if(!t)return;await cmd('NOTE ['+stamp()+'] '+t);$('note').value=''};
 $('ap').onclick=async()=>{await cmd('RECEVERY '+$('every').value);await cmd('RAWEVERY '+$('rawe').value)};
 async function knobs(){try{const k=await (await fetch('k')).json();$('kn').innerHTML=k.map(o=>'<tr><td>'+o.label+'<div class="k">'+o.key+' · '+o.min+'-'+o.max+' '+o.unit+'</div></td><td><input id="k_'+o.key+'" type="number" value="'+o.val+'"></td><td><button data-k="'+o.key+'">Set</button></td></tr>').join('');
  document.querySelectorAll('#kn button').forEach(b=>b.onclick=async()=>{await cmd('KNOB '+b.dataset.k+' '+$('k_'+b.dataset.k).value)})}catch(e){}}
 window.onbeforeunload=()=>lines.length?'Recording not downloaded':undefined;
-knobs();poll();setInterval(poll,1500);setInterval(pull,800);
+knobs();poll();setInterval(poll,1500);setInterval(pull,400);
 </script></body></html>)HTML";
 
 static unsigned long g_served = 0;
 static uint8_t g_node = 0;
 unsigned long lastServedMs() { return g_served; }
 static void handleRoot() { g_srv->send_P(200, "text/html", PAGE); g_served = millis(); }
-static void handleStatus() { g_srv->sendHeader("Cache-Control", "no-store"); g_srv->send(200, "application/json", g_status); g_served = millis(); }
+static void handleStatus() { g_srv->sendHeader("Cache-Control", "no-store"); g_srv->send_P(200, "application/json", g_statusBuf); g_served = millis(); }   // send_P streams the buffer; send() would copy it into a String
 static void handleCmd() {
   const String c = g_srv->arg("c");
   const String r = g_cmd ? g_cmd(c) : String("no handler");
@@ -119,24 +119,33 @@ static void handleCmd() {
   g_served = millis();
 }
 static void handleLog() {
+  // D110: the log pull was the hub's biggest heap swing: up to 8 kB of TCP buffers in ~3 small writes per line while
+  // a slow phone drains them (heap_min 2.5-10 kB and watchdog resets on 07nov, every one during a recording). Now:
+  // at most 4 kB per pull (every 0.4 s), written in ~1.4 kB chunks from a static buffer, and nothing at all under 16 kB free heap
+  // (the page simply pulls again 0.4 s later; the ring keeps the lines).
   const uint32_t since = (uint32_t)strtoul(g_srv->arg("since").c_str(), nullptr, 10);
   g_srv->sendHeader("Cache-Control", "no-store");
+  if (ESP.getFreeHeap() < 16 * 1024) { g_srv->send(503, "text/plain", "busy"); g_served = millis(); return; }
   g_srv->setContentLength(CONTENT_LENGTH_UNKNOWN);
   g_srv->send(200, "text/plain", "");
+  static char chunk[1460]; size_t cn = 0;
+  auto flush = [&]() { if (cn) { g_srv->sendContent(chunk, cn); cn = 0; } };
+  auto put = [&](const char* t, size_t n) {
+    while (n) { const size_t room = sizeof(chunk) - cn, m = n < room ? n : room; memcpy(chunk + cn, t, m); cn += m; t += m; n -= m; if (cn == sizeof(chunk)) flush(); }
+  };
   char hb[32];
-  snprintf(hb, sizeof(hb), "#first %lu\n", (unsigned long)(g_ringCount ? rd32(g_tail) : g_seq + 1));
-  g_srv->sendContent(hb);
+  const int hn = snprintf(hb, sizeof(hb), "#first %lu\n", (unsigned long)(g_ringCount ? rd32(g_tail) : g_seq + 1));
+  put(hb, (size_t)hn);
   size_t sent = 0, pos = g_tail; uint32_t seq; const char* text; uint16_t len;
   for (uint32_t left = g_ringCount; left; left--) {
     ringRead(pos, seq, text, len);
     if (seq <= since) continue;
-    snprintf(hb, sizeof(hb), "%lu\t", (unsigned long)seq);
-    g_srv->sendContent(hb);
-    g_srv->sendContent(text, len);   // D92: straight from the ring, no String copy
-    g_srv->sendContent("\n");
+    const int sn = snprintf(hb, sizeof(hb), "%lu\t", (unsigned long)seq);
+    put(hb, (size_t)sn); put(text, len); put("\n", 1);
     sent += len;
-    if (sent > 40 * 1024) break;   // the page pulls the rest next time
+    if (sent > 4 * 1024) break;    // D110: 4 kB per pull (was 8), the page pulls every 0.4 s (was 0.8): 10 kB/s, a 4-ping/s recording makes ~5
   }
+  flush();
   g_srv->sendContent("");
   g_served = millis();
 }
@@ -184,12 +193,14 @@ void loop() { if (g_on && g_own) g_srv->handleClient(); }
 bool active() { return g_on; }
 uint32_t lastSeq() { return g_seq; }
 
-void push(const char* line) {
-  if (!g_on) return;
-  size_t len = strlen(line);
+// D96: reserve a record of `len` text bytes and return where to write them (the caller fills exactly len bytes, no
+// terminator); nullptr when it can never fit (the page counts the gap). A RAW line is formatted straight into the
+// ring this way: no 5 kB buffer on the heap at all.
+char* pushReserve(size_t len) {
+  if (!g_on) return nullptr;
   if (len > 0xFFFF) len = 0xFFFF;
   const size_t need = REC_HDR + len;
-  if (need > RING_BYTES) { ++g_seq; return; }     // never fits (the page counts the gap)
+  if (need > RING_BYTES) { ++g_seq; return nullptr; }     // never fits (the page counts the gap)
   const uint32_t seq = ++g_seq;
   // make room: the record goes at head if it fits before the end, else at 0 (wrap); evict the oldest until free
   for (;;) {
@@ -206,33 +217,30 @@ void push(const char* line) {
   uint8_t* w = g_ringBuf + g_head;
   w[0] = (uint8_t)seq; w[1] = (uint8_t)(seq >> 8); w[2] = (uint8_t)(seq >> 16); w[3] = (uint8_t)(seq >> 24);
   w[4] = (uint8_t)len; w[5] = (uint8_t)(len >> 8);
-  memcpy(w + REC_HDR, line, len);
   g_head += need; g_ringCount++;
+  return (char*)(w + REC_HDR);
+}
+void push(const char* line) {
+  const size_t len = strlen(line);
+  char* dst = pushReserve(len);
+  if (dst) memcpy(dst, line, len > 0xFFFF ? 0xFFFF : len);
 }
 
 void setStatus(const char* bench_line, const uint8_t* codes, uint16_t nbins, float bin_m, bool recording,
                uint32_t rec_lines, uint16_t rec_every, uint16_t raw_every_s, uint16_t vbat_mv) {
   if (!g_on) return;
   static const char H[] = "0123456789ABCDEF";
-  String s; s.reserve(2 * nbins + 600);
-  s = "{\"node\":"; s += String(g_node);
-  s += ",\"seq\":"; s += String(g_seq);
-  s += ",\"rec\":"; s += recording ? "true" : "false";
-  s += ",\"rec_lines\":"; s += String(rec_lines);
-  s += ",\"every\":"; s += String(rec_every);
-  s += ",\"raw_every\":"; s += String(raw_every_s);
-  s += ",\"heap\":"; s += String(ESP.getFreeHeap());
-  s += ",\"vbat\":"; s += String(vbat_mv);
-  s += ",\"bin_m\":"; s += String(bin_m, 4);
-  // bottom depth for the red line: parsed from the bench line ("bottom=1.23m")
+  // D100: no String: one static buffer, written in place (was a 1.6 kB String built and copied on every ping)
+  char* o = g_statusBuf; const char* end = g_statusBuf + sizeof(g_statusBuf) - 8;
   const char* b = strstr(bench_line, "bottom=");
-  s += ",\"bottom\":"; s += b ? String(atof(b + 7), 3) : String("0");
-  s += ",\"line\":\"";
-  for (const char* p = bench_line; *p; p++) { if (*p == '"' || *p == '\\') s += '\\'; s += *p; }
-  s += "\",\"codes\":\"";
-  for (uint16_t i = 0; i < nbins; i++) { s += H[codes[i] >> 4]; s += H[codes[i] & 15]; }
-  s += "\"}";
-  g_status = s;
+  { const int r = snprintf(o, end - o, "{\"node\":%u,\"seq\":%lu,\"rec\":%s,\"rec_lines\":%lu,\"every\":%u,\"raw_every\":%u,\"heap\":%lu,\"vbat\":%u,\"bin_m\":%.4f,\"bottom\":%.3f,\"line\":\"",
+                g_node, (unsigned long)g_seq, recording ? "true" : "false", (unsigned long)rec_lines, rec_every, raw_every_s, (unsigned long)ESP.getFreeHeap(), vbat_mv, (double)bin_m, b ? atof(b + 7) : 0.0);
+    o += r < end - o ? r : end - o; }
+  for (const char* p = bench_line; *p && o < end - 2; p++) { if (*p == '"' || *p == '\\') *o++ = '\\'; *o++ = *p; }
+  { const int r = snprintf(o, end - o, "\",\"codes\":\""); o += r < end - o ? r : end - o; }
+  for (uint16_t i = 0; i < nbins && o < end - 2; i++) { *o++ = H[codes[i] >> 4]; *o++ = H[codes[i] & 15]; }
+  { const int r = snprintf(o, end - o, "\"}"); o += r < end - o ? r : end - o; }   // D100: snprintf returns the would-be length: clamp
+  *o = 0;
 }
 
 }  // namespace bench

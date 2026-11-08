@@ -26,6 +26,7 @@ inline uint8_t staticLevel(float v) { return v < 0.06f ? 0 : (v < 0.20f ? 1 : (v
 class SonarSource {
  public:
   enum { BASE_EVERY = 8, FOCUS_N = 4, BG_EVERY = 8, INFO_EVERY = 2, BG_CHANGE = 12, QUIET_BASE_EVERY = 32, ECHO_EVERY = 4 };
+  uint8_t echo_every = ECHO_EVERY;   // D107: pings per raw line; the hub sets 1 while the chalet link is on ESP-NOW (264 B/s is nothing there)
   bool echo_on = false;     // D93: in focus, one raw echogram line (BT_ECHO, 66 B) every ECHO_EVERY pings. Off by default (the
                             // simulations and tests keep their airtime); the real hub / tip-up firmware turns it on   // BASE every 2 s at 4 pings/s; 8 s when nothing changes (D79)
   SonarScene scene;
@@ -120,8 +121,13 @@ class SonarSource {
         since_bg_ = 0;
       }
       // D93: the raw line of this ping (the caller passes out[4] so it is never squeezed out by DATA + BG + BASE)
-      if (echo_on && ++since_echo_ >= ECHO_EVERY && n_out < max_out) {
-        EchoLine e; echoFromBins(e, node_, last_.index, SonarProc::binDb(), static_cast<float>(out_.nf));
+      if (echo_on && ++since_echo_ >= (echo_every ? echo_every : 1) && n_out < max_out) {
+        // D112: the finest cells that still cover the bottom +25 % +0.3 m (the page's auto depth), with 10 % hysteresis
+        { const float need = out_.bottom > 0.f ? static_cast<float>(out_.bottom) * 1.25f + 0.3f : 99.f;
+          const float cover[ECHO_SCALES] = {12.2f, 6.1f, 3.05f};
+          uint8_t sc = 0; for (uint8_t k = 1; k < ECHO_SCALES; k++) if (need <= cover[k] * (k <= echo_scale_ ? 1.0f : 0.9f)) sc = k;
+          echo_scale_ = sc; }
+        EchoLine e; echoFromBins(e, node_, last_.index, SonarProc::binDb(), static_cast<float>(out_.nf), echo_scale_);
         const size_t len = encodeEcho(e, out[n_out].data, MAX_BLOCK);
         if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
         since_echo_ = 0;
@@ -205,7 +211,7 @@ class SonarSource {
   void buildPing(Ping& p) {
     memset(&p, 0, sizeof(p));
     p.index = index_++;
-    p.bottom_cm = clampDepth(static_cast<int32_t>(out_.bottom * 100.0f + 0.5f));
+    p.bottom_cm = out_.bottom > 0.f ? clampDepth(static_cast<int32_t>(out_.bottom * 100.0f + 0.5f)) : DEPTH_NONE;   // D104: no echo yet = no bottom, not 0 cm
     // free slots of tracks the processing dropped
     for (int k = 0; k < 8; k++) {
       if (!slot_used_[k]) continue;
@@ -298,7 +304,10 @@ class SonarSource {
   void updateBackground() {
     const float* sv = SonarProc::binStatic();
     uint8_t cur[BINS]; int changed = 0;
-    for (int i = 0; i < BINS; i++) { cur[i] = staticLevel(sv[i]); if (cur[i] != bg_[i]) changed++; }
+    // D97: nothing above the blind zone goes into the background: the ring-down is not "weeds, structure" (the green
+    // band at the top of the chalet's waterfall in the drum tests was exactly that)
+    const int dead = static_cast<int>(proc.prm[P_DEADZONE_DM] * 0.1f / 0.025f + 0.5f);
+    for (int i = 0; i < BINS; i++) { cur[i] = i < dead ? 0 : staticLevel(sv[i]); if (cur[i] != bg_[i]) changed++; }
     if (!bg_valid_ || changed > BG_CHANGE) {
       memcpy(bg_, cur, BINS);
       if (bg_valid_) bg_ver_ = static_cast<uint8_t>((bg_ver_ + 1) & 15u);
@@ -311,6 +320,7 @@ class SonarSource {
   Ping pend_[MAX_PINGS];
   uint8_t n_pend_ = 0;
   uint16_t since_base_ = 0, since_bg_ = 0, since_echo_ = 0;
+  uint8_t echo_scale_ = 0;   // D112
   uint8_t last_base_status_ = 0xFF; uint16_t last_base_bottom_ = 0xFFFF;   // D79: what the last summary said
   uint8_t bg_seg_ = 0, bg_ver_ = 0;
   bool bg_valid_ = false;

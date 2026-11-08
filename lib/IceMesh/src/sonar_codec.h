@@ -42,7 +42,11 @@ static const uint8_t ECHO_CELLS = 122;        // 488 / 4
 static const uint8_t ECHO_BYTES = 61;         // 2 cells per byte, low nibble = the even cell
 static const uint8_t ECHO_DB_PER_LEVEL = 4;
 static const uint8_t ECHO_BLOCK_LEN = 5 + 61;
-struct EchoLine { uint8_t node; uint16_t index; uint8_t nf_neg; uint8_t cells[ECHO_BYTES]; };
+// D112: scale = cell size, 0 = 10 cm (122 cells = 12.2 m), 1 = 5 cm (6.1 m), 2 = 2.5 cm (3.05 m): the hub picks the
+// finest that still covers the bottom (+25 % +0.3 m), so a 0.8 m barrel gets 2.5 cm cells and 5 m of water 5 cm.
+static const uint8_t ECHO_SCALES = 3;
+struct EchoLine { uint8_t node; uint16_t index; uint8_t nf_neg; uint8_t scale; uint8_t cells[ECHO_BYTES]; };
+inline uint8_t echoFold(uint8_t scale) { return static_cast<uint8_t>(ECHO_FOLD >> (scale < ECHO_SCALES ? scale : 0)); }   // bins per cell: 4 / 2 / 1
 inline uint8_t echoCell(const EchoLine& e, uint8_t i) { return static_cast<uint8_t>(i & 1 ? e.cells[i >> 1] >> 4 : e.cells[i >> 1] & 15u); }
 inline void echoSetCell(EchoLine& e, uint8_t i, uint8_t lv) { uint8_t& b = e.cells[i >> 1]; b = static_cast<uint8_t>(i & 1 ? (b & 0x0F) | ((lv & 15u) << 4) : (b & 0xF0) | (lv & 15u)); }
 // BASE v4 status flags (D43)
@@ -354,27 +358,29 @@ inline bool decodeData(const uint8_t* in, size_t len, DataBlock& d) {
 }
 
 // ---- ECHO (D93 echogram line) ------------------------------------------------------------------------
-// [node][BT_ECHO << 4][index lo][index hi][nf_neg][61 bytes of 4-bit cells]: fixed 66 bytes, no bit packing needed.
+// [node][BT_ECHO << 4 | scale][index lo][index hi][nf_neg][61 bytes of 4-bit cells]: fixed 66 bytes, no bit packing needed.
 inline size_t encodeEcho(const EchoLine& e, uint8_t* out, size_t cap) {
   if (cap < ECHO_BLOCK_LEN) return 0;
-  out[0] = e.node; out[1] = static_cast<uint8_t>(BT_ECHO << 4); out[2] = static_cast<uint8_t>(e.index); out[3] = static_cast<uint8_t>(e.index >> 8); out[4] = e.nf_neg;
+  out[0] = e.node; out[1] = static_cast<uint8_t>((BT_ECHO << 4) | (e.scale < ECHO_SCALES ? e.scale : 0)); out[2] = static_cast<uint8_t>(e.index); out[3] = static_cast<uint8_t>(e.index >> 8); out[4] = e.nf_neg;
   memcpy(out + 5, e.cells, ECHO_BYTES);
   return ECHO_BLOCK_LEN;
 }
 inline bool decodeEcho(const uint8_t* in, size_t len, EchoLine& e) {
   if (len != ECHO_BLOCK_LEN || (in[1] >> 4) != BT_ECHO) return false;
   e.node = in[0]; e.index = static_cast<uint16_t>(in[2] | (in[3] << 8)); e.nf_neg = in[4];
+  e.scale = static_cast<uint8_t>(in[1] & 0x0F); if (e.scale >= ECHO_SCALES) e.scale = 0;   // D112 (0 from older hubs)
   memcpy(e.cells, in + 5, ECHO_BYTES);
   return true;
 }
-// bins (dB) -> cells: the strongest bin of each group of 4, as levels over the floor
-inline void echoFromBins(EchoLine& e, uint8_t node, uint16_t index, const float* db, float nf) {
-  e.node = node; e.index = index;
+// bins (dB) -> cells: the strongest bin of each group of 4 / 2 / 1 (D112 scale), as levels over the floor
+inline void echoFromBins(EchoLine& e, uint8_t node, uint16_t index, const float* db, float nf, uint8_t scale = 0) {
+  e.node = node; e.index = index; e.scale = scale < ECHO_SCALES ? scale : 0;
+  const uint8_t fold = echoFold(e.scale);
   const float n = -nf; e.nf_neg = static_cast<uint8_t>(n < 0 ? 0 : (n > 255 ? 255 : n + 0.5f));
   memset(e.cells, 0, ECHO_BYTES);
   for (uint8_t c = 0; c < ECHO_CELLS; c++) {
     float m = -1000.f;
-    for (uint8_t k = 0; k < ECHO_FOLD; k++) { const float v = db[c * ECHO_FOLD + k]; if (v > m) m = v; }
+    for (uint8_t k = 0; k < fold; k++) { const float v = db[c * fold + k]; if (v > m) m = v; }
     const float l = (m - nf) / ECHO_DB_PER_LEVEL + 0.5f;
     echoSetCell(e, c, static_cast<uint8_t>(l < 0 ? 0 : (l > 15 ? 15 : l)));
   }

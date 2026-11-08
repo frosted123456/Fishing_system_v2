@@ -21,6 +21,8 @@ struct HallLatch {
   // state
   bool init;
   uint8_t level;                    // last known output level
+  uint8_t pending;                  // D99: a same-level pin wake waiting for an edge to confirm it
+  uint64_t pending_ms;              // D100: when it was set; it expires after window_ms (the polls in between do not clear it)
   uint8_t run;                      // flips in the current count
   bool on;                          // trip active (FISH ON)
   uint32_t total;                   // flips since power-on (quarter turns, either way)
@@ -39,16 +41,24 @@ struct HallLatch {
     if (run >= trigger_flips) on = true;
   }
   // after a boot: level now; woke_by_pin = the deep-sleep wake was the pin. A pin wake with the SAME level
-  // means it flipped and flipped back before we could read it: at least 2 flips.
+  // is either a flip that flipped back before we could read it (a running line: more edges follow while awake)
+  // or a glitch on the line (RF, a touch, a supply dip: nothing follows). D99: it no longer counts by itself; it
+  // is held as one pending flip that the first edge seen while awake confirms (then it counts as 2 flips, as
+  // before). Before D99 it counted 2 flips at once, enough to trip with trigger 1 or 2: a false FISH ON with no
+  // magnet near the sensor, seen on the bench 2026-11-05.
   void boot(uint8_t level_now, bool woke_by_pin, uint64_t t) {
     if (!init) { init = true; level = level_now; last_ms = t; return; }
-    const uint32_t n = level_now != level ? 1u : (woke_by_pin ? 2u : 0u);
+    const uint32_t n = level_now != level ? 1u : 0u;
+    pending = (level_now == level && woke_by_pin) ? 1 : 0; pending_ms = t;
     level = level_now;
     flip(n, t);
   }
   // awake: edges counted by the pin interrupt since the last call, and the level now
   void edges(uint32_t n, uint8_t level_now, uint64_t t) {
     if (!n && level_now != level) n = 1;   // a flip the interrupt missed
+    if ((n & 1u) && level_now == level) n--;   // D100: an odd count with the level back where it was is a glitch pair, not a flip
+    if (n && pending) { n += 2; pending = 0; }   // the fast flip-and-back of the pin wake was real after all
+    if (pending && t - pending_ms > window_ms) pending = 0;   // D100: nothing followed within the window: it was a glitch
     level = level_now;
     flip(n, t);
   }

@@ -1,5 +1,6 @@
 // Settings and hole names in NVS (split out of main.cpp, D49). Shared declarations: chalet.h
 #include "chalet.h"
+#include <esp_ota_ops.h>   // D114: the firmware image id
 
 // ═══════════════════════════════════════════════════════════════════════════
 // SETTINGS PERSISTENCE
@@ -12,36 +13,40 @@
 // (NVS), uses them for its own fake sonars and repeats them to its tip-ups in the sonar control message.
 // =============================================================================================
 static void sonarKnobsSave();
+// D114: the saved knob set belongs to ONE firmware image. After a flash every knob starts from the defaults of the new
+// image (the measured, optimal ones), on the chalet and on the hubs, and the chalet pushes that set to the hubs when it
+// hears them. Before (D95), a knob ever set by hand survived every flash: Frank's vdrv 11 from the 12 V days was still
+// pushed by the chalet after flashing vdrv 20 as the default (07nov TUNE log: vdrv=11). Changes made on the page / OLED
+// still persist across reboots of the same image. The image id is the first 8 bytes of the app ELF SHA-256.
+static void sonarAppId(uint8_t out[8]) { const esp_app_desc_t* d = esp_ota_get_app_description(); memcpy(out, d->app_elf_sha256, 8); }
 void sonarKnobsLoad() {
-  // D95: the saved set is applied knob by knob, except where the saved value is the default the firmware had when it
-  // was saved ("d"): that knob was never set by hand, so a NEW default (freq 2 in D94, dead 5 in D88) takes over on
-  // the first boot after a flash. A knob the user did set keeps its value. (Before, a flashed default never reached
-  // a board that had a saved set, and only Defaults / KNOB on the page did.)
   Preferences p;
   p.begin("sonar", true);
-  uint8_t v[icemesh::sonar::P_COUNT], d[icemesh::sonar::P_COUNT];
+  uint8_t v[icemesh::sonar::P_COUNT], b[8], id[8];
   const size_t n = p.getBytes("p", v, sizeof(v));
-  const size_t nd = p.getBytes("d", d, sizeof(d));
+  const size_t nb = p.getBytes("b", b, sizeof(b));
   p.end();
-  bool changed = false;
-  for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) {
-    const uint8_t def = icemesh::sonar::paramInfo(i).def;
-    const uint8_t was = i < nd ? d[i] : icemesh::sonar::paramLegacyDefault(i);   // the default when it was saved
-    if (v[i] == was && was != def) { changed = true; continue; }   // untouched knob, new default: keep the default
-    sonarPrm.set(i, v[i]);   // clamped; newer knobs keep their default
+  sonarAppId(id);
+  const bool same = nb == sizeof(b) && memcmp(b, id, sizeof(b)) == 0;
+  if (same) for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) sonarPrm.set(i, v[i]);   // clamped; newer knobs keep their default
+  else {
+    sonarPrm.defaults();
+    Serial.printf("Sonar knobs: new firmware, defaults loaded%s\n", n ? " (the saved set of the previous firmware is discarded)" : "");
+    sonarKnobsSave();
   }
-  if (changed || nd != icemesh::sonar::P_COUNT) sonarKnobsSave();   // (re)writes "p" and the current defaults "d"
   sonarPrmGen++;
   if (currentRole == ROLE_GATEWAY_OFFSHORE) meshDemoSetParams(sonarPrm.v, icemesh::sonar::P_COUNT);
 }
 
 static void sonarKnobsSave() {
-  uint8_t d[icemesh::sonar::P_COUNT];
+  uint8_t d[icemesh::sonar::P_COUNT], id[8];
   for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) d[i] = icemesh::sonar::paramInfo(i).def;
+  sonarAppId(id);
   Preferences p;
   p.begin("sonar", false);
   p.putBytes("p", sonarPrm.v, icemesh::sonar::P_COUNT);
-  p.putBytes("d", d, icemesh::sonar::P_COUNT);   // D95: the defaults this set was saved against
+  p.putBytes("d", d, icemesh::sonar::P_COUNT);   // D95: the defaults this set was saved against (kept for reference)
+  p.putBytes("b", id, sizeof(id));               // D114: and the firmware image it belongs to
   p.end();
 }
 

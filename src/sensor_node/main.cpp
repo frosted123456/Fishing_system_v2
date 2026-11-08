@@ -45,6 +45,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <Arduino.h>
+#include <esp_ota_ops.h>   // D114: the firmware image id
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
@@ -67,6 +68,7 @@
 #include <driver/rtc_io.h>
 #include <sys/time.h>
 #include "sonar_tuss4470.h"    // v2 (D43): real sonar (TUSS4470), only with SONAR_REAL=1
+#include <bottom_memory.h>     // D116: last steady bottom in NVS
 #if defined(BTN_PIN) && BTN_PIN >= 0 && SONAR_REAL && (BTN_PIN == SONAR_PIN_BOOST || BTN_PIN == SONAR_PIN_O4)
 #error "BTN_PIN collides with a sonar pin (the pod v0.3 env must set BTN_PIN=-1)"
 #endif
@@ -163,7 +165,15 @@ RTC_DATA_ATTR bool lastReedState = false;
 RTC_DATA_ATTR icemesh::HallLatch hall;            // v2 (D46): plain struct, zero at power-on, kept in deep sleep
 RTC_DATA_ATTR uint32_t hallTurnsBase = 0;         // D69: hall.total when armed / trip cleared: the run is counted from here
 static volatile uint32_t hallEdges = 0;           // counted by the pin interrupt while awake
-static void IRAM_ATTR hallIsr() { hallEdges++; }
+static volatile uint32_t hallLastUs = 0;          // D99: ISR-level debounce: an edge counts only when the level really changed
+static volatile uint8_t hallLastLvl = 0xFF;       //      and >= 2 ms after the last one (a spool cannot turn faster than that; RF / sonar glitches are ns-us)
+static void IRAM_ATTR hallIsr() {
+  const uint32_t us = micros(); const uint8_t l = (uint8_t)digitalRead(REED_PIN);
+  if (l == hallLastLvl) return;
+  hallLastLvl = l;                                    // D100: the level is tracked even for a rejected edge, so the next real edge is not thrown away
+  if ((uint32_t)(us - hallLastUs) < 2000) return;
+  hallLastUs = us; hallEdges++;
+}
 static uint64_t hallNowMs() {                     // system time keeps running through deep sleep (RTC timer)
   struct timeval tv; gettimeofday(&tv, nullptr);
   return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
@@ -568,6 +578,9 @@ void loop() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setupPins() {
+  #ifdef BOARD_ESP32C3
+  gpio_deep_sleep_hold_dis(); gpio_hold_dis((gpio_num_t)REED_PIN);   // D100: the pad was held through deep sleep (see goToSleep)
+  #endif
   // Configure reed switch input with internal pull-up
   // When magnet is present (flag down): switch closed, reads LOW
   // When magnet absent (flag up/FISH ON): switch open, reads HIGH
@@ -579,8 +592,9 @@ void setupPins() {
   delayMicroseconds(50);   // pull-up settles (open-drain output)
   hall.settings(TRIGGER_FLIPS, HALL_WINDOW_MS, (uint32_t)HALL_CLEAR_SEC * 1000UL);
   hall.boot((uint8_t)digitalRead(REED_PIN), lastWakeReason == ESP_SLEEP_WAKEUP_EXT0, hallNowMs());
-  hallEdges = 0;
   attachInterrupt(digitalPinToInterrupt(REED_PIN), hallIsr, CHANGE);
+  delayMicroseconds(100);
+  hallLastLvl = (uint8_t)digitalRead(REED_PIN); hallLastUs = micros(); hallEdges = 0;   // D99: the attach itself may fire once: not an edge
   DEBUG_PRINTF("Hall latch: level %u, %lu flips since power-on, trip %s\n", hall.level, (unsigned long)hall.total, hall.on ? "ON" : "off");
 #else
   pinMode(REED_PIN, INPUT_PULLUP);
@@ -1157,10 +1171,15 @@ void enterDeepSleep() {
         };
         gpio_config(&config);
 
-        // Enable GPIO wakeup for deep sleep (HIGH level trigger)
-        // Note: esp_sleep_enable_gpio_wakeup() works for deep sleep on ESP32-C3
-        gpio_wakeup_enable((gpio_num_t)REED_PIN, GPIO_INTR_HIGH_LEVEL);
-        esp_sleep_enable_gpio_wakeup();
+        // D99: deep-sleep GPIO wake on the C3 is esp_deep_sleep_enable_gpio_wakeup() (IDF 4.4.7 has it, esp_sleep.h);
+        // gpio_wakeup_enable + esp_sleep_enable_gpio_wakeup are the LIGHT-sleep API: the C3 tip-up woke on the timer only
+        // and reported a trip up to a heartbeat late
+        esp_deep_sleep_enable_gpio_wakeup(1ULL << REED_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+        // D100: with CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS the IDF's sleep prepare() would swap a HIGH-wake pin
+        // to pull-DOWN: the open reed would read LOW and never wake. Holding the pad with the pull-up latched first keeps
+        // our wiring (reed to GND, pull-up, open = HIGH = flag up). setupPins() releases the hold. TO CONFIRM on a C3.
+        gpio_pullup_en((gpio_num_t)REED_PIN); gpio_pulldown_dis((gpio_num_t)REED_PIN);
+        gpio_hold_en((gpio_num_t)REED_PIN); gpio_deep_sleep_hold_en();
       #endif
     #else
       // ESP32 (WROOM/CAM): Use EXT0 wakeup (RTC GPIO supported)
@@ -1371,7 +1390,7 @@ void simApplyCmd() {
   if (!(v & 0x01) && !SONAR_BENCH && !SONAR_SIM_FORCE && !g_sonarHwOk) sonarSimOn = false;   // a real sonar keeps running
   Preferences p;
   p.begin("node", false);
-  p.putUChar("sim", v);
+  p.putUChar("sim", (uint8_t)(v & 0x01));   // D99: fake Hall trips (bit 1) are never kept across a reboot: a forgotten test mode made FISH ON alarms with no magnet
   p.end();
   DEBUG_PRINTF("Simulation set by the chalet: sonar %s, Hall trips %s\n", (v & 1) ? "on" : "off", (v & 2) ? "on" : "off");
 }
@@ -1843,10 +1862,13 @@ void sonarLoop() {
   if (!knobsLoaded) {   // the last set received, kept across deep sleep / reboot
     knobsLoaded = true;
     Preferences p; p.begin("sonar", true);
-    uint8_t v[icemesh::sonar::P_COUNT], d[icemesh::sonar::P_COUNT];
-    const size_t n = p.getBytes("p", v, sizeof(v)), nd = p.getBytes("d", d, sizeof(d)); p.end();
-    // D95: a knob saved at its then-default follows the new default (see settings.cpp on the hub)
-    for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) { const uint8_t was = i < nd ? d[i] : icemesh::sonar::paramLegacyDefault(i); if (v[i] == was && was != icemesh::sonar::paramInfo(i).def) continue; knobs.set(i, v[i]); }
+    uint8_t v[icemesh::sonar::P_COUNT], b[8], id[8];
+    const size_t n = p.getBytes("p", v, sizeof(v)), nb = p.getBytes("b", b, sizeof(b)); p.end();
+    // D114: the saved set belongs to one firmware image (see settings.cpp on the hub): after a flash, the defaults
+    { const esp_app_desc_t* ad = esp_ota_get_app_description(); memcpy(id, ad->app_elf_sha256, 8); }
+    if (nb == sizeof(b) && memcmp(b, id, sizeof(b)) == 0) { for (uint8_t i = 0; i < n && i < icemesh::sonar::P_COUNT; i++) knobs.set(i, v[i]); }
+    else if (n) { Preferences w; w.begin("sonar", false); w.remove("p"); w.putBytes("b", id, sizeof(id)); w.end(); DEBUG_PRINTLN(F("Sonar knobs: new firmware, defaults")); }
+    else { Preferences w; w.begin("sonar", false); w.putBytes("b", id, sizeof(id)); w.end(); }
     src.proc.prm = knobs;
   }
   // v2 (D43) real sonar: started once; a node with a working TUSS4470 runs its sonar whenever its hub
@@ -1868,7 +1890,8 @@ void sonarLoop() {
     if (changed) {
       src.proc.prm = knobs;
       uint8_t d[icemesh::sonar::P_COUNT]; for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) d[i] = icemesh::sonar::paramInfo(i).def;
-      Preferences p; p.begin("sonar", false); p.putBytes("p", knobs.v, icemesh::sonar::P_COUNT); p.putBytes("d", d, icemesh::sonar::P_COUNT); p.end();   // D95
+      uint8_t id[8]; { const esp_app_desc_t* ad = esp_ota_get_app_description(); memcpy(id, ad->app_elf_sha256, 8); }
+      Preferences p; p.begin("sonar", false); p.putBytes("p", knobs.v, icemesh::sonar::P_COUNT); p.putBytes("d", d, icemesh::sonar::P_COUNT); p.putBytes("b", id, sizeof(id)); p.end();   // D95 / D114
       DEBUG_PRINTLN(F("Sonar knobs updated by the chalet"));
       if (sonarRecAny()) recKnobs(knobs);
     }
@@ -1889,6 +1912,9 @@ void sonarLoop() {
   const bool fake = !hwOk || (sonarCtrlSim && (simBits & 0x01)) || SONAR_SIM_FORCE;
   if (sonarSimOn && !started) {
     src.begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());
+    #if SONAR_REAL
+    { const float sb = bottommem::load(); if (sb > 0) src.proc.seedBottom(sb); }   // D116
+    #endif
     started = true; lastTick = millis(); lastCtrl = millis();
     focus = sonarCtrlFocus;   // review: the control that started the sonar already said whether this hole is streamed
   }
@@ -1937,6 +1963,7 @@ void sonarLoop() {
         if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
           src.echo_on = sonarCtrlPrimary;   // D93
           n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 4);
+          bottommem::tick(src.proc.hasBottom(), (float)src.proc.lockedBottom());   // D116
           static uint32_t recCount = 0; static unsigned long lastRaw = 0;
           if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecord(codes, pi); recPingX(pi, src.lastProc()); }
           if (sonarRawAsk || (sonarRecAny() && sonarRawEverySec && millis() - lastRaw >= sonarRawEverySec * 1000UL)) {

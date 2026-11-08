@@ -22,6 +22,7 @@ bool attach(WebServer& srv, const char* prefix, uint8_t node_id, CommandFn fn); 
 void loop();                                   // serve the page (begin() mode only; attach() mode: the owner's handleClient)
 bool active();
 void push(const char* line);                   // one recording line (no newline) into the RAM ring
+char* pushReserve(size_t len);                 // D96: a record of len bytes to fill in place (nullptr = cannot fit)
 void setStatus(const char* bench_line, const uint8_t* codes, uint16_t nbins, float bin_m, bool recording,
                uint32_t rec_lines, uint16_t rec_every, uint16_t raw_every_s, uint16_t vbat_mv);
 uint32_t lastSeq();
@@ -36,6 +37,7 @@ inline bool attach(WebServer&, const char*, uint8_t, CommandFn) { return false; 
 inline void loop() {}
 inline bool active() { return false; }
 inline void push(const char*) {}
+inline char* pushReserve(size_t) { return nullptr; }
 inline void setStatus(const char*, const uint8_t*, uint16_t, float, bool, uint32_t, uint16_t, uint16_t, uint16_t) {}
 inline uint32_t lastSeq() { return 0; }
 inline unsigned long lastServedMs() { return 0; }

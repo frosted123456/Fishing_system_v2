@@ -1083,6 +1083,12 @@ void meshSetTransport(uint8_t tr) {
   g_cfg_transport = tr;
 }
 
+bool meshFastEcho() {   // D107: the hub sends a raw echogram line every ping while it is on the ESP-NOW backbone
+  if (g_chalet || g_hub == nullptr) return false;
+  Lock l;
+  return g_pol.ebPreferred();
+}
+
 uint8_t meshTransport() {
   if (g_chalet) return g_cfg_transport;
   if (g_hub == nullptr || g_mx == nullptr) return TR_AUTO;
@@ -1237,7 +1243,11 @@ void meshEbTick() {
     g_hub_eb_on = use;
     if (!use || g_eb_send == nullptr) return;
     const uint32_t gap = now - g_eb_last_ms;
-    if (gap < 1000UL && !(g_eb_kick && gap >= 250UL)) return;
+    // D110: while the hub streams sonar on the backbone (ESP-NOW preferred, blocks queued), a packet every 250 ms, not 1 s:
+    // one 240 B packet a second carries ONE raw echogram line at most (D107's line-per-ping never left the hub). ESP-NOW
+    // has the airtime (4 x 250 B/s); LoRa keeps its TDMA slot and 1 line/s.
+    const bool stream = g_pol.ebPreferred() && g_hub->sonar.count() > 0;
+    if (gap < 1000UL && !((g_eb_kick || stream) && gap >= 250UL)) return;
     g_eb_kick = false;
     g_eb_last_ms = now;
     uint8_t flags = static_cast<uint8_t>((g_eb_relay ? HF_EB_RELAY : 0) | HF_EB_PATH);
@@ -1591,7 +1601,7 @@ static void appendEchoJson(String& s, uint8_t node, uint32_t since, uint8_t max)
     char cells[sonar::ECHO_CELLS + 1];
     for (uint8_t c = 0; c < sonar::ECHO_CELLS; c++) cells[c] = H[sonar::echoCell(copy[i].e, c)];
     cells[sonar::ECHO_CELLS] = 0;
-    s += cells; s += "\"]";
+    s += cells; s += "\","; s += copy[i].e.scale; s += "]";   // D112: [seq, index, nf, cells, scale]
   }
   s += "]";
 }

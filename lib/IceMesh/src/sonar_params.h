@@ -45,6 +45,9 @@ enum ParamId : uint8_t {
                      //      is interference and is replaced (0 = off). Costs a new echo two pings of delay
   P_ECHOLEN,         // single-echo test: a fish echo at -6 dB is at most this x0.1 times the expected echo length
                      //      (ping length + 1 bin); longer = weeds / layer / noise, not reported (0 = off)
+  P_BOTTOM_MAX,      // D104: deepest bottom (x0.1 m, 0 = whole range). Barrel / bucket test only: its multiple can out-echo the floor
+  P_FTRIM,           // D111: burst frequency of the 200 kHz mode, 180 + ftrim kHz (20 = 200 kHz); 190 / 210 = -/+10 kHz. Set by TUNE
+  P_DRIVE,           // D118: 0 = direct drive (internal H-bridge), 1 = transformer (PRE_DRIVER_MODE: OUTA/OUTB drive two external FETs)
   P_COUNT
 };
 
@@ -62,10 +65,10 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"learn", "Static scene learning", 1, 100, 12, "x0.001"},
     {"range", "Colour range", 20, 80, 46, "dB"},
     {"tvg", "Range compensation", 0, 1, 1, ""},
-    {"cycles", "Burst cycles, base", 1, 32, 16, "cycles"},
+    {"cycles", "Burst cycles, base", 1, 32, 32, "cycles"},   // D109: 07nov sweep, 16 -> 32 = +4 dB on the floor, ring-down end unchanged
     {"gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"},
     {"pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"},
-    {"fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"},
+    {"fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"},   // D107/D109: was 8; 07nov sweep 8 -> 16 -> 32 = +6.8 / +10.8 dB on the floor, ring-down end unchanged
     {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
     {"avg", "Bursts averaged", 1, 4, 2, "per ping"},
     {"freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"},
@@ -73,11 +76,14 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
     {"thresh", "Edge threshold", 0, 15, 7, "reg 0x17"},
     {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
-    {"vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 >= V+1.5)"},
-    {"vmode", "VDRV mode", 0, 1, 0, "0 on (proven) 1 quiet"},
+    {"vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"},   // D109: the MT3608 goes to 22 V (VPWR ~21.2 V after the 1N4001): 20 V regulates with margin
+    {"vmode", "VDRV mode", 0, 2, 0, "0 on (proven) 1 quiet 2 external VDRV (D108)"},
     {"jitter", "Ping timing jitter", 0, 20, 8, "ms"},
     {"spike", "Interference filter", 0, 30, 10, "dB (0 off)"},
     {"echolen", "Max fish echo length", 0, 60, 30, "x0.1 ping (0 off)"},
+    {"bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"},
+    {"ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"},   // D113: TUNE 07nov 15:15, peak 198.8 kHz (parabola through 196-200), -3 dB band 196-202 kHz
+    {"drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"},
   };
   return T[id < P_COUNT ? id : 0];
 }

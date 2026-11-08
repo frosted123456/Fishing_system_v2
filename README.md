@@ -408,7 +408,7 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 | Follow the action | On by default. The live view goes to the hole with the most action. FISH ON wins for 2 min. Up to 2 more holes stream at the same time when the radio has room ("LIVE too") |
 | Hole cards on top | Every sonar hole with its water-column preview. Tap one to watch it live; your pick stays 5 min, then Follow takes over again |
 | Flasher | Live, about 1 s behind. Pause to freeze |
-| Last 60 seconds | Waterfall, 4 pings per second. With **Raw echogram** on (Display, default on), the hole you watch also sends its raw ping once a second (10 cm cells, 4 dB steps over the noise floor) and the waterfall shows it underneath the detector's marks, like a flasher: an echo the detector did not report is still visible. Off: only what the detector reported |
+| Last 60 seconds | Waterfall, 4 pings per second. With **Raw echogram** on (Display, default on), the hole you watch also sends its raw ping once a second (10 cm cells, 4 dB steps over the noise floor) and the waterfall shows it underneath the detector's marks, like a fish finder: an echo the detector did not report is still visible. Water (anything under the **Weak echoes** level: 4 / 8 / 12 / 20 dB over the floor; full colour at 40 dB) stays dark, the blind zone is a flat grey band, below the bottom is dimmed (second bottom echo, barrel walls). A still object (a hanging ball, a stump) is reported as a mark for a few seconds only, then becomes part of the still scene; the raw echogram keeps showing it. Off: only what the detector reported |
 | ft / m | Depth units on this phone |
 | Display | Depth scale, colour gain, weak echoes |
 | Processing | Noise filter, water type (lake / shallow / bucket), Advanced, Defaults, Send to holes again |
@@ -575,7 +575,7 @@ include/            messages shared by both
 lib/IceMesh/        mesh, sonar codec and processing, alarm rules
 lib/SonarTuss/      TUSS4470 driver
 web/suite.html      web page (built into the firmware by tools/gen_web.py)
-tools/              flash.html, flash.py, gen_web.py, lake_prep.py, web_preview.py
+tools/              flash.html, flash.py, gen_web.py, lake_prep.py, web_preview.py, sonar_chain.cpp (replay a bench recording on the page)
 images/             pictures for this README
 ```
 

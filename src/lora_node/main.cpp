@@ -20,6 +20,8 @@
 #include <arm_button.h>   // v2 (D61): arming button + armed / disarmed state (lib/IceMesh, host-tested)
 #include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
 #include <esp_system.h>   // D65: esp_reset_reason()
+#include <bottom_memory.h>   // D116
+#include <new>             // D99: std::nothrow
 static bool isMyVirtualHole(uint8_t node);   // D70: used by the beacon command handler above its definition
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -166,6 +168,7 @@ unsigned long lastLoRaRxTime = 0;   // When last valid packet was received
 // ═══════════════════════════════════════════════════════════════════════════
 
 void setup() {
+  Serial.setTxBufferSize(2048);   // D110: 4096 -> 2048 (heap: the driver allocates it); D99: a SONAR line is 3 kB; without a TX buffer Serial.write blocked the loop ~260 ms per recorded ping
   Serial.begin(DEBUG_BAUD);
   if (SONAR_REAL) Serial.setTimeout(20);   // D62: readStringUntil() must not stall the sonar ticks for the default 1 s
   delay(500);
@@ -2340,7 +2343,15 @@ void readBattery() {
 #if HOLE_HALL_LATCH
 static icemesh::HallLatch hall;                 // no deep sleep here: plain RAM, zeroed at boot
 static volatile uint32_t hallEdges = 0;
-static void IRAM_ATTR hallIsr() { hallEdges++; }
+static volatile uint32_t hallLastUs = 0;          // D99: ISR-level debounce (see sensor_node): level must change, >= 2 ms apart
+static volatile uint8_t hallLastLvl = 0xFF;
+static void IRAM_ATTR hallIsr() {
+  const uint32_t us = micros(); const uint8_t l = (uint8_t)digitalRead(REED_PIN);
+  if (l == hallLastLvl) return;
+  hallLastLvl = l;                                    // D100: the level is tracked even for a rejected edge, so the next real edge is not thrown away
+  if ((uint32_t)(us - hallLastUs) < 2000) return;
+  hallLastUs = us; hallEdges++;
+}
 static void hallPoll() {
   noInterrupts(); const uint32_t n = hallEdges; hallEdges = 0; interrupts();
   hall.edges(n, (uint8_t)digitalRead(REED_PIN), millis());
@@ -2396,6 +2407,8 @@ void setupLocalSensor() {
   hall.settings(TRIGGER_FLIPS, HALL_WINDOW_MS, (uint32_t)HALL_CLEAR_SEC * 1000UL);
   hall.boot(holeRawLast, false, millis());
   attachInterrupt(digitalPinToInterrupt(REED_PIN), hallIsr, CHANGE);
+  delayMicroseconds(100);
+  hallLastLvl = (uint8_t)digitalRead(REED_PIN); hallLastUs = micros(); hallEdges = 0;   // D99
   Serial.printf("Own hole: Hall latch on GPIO%d (trip = %u flip%s within %u s, clears after %u s still), level now %u\n",
                 REED_PIN, TRIGGER_FLIPS, TRIGGER_FLIPS > 1 ? "s" : "", HALL_WINDOW_MS / 1000, HALL_CLEAR_SEC, holeRawLast);
   #else
@@ -3026,18 +3039,39 @@ static String sonarWebCommand(const String& c);
 // D87b SWEEP: an automated preset run for the drum / dock. Each step sets one knob, takes SWEEP_PINGS pings into the
 // recording (SONAR + PINGX each, one RAW after the 3rd), with a NOTE per step; the knobs are put back at the end.
 // Serial "SWEEP" or the page's Sweep button; "SWEEP STOP" ends it early. Recording must be on (serial or phone).
-struct SweepStep { const char* label; int8_t knob; uint8_t val; };
+struct SweepStep { const char* label; int8_t knob; uint8_t val; uint8_t reg; uint8_t rval; };   // D123: reg != 0 = also write that TUSS4470 register (restored after the step)
 static const SweepStep SWEEP[] = {
   {"base (knobs as set)", -1, 0},
   {"gain 0 (10 V/V)", icemesh::sonar::P_GAIN, 0}, {"gain 1 (12.5 V/V)", icemesh::sonar::P_GAIN, 1},
   {"gain 2 (15 V/V)", icemesh::sonar::P_GAIN, 2}, {"gain 3 (20 V/V)", icemesh::sonar::P_GAIN, 3},
-  {"cycles 8", icemesh::sonar::P_PULSE_CYCLES, 8}, {"cycles 24", icemesh::sonar::P_PULSE_CYCLES, 24}, {"cycles 32", icemesh::sonar::P_PULSE_CYCLES, 32},
+  // D106: the cycles steps set BOTH burst lengths: with the chalet watching, the hub pings in focus mode, which uses
+  // fcycles (8) and avg 1, so the 07nov 13:15 sweep's "cycles 8/24/32" and "avg 1/4" changed nothing (floor -51.6 dB and
+  // the same 10 cm echo width on every step). The avg steps were dropped for that reason; bpf 28 / 30 took their place.
+  {"cycles 8", icemesh::sonar::P_PULSE_CYCLES, 8}, {"cycles 16", icemesh::sonar::P_PULSE_CYCLES, 16}, {"cycles 24", icemesh::sonar::P_PULSE_CYCLES, 24}, {"cycles 32", icemesh::sonar::P_PULSE_CYCLES, 32},
   {"freq 1 (rotate)", icemesh::sonar::P_FREQ_MODE, 1}, {"freq 2 (200 kHz only)", icemesh::sonar::P_FREQ_MODE, 2},
   {"thresh 3", icemesh::sonar::P_THRESH, 3}, {"thresh 11", icemesh::sonar::P_THRESH, 11},
-  {"avg 1", icemesh::sonar::P_AVG, 1}, {"avg 4", icemesh::sonar::P_AVG, 4},
+  {"bpf 28 (186 kHz centre)", icemesh::sonar::P_BPF, 28}, {"bpf 30 (206 kHz centre)", icemesh::sonar::P_BPF, 30},
   {"vdrv 12 V", icemesh::sonar::P_VDRV, 12},
 };
 static const uint8_t SWEEP_N = sizeof(SWEEP) / sizeof(SWEEP[0]), SWEEP_PINGS = 6;
+// D123 "SWEEP RX": receiver settings never tried on this hardware (nothing to lose, measured in one recording). Band-pass
+// Q (reg 0x11 bits 5:4: 0 = Q 4 default, 1 = Q 5, 3 = Q 3, 2 = Q 2; ping() never rewrites 0x11), quiet listening
+// (vmode 1 = DIS_VDRV_REG_LSTN), gain 3, and Q 5 + gain 3. Base twice (start / end) to see drift. 10 pings a step for a
+// steadier noise-floor estimate. Log-amp intercept / slope (0x12) left out: both shift echo AND floor at the VOUT buffer
+// (no SNR change) and the slope would change our dB scale; BPF_FC_TRIM equals a bpf code step in our range (datasheet).
+static const SweepStep SWEEP_RX[] = {
+  {"rx base (Q 4)", -1, 0, 0, 0},
+  {"bpf Q 5 (reg 0x11 = 0x10)", -1, 0, 0x11, 0x10},
+  {"bpf Q 3 (reg 0x11 = 0x30)", -1, 0, 0x11, 0x30},
+  {"bpf Q 2 (reg 0x11 = 0x20)", -1, 0, 0x11, 0x20},
+  {"vmode 1 (VDRV regulator off while listening)", icemesh::sonar::P_VMODE, 1, 0, 0},
+  {"gain 3 (20 V/V)", icemesh::sonar::P_GAIN, 3, 0, 0},
+  {"gain 3 + bpf Q 5", icemesh::sonar::P_GAIN, 3, 0x11, 0x10},
+  {"rx base again (drift check)", -1, 0, 0, 0},
+};
+static const uint8_t SWEEP_RX_N = sizeof(SWEEP_RX) / sizeof(SWEEP_RX[0]);
+static const SweepStep* g_sw = SWEEP; static uint8_t g_swN = SWEEP_N, g_swPings = SWEEP_PINGS;
+static uint8_t g_sweepReg11 = 0; static bool g_sweepRegTouched = false;
 static int8_t g_sweepStep = -1; static uint8_t g_sweepPings = 0; static uint8_t g_sweepSaved[icemesh::sonar::P_COUNT];
 static void recLine(const char* line, bool force = false) {   // one recording line to every active sink
   if (sonarRec || force) Serial.println(line);
@@ -3066,13 +3100,14 @@ void setupSonarReal() {
     // interface joins the saved network (secrets.h STA_SSID, or serial WIFI:ssid:pass) and the page is at
     // http://icefish-hub<id>.local/bench/ (or the IP printed below). ESP-NOW keeps working when the router is on channel 1.
     loadWifiCredentials();
-    if (storedSsid[0]) { WiFi.begin(storedSsid, storedPassword); Serial.printf("Bench: joining %s for the page (WIFI:ssid:pass to change)\n", storedSsid); }
+    if (storedSsid[0]) { WiFi.setAutoReconnect(false); WiFi.setSleep(false); WiFi.begin(storedSsid, storedPassword, ESPNOW_CHANNEL); Serial.printf("Bench: joining %s for the page (WIFI:ssid:pass to change)\n", storedSsid); }   // D99/D100: the channel only starts the scan there; the 3-try cap below is what keeps the radio on-air on the ice
     else Serial.println(F("Bench: no cabin network saved (serial WIFI:ssid:pass): the page is on the hotspot only"));
   } else Serial.println(F("Bench page: hub role with the web server only"));
   #endif
   #endif
 }
 // D87: the bench build keeps the hub hotspot up (it switches itself off after 30 min otherwise)
+static uint8_t g_benchJoinTries = 0;   // D99
 void loopSonarBenchHotspot() {
   #if SONAR_REAL && SONAR_BENCH
   static unsigned long last = 0, lastSta = 0; static bool wasUp = false;
@@ -3089,7 +3124,8 @@ void loopSonarBenchHotspot() {
   hubHotspotReport();
   if (storedSsid[0]) {   // D87e: the cabin / house network, retried every minute
     if (WiFi.status() == WL_CONNECTED) Serial.printf("Bench page on the network: http://%s/bench/ (http://icefish-hub%u.local/bench/)\n", WiFi.localIP().toString().c_str(), (unsigned)NODE_ID);
-    else { Serial.printf("Bench: %s not joined yet, retrying\n", storedSsid); WiFi.begin(storedSsid, storedPassword); }
+    else if (g_benchJoinTries < 3) { g_benchJoinTries++; Serial.printf("Bench: %s not joined yet, retry %u of 3\n", storedSsid, (unsigned)g_benchJoinTries); WiFi.begin(storedSsid, storedPassword, ESPNOW_CHANNEL); }   // D99: then give up (on the ice the router is not there; every try took the radio off-air)
+    else if (g_benchJoinTries == 3) { g_benchJoinTries++; Serial.printf("Bench: %s not reachable, the page stays on the hotspot (WIFI:ssid:pass or a reboot to try again)\n", storedSsid); }
   }
   #endif
 }
@@ -3114,13 +3150,14 @@ static void sonarInfoLines() {
   uint16_t cal[17]; tuss::getCalibration(cal);
   char name[24]; snprintf(name, sizeof(name), "%s", NODE_NAME);
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
-  char buf[512];
+  char buf[640];   // D96: longer INFO line
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d vbat_mv=%u heap=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d vbat_mv=%u heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, localBatteryMv, (unsigned long)ESP.getFreeHeap());
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, localBatteryMv, (unsigned long)ESP.getFreeHeap(),
+                   (unsigned long)ESP.getMinFreeHeap(), resetReasonName(esp_reset_reason()), (unsigned long)g_bootCount);   // D96: brown-outs and heap floor on record
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf, !sonarRecAny());
   k = snprintf(buf, sizeof(buf), "KNOBS %lu", millis());
@@ -3146,10 +3183,10 @@ static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::
   if (!sonarRecAny()) return;
   char buf[640];
   int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
-                   "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u",
+                   "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u heap=%u heap_min=%u",
                    millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
                    (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
-                   o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes);
+                   o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());   // D110: heap on every ping (find the slope)
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
     k += snprintf(buf + k, sizeof(buf) - k, " t=%.3f:%u:%.1f:%.2f:%.3f", (double)o.t[i].depth, o.t[i].label, (double)o.t[i].s, (double)o.t[i].vel, (double)o.t[i].width);
   recLine(buf);
@@ -3159,44 +3196,126 @@ static void recRaw(const tuss::PingInfo& pi, bool force) {
   const uint16_t* smp; size_t n; uint32_t hz;
   tuss::lastRaw(smp, n, hz);
   if (!smp || !n) { recLine("NOTE 0 RAW: no capture yet", true); return; }
+  // D96: no heap. The line is formatted straight into the bench ring (web sink) and/or streamed to Serial in chunks.
   static const char H[] = "0123456789ABCDEF";
-  char* buf = (char*)malloc(80 + 3 * n);
-  if (!buf) { recLine("NOTE 0 RAW: out of memory", true); return; }
-  int k = snprintf(buf, 80, "RAW %lu %lu %lu %d %u ", millis(), (unsigned long)hz, (unsigned long)pi.adc_hz, pi.t0, (unsigned)n);
-  for (size_t i = 0; i < n; i++) { const uint16_t v = smp[i] & 0x0FFF; buf[k++] = H[v >> 8]; buf[k++] = H[(v >> 4) & 15]; buf[k++] = H[v & 15]; }
-  buf[k] = 0;
-  recLine(buf, force);
-  free(buf);
+  char head[80];
+  const int hk = snprintf(head, sizeof(head), "RAW %lu %lu %lu %d %u ", millis(), (unsigned long)hz, (unsigned long)pi.adc_hz, pi.t0, (unsigned)n);
+  const size_t len = (size_t)hk + 3 * n;
+  const bool toWeb = (sonarRecWeb || force) && SONAR_BENCH, toSerial = sonarRec || force;
+  char* dst = toWeb ? bench::pushReserve(len) : nullptr;
+  if (toWeb && !dst) recLine("NOTE 0 RAW: bench ring too small for a RAW line", true);
+  if (dst) {
+    memcpy(dst, head, hk); int k = hk;
+    for (size_t i = 0; i < n; i++) { const uint16_t v = smp[i] & 0x0FFF; dst[k++] = H[v >> 8]; dst[k++] = H[(v >> 4) & 15]; dst[k++] = H[v & 15]; }
+    if (toSerial) { Serial.write((const uint8_t*)dst, len); Serial.println(); }
+  } else if (toSerial) {
+    Serial.write((const uint8_t*)head, hk);
+    char chunk[192]; int k = 0;
+    for (size_t i = 0; i < n; i++) {
+      const uint16_t v = smp[i] & 0x0FFF; chunk[k++] = H[v >> 8]; chunk[k++] = H[(v >> 4) & 15]; chunk[k++] = H[v & 15];
+      if (k >= 189) { Serial.write((const uint8_t*)chunk, k); k = 0; }
+    }
+    if (k) Serial.write((const uint8_t*)chunk, k);
+    Serial.println();
+  }
+  if (sonarRecAny()) sonarRecLines++;
 }
 static void sweepApply(int8_t step) {   // one step's knob (restoring the previous step's first), NOTE, counters
   // every step starts from the saved set, so the steps are independent (gain 3 does not keep cycles 32)
   // D92: RAM only. sonarKnobSet() saves to NVS and sends to the holes: a crash mid-sweep left the step's knob (cycles 32
   // on 2026-11-04) as the saved default. The sweep's own steps never touch the saved set now.
   for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (sonarPrm[i] != g_sweepSaved[i]) sonarPrm.set(i, g_sweepSaved[i]);
-  if (step >= 0 && step < (int8_t)SWEEP_N && SWEEP[step].knob >= 0) sonarPrm.set((uint8_t)SWEEP[step].knob, SWEEP[step].val);
+  if (g_sweepRegTouched) { tuss::writeReg(0x11, g_sweepReg11); g_sweepRegTouched = false; }   // D123: register back first
+  if (step >= 0 && step < (int8_t)g_swN && g_sw[step].knob >= 0) {
+    sonarPrm.set((uint8_t)g_sw[step].knob, g_sw[step].val);
+    if (g_sw[step].knob == icemesh::sonar::P_PULSE_CYCLES) sonarPrm.set(icemesh::sonar::P_CYCLES_FOCUS, g_sw[step].val);   // D106: focus mode too
+  }
+  if (step >= 0 && step < (int8_t)g_swN && g_sw[step].reg) { tuss::writeReg(g_sw[step].reg, g_sw[step].rval); g_sweepRegTouched = true; }
   sonarPrmGen++;
   if (sonarReal) sonarReal->proc.prm = sonarPrm;
   g_sweepStep = step; g_sweepPings = 0;
   char t[96];
-  if (step >= 0 && step < (int8_t)SWEEP_N) snprintf(t, sizeof(t), "NOTE %lu SWEEP step %d/%d: %s", millis(), step + 1, SWEEP_N, SWEEP[step].label);
+  if (step >= 0 && step < (int8_t)g_swN) snprintf(t, sizeof(t), "NOTE %lu SWEEP step %d/%d: %s (0x11=0x%02X)", millis(), step + 1, g_swN, g_sw[step].label, tuss::readReg(0x11));
   else snprintf(t, sizeof(t), "NOTE %lu SWEEP done, knobs restored", millis());
   recLine(t, true);
-  if (step >= 0 && step < (int8_t)SWEEP_N) { sonarInfoLines(); }   // KNOBS line with the step's values
+  if (step >= 0 && step < (int8_t)g_swN) { sonarInfoLines(); }   // KNOBS line with the step's values
 }
 static String sweepCommand(const String& rest) {
   String a = rest; a.toUpperCase();
   if (a == "STOP") { if (g_sweepStep >= 0) sweepApply(-1); return "SWEEP stopped, knobs restored"; }
   if (!sonarRecAny()) return "SWEEP: start a recording first (REC ON or the page's Start recording), then SWEEP";
   if (g_sweepStep >= 0) return "SWEEP already running (SWEEP STOP to end it)";
+  const bool rx = (a == "RX");   // D123
+  g_sw = rx ? SWEEP_RX : SWEEP; g_swN = rx ? SWEEP_RX_N : SWEEP_N; g_swPings = rx ? 10 : SWEEP_PINGS;
+  g_sweepReg11 = tuss::readReg(0x11); g_sweepRegTouched = false;
   memcpy(g_sweepSaved, sonarPrm.v, icemesh::sonar::P_COUNT);
   sweepApply(0);
-  return "SWEEP started: " + String(SWEEP_N) + " steps x " + String(SWEEP_PINGS) + " pings, one RAW each (~" + String(SWEEP_N * SWEEP_PINGS * 2) + " s at 1 ping/s)";
+  return String(rx ? "SWEEP RX" : "SWEEP") + " started: " + String(g_swN) + " steps x " + String(g_swPings) + " pings, one RAW each (~" + String(g_swN * g_swPings * 2) + " s at 1 ping/s)";
+}
+// D111 TUNE: finds the burst frequency (ftrim) and the receive band-pass code (bpf) that give the strongest bottom echo
+// for THIS transducer: 190..210 kHz in 2 kHz steps, then bpf 28 / 29 / 30 at the best frequency, 8 pings a step (the
+// first 2 skipped while the scene settles), bottom SNR averaged. Needs a bottom in view and the transducer kept still.
+// The result is applied in RAM only and written as NOTE lines (bench log + serial): set it on the chalet (saved) or put
+// it in the defaults. Bench page "Tune" button or serial "TUNE" / "TUNE STOP". ~1 min at 4 pings/s.
+static const uint8_t TUNE_F0 = 10, TUNE_FSTEP = 2, TUNE_NF = 11, TUNE_NB = 3, TUNE_PINGS = 8, TUNE_SKIP = 2;
+static int8_t g_tuneStep = -1; static uint8_t g_tunePings = 0, g_tuneBestF = 20, g_tuneBestB = 29;
+static float g_tuneSum = 0; static uint8_t g_tuneN = 0; static float g_tuneSnr[TUNE_NF + TUNE_NB];
+static uint8_t g_tuneSaved[icemesh::sonar::P_COUNT];
+static void tuneApply(int8_t step) {
+  for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (sonarPrm[i] != g_tuneSaved[i]) sonarPrm.set(i, g_tuneSaved[i]);
+  char t[200];
+  if (step >= 0 && step < TUNE_NF + TUNE_NB) {
+    sonarPrm.set(icemesh::sonar::P_FREQ_MODE, 2);
+    if (step < TUNE_NF) sonarPrm.set(icemesh::sonar::P_FTRIM, (uint8_t)(TUNE_F0 + TUNE_FSTEP * step));
+    else { sonarPrm.set(icemesh::sonar::P_FTRIM, g_tuneBestF); sonarPrm.set(icemesh::sonar::P_BPF, (uint8_t)(28 + step - TUNE_NF)); }
+    snprintf(t, sizeof(t), "NOTE %lu TUNE step %d/%d: %u kHz, bpf %u", millis(), step + 1, TUNE_NF + TUNE_NB,
+             180u + sonarPrm[icemesh::sonar::P_FTRIM], sonarPrm[icemesh::sonar::P_BPF]);
+  } else {
+    // result: best frequency, its -3 dB band, best bpf; applied in RAM
+    float best = -1e9f; for (uint8_t k = 0; k < TUNE_NF; k++) if (g_tuneSnr[k] > best) best = g_tuneSnr[k];
+    int lo = -1, hi = -1; for (uint8_t k = 0; k < TUNE_NF; k++) if (g_tuneSnr[k] >= best - 3.0f) { if (lo < 0) lo = k; hi = k; }
+    float bb = -1e9f; for (uint8_t k = 0; k < TUNE_NB; k++) if (g_tuneSnr[TUNE_NF + k] > bb) { bb = g_tuneSnr[TUNE_NF + k]; g_tuneBestB = (uint8_t)(28 + k); }
+    const float at200 = g_tuneSnr[(20 - TUNE_F0) / TUNE_FSTEP];
+    if (step == -2) snprintf(t, sizeof(t), "NOTE %lu TUNE stopped, knobs restored", millis());
+    else {
+      int k = snprintf(t, sizeof(t), "NOTE %lu TUNE snr by kHz:", millis());
+      for (uint8_t i = 0; i < TUNE_NF && k > 0 && k < (int)sizeof(t) - 12; i++) k += snprintf(t + k, sizeof(t) - k, " %u:%.1f", 180u + TUNE_F0 + TUNE_FSTEP * i, (double)g_tuneSnr[i]);
+      recLine(t, true);
+      snprintf(t, sizeof(t), "NOTE %lu TUNE result: ftrim %u (%u kHz) bpf %u, bottom SNR %.1f dB (%+.1f dB vs 200 kHz / bpf 29), -3 dB band %u-%u kHz. Applied in RAM: set ftrim / bpf on the chalet to keep",
+               millis(), g_tuneBestF, 180u + g_tuneBestF, g_tuneBestB, (double)bb, (double)(bb - at200), 180u + TUNE_F0 + TUNE_FSTEP * (lo < 0 ? 0 : lo), 180u + TUNE_F0 + TUNE_FSTEP * (hi < 0 ? 0 : hi));
+      sonarPrm.set(icemesh::sonar::P_FTRIM, g_tuneBestF); sonarPrm.set(icemesh::sonar::P_BPF, g_tuneBestB);
+    }
+  }
+  sonarPrmGen++;
+  if (sonarReal) sonarReal->proc.prm = sonarPrm;
+  g_tuneStep = step >= 0 && step < TUNE_NF + TUNE_NB ? step : -1; g_tunePings = 0; g_tuneSum = 0; g_tuneN = 0;
+  recLine(t, true);
+}
+static String tuneCommand(const String& rest) {
+  String a = rest; a.toUpperCase();
+  if (a == "STOP") { if (g_tuneStep >= 0) tuneApply(-2); return "TUNE stopped, knobs restored"; }
+  if (g_tuneStep >= 0 || g_sweepStep >= 0) return "TUNE / SWEEP already running";
+  memcpy(g_tuneSaved, sonarPrm.v, icemesh::sonar::P_COUNT);
+  for (uint8_t k = 0; k < TUNE_NF + TUNE_NB; k++) g_tuneSnr[k] = -99.0f;
+  tuneApply(0);
+  return "TUNE started: 14 steps x 8 pings (~30-60 s). Keep the transducer still, bottom in view";
+}
+static void tuneOnPing(const icemesh::sonar::SonarProc::Out& o) {
+  if (g_tuneStep < 0) return;
+  if (++g_tunePings > TUNE_SKIP && o.bottom > 0.f) { g_tuneSum += (float)o.bottom_snr; g_tuneN++; }
+  if (g_tunePings < TUNE_PINGS) return;
+  g_tuneSnr[g_tuneStep] = g_tuneN ? g_tuneSum / g_tuneN : -99.0f;
+  char t[96]; snprintf(t, sizeof(t), "NOTE %lu TUNE step %d: bottom SNR %.1f dB over %u pings", millis(), g_tuneStep + 1, (double)g_tuneSnr[g_tuneStep], g_tuneN); recLine(t, true);
+  if (g_tuneStep == TUNE_NF - 1) {   // frequency part done: the best one before the bpf part
+    float best = -1e9f; for (uint8_t k = 0; k < TUNE_NF; k++) if (g_tuneSnr[k] > best) { best = g_tuneSnr[k]; g_tuneBestF = (uint8_t)(TUNE_F0 + TUNE_FSTEP * k); }
+  }
+  tuneApply(g_tuneStep + 1 < TUNE_NF + TUNE_NB ? g_tuneStep + 1 : -1);
 }
 static void sweepOnPing() {   // after each recorded ping
   if (g_sweepStep < 0) return;
   g_sweepPings++;
   if (g_sweepPings == 3) sonarRawAsk = true;
-  if (g_sweepPings >= SWEEP_PINGS) sweepApply(g_sweepStep + 1 < (int8_t)SWEEP_N ? g_sweepStep + 1 : -1);
+  if (g_sweepPings >= g_swPings) sweepApply(g_sweepStep + 1 < (int8_t)g_swN ? g_sweepStep + 1 : -1);
 }
 #endif
 
@@ -3219,7 +3338,7 @@ static String sonarWebCommand(const String& c) {
     String U = c; U.trim(); U.toUpperCase();
     if (U.startsWith("KNOB")) { handleSerialCommandLine(c); r = "Knob set (saved on this hub)"; handled = true; }
   }
-  if (!handled) r = "Sonar: REC ON|OFF, REC WEB ON|OFF, RECEVERY n, RAWEVERY s, NOTE text, RAW, SWEEP [STOP], INFO, STAT, KNOB name value, REG addr [value], CAL [17 numbers]";
+  if (!handled) r = "Sonar: REC ON|OFF, REC WEB ON|OFF, RECEVERY n, RAWEVERY s, NOTE text, RAW, SWEEP [RX|STOP], INFO, STAT, KNOB name value, REG addr [value], CAL [17 numbers]";
   if (SONAR_BENCH && r.length()) Serial.println(r);
   return r;
 }
@@ -3270,6 +3389,12 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
     return "Noted";
   } else if (w == "RAW") {
     sonarRawAsk = true; r = "RAW capture after the next ping";
+  } else if (w == "TUNE") {   // D111
+    #if SONAR_REAL
+    r = tuneCommand(rest);
+    #else
+    r = "no sonar in this build";
+    #endif
   } else if (w == "SWEEP") {   // D87b
     #if SONAR_REAL
     r = sweepCommand(rest);
@@ -3341,12 +3466,15 @@ static void sonarRealTick(bool focus) {
   tuss::PingInfo pi;
   if (tuss::ping(sonarPrm, focus, codes, pi)) {
     icemesh::sonar::Block out[4];   // D93: DATA + BG + BASE + ECHO can coincide on one ping
+    sonarReal->echo_every = meshFastEcho() ? 1 : icemesh::sonar::SonarSource::ECHO_EVERY;   // D107: every ping on ESP-NOW, 1/s on LoRa
     sonarReal->echo_on = meshFocusNode() == NODE_ID;   // D93: raw lines for THE focus hole only, not the 'live too' extras (66 B/s each)
     const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 4);
     for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     static uint32_t recCount = 0; static unsigned long lastRaw = 0;   // D87 recorder
     if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecordLine(codes, pi); recPingX(pi, sonarReal->lastProc()); sweepOnPing(); }
     else if (g_sweepStep >= 0 && !sonarRecAny()) sweepApply(-1);   // recording stopped mid-sweep: put the knobs back
+    tuneOnPing(sonarReal->lastProc());   // D111: runs with or without a recording
+    bottommem::tick(sonarReal->proc.hasBottom(), (float)sonarReal->proc.lockedBottom());   // D116
     if (sonarRawAsk || (sonarRecAny() && sonarRawEverySec && millis() - lastRaw >= sonarRawEverySec * 1000UL)) {
       recRaw(pi, sonarRawAsk && !sonarRecAny());   // asked while not recording: print it anyway
       sonarRawAsk = false; lastRaw = millis();
@@ -3405,7 +3533,7 @@ void sonarHubLoop() {
   static bool realRunning = false, realSlept = false;
   if (ownFake) {
     static unsigned long ownTick = 0;
-    if (ownSonar == nullptr) { ownSonar = new icemesh::sonar::SonarSource(); ownSonar->proc.prm = sonarPrm; ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); baitToSource(ownSonar, NODE_ID); ownTick = millis(); }
+    if (ownSonar == nullptr) { ownSonar = new (std::nothrow) icemesh::sonar::SonarSource(); if (ownSonar == nullptr) { Serial.println("Own fake sonar: not enough RAM"); return; } ownSonar->proc.prm = sonarPrm; ownSonar->begin(NODE_ID, 4241UL + NODE_ID, (uint16_t)esp_random()); baitToSource(ownSonar, NODE_ID); ownTick = millis(); }
     if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
     while (millis() - ownTick >= 250UL) {
       ownTick += 250UL;
@@ -3419,9 +3547,10 @@ void sonarHubLoop() {
     static unsigned long realTick = 0;
     if (!realRunning) {
       realRunning = true; realSlept = false; realTick = millis();
-      if (sonarReal == nullptr) { sonarReal = new icemesh::sonar::SonarSource(); sonarReal->proc.prm = sonarPrm; }
+      if (sonarReal == nullptr) { sonarReal = new (std::nothrow) icemesh::sonar::SonarSource(); if (sonarReal == nullptr) { Serial.println("Real sonar: not enough RAM for the processor"); return; } sonarReal->proc.prm = sonarPrm; }
       sonarReal->begin(NODE_ID, 0xF15A0000UL + NODE_ID, (uint16_t)esp_random());   // fresh tracks; the fake scene inside is unused
       sonarReal->proc.prm = sonarPrm; sonarRealBait();
+      { const float sb = bottommem::load(); if (sb > 0) { sonarReal->proc.seedBottom(sb); Serial.printf("Sonar: bottom seeded at %.2f m (last steady one, D116)\n", (double)sb); } }
       Serial.println(F("Sonar: real sonar on the own hole"));
     }
     if (millis() - realTick > 1000UL) realTick = millis() - 250UL;   // loop() was busy: don't burst
@@ -3466,7 +3595,11 @@ void sonarHubLoop() {
 
   // virtual holes (test holes generated by this hub): fake sonar by default, fake trips when asked
   const uint8_t want = settings.sonarVirtualNodes > 4 ? 4 : settings.sonarVirtualNodes;
-  if (want > 0 && sonarVirt == nullptr) { sonarVirt = new icemesh::sonar::SonarSource[4]; for (uint8_t k = 0; k < 4; k++) sonarVirt[k].proc.prm = sonarPrm; }
+  if (want > 0 && sonarVirt == nullptr) {   // D99: 4 x 18 kB; on a hub with the real sonar the heap is ~35 kB and `new` would abort the board
+    if (ESP.getMaxAllocHeap() < 4 * sizeof(icemesh::sonar::SonarSource) + 24 * 1024) { static bool said = false; if (!said) { said = true; Serial.println("Test holes: not enough RAM on this board (real sonar hub), skipped"); } return; }
+    sonarVirt = new (std::nothrow) icemesh::sonar::SonarSource[4]; if (sonarVirt == nullptr) return;
+    for (uint8_t k = 0; k < 4; k++) sonarVirt[k].proc.prm = sonarPrm;
+  }
   while (activeVirt > want) { activeVirt--; meshHubObserveNode(meshSonarVirtualId(NODE_ID, activeVirt), MESH_LS_OFFLINE, 0, 0, 0); }
   while (activeVirt < want) {
     const uint8_t id = meshSonarVirtualId(NODE_ID, activeVirt);
