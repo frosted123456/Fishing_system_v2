@@ -60,7 +60,9 @@ table{width:100%;border-collapse:collapse}td{padding:3px 2px;font-size:14px}td i
 </style></head><body>
 <h1>Sonar bench <span id="node" class="k"></span></h1>
 <div class="card"><div class="g" id="vals"></div></div>
-<div class="card"><canvas id="cv" width="600" height="180"></canvas><div class="k">Last ping, 200 kHz: depth left to right (m), echo strength up. Red line = bottom.</div></div>
+<div class="card"><canvas id="cv" width="600" height="180"></canvas><div class="k">Last ping, 200 kHz: depth left to right (m), echo strength up. Red line = bottom. Orange = deconvolved (experimental). Purple dashed = baseline (lower envelope): each peak is measured over it.</div></div>
+<div class="card"><div class="row" style="gap:8px;align-items:flex-start"><div style="flex:1;min-width:0"><div class="k">Echogram, raw</div><canvas id="e0" width="240" height="220" style="height:220px"></canvas></div><div style="flex:1;min-width:0"><div class="k">Deconvolved (experimental, D125)</div><canvas id="e1" width="240" height="220" style="height:220px"></canvas></div></div>
+<label class="k"><input type="checkbox" id="ear"> colour the deconvolved view by echo area instead of height</label> <label class="k"><input type="checkbox" id="ebg"> background removed (D126)</label><div class="k">Time left to right (one column per page update), depth down to the bottom + 0.5 m. Raw and deconvolved: dark = noise floor, full colour 40 dB over it; background removed: from 2 dB over the baseline, full colour at 20 dB. Experimental: peaks narrowed with the hump measured on the ball (docs/SONAR_DECONV.md), heights kept.</div></div>
 <div class="card">
  <div class="row"><button id="rec">Start recording</button><button id="dl">Download</button><button id="raw">RAW now</button><button id="sw" title="automated preset run: gain, cycles, frequency, threshold, averaging, drive (recording must be on)">Sweep</button><button id="swr" title="D123: receiver sweep: band-pass Q 2/3/4/5, quiet listening (vmode 1), gain 3 (~3 min, recording on, transducer still)">RX sweep</button><button id="tn" title="D111: finds the best burst frequency and band-pass code for this transducer (~1 min, bottom in view, keep still)">Tune</button></div>
  <p id="rinfo" class="k">Not recording.</p>
@@ -78,14 +80,98 @@ function draw(){const c=$('cv'),x=c.getContext('2d'),w=c.width,h=c.height,hex=st
  const n=hex.length/2;if(!n)return;const fg=getComputedStyle(document.body).color;x.strokeStyle=fg;x.lineWidth=1;x.beginPath();
  for(let i=0;i<n;i++){const v=parseInt(hex.substr(2*i,2),16),X=i*w/n,Y=h-v*h/255;i?x.lineTo(X,Y):x.moveTo(X,Y)}x.stroke();
  const m=n*st.bin_m;x.fillStyle=fg;x.font='11px system-ui';for(let d=0;d<=m;d+=Math.max(0.5,Math.ceil(m/8))){x.fillText(d+'m',d/m*w+2,11)}
- if(st.bottom>0){x.strokeStyle='#e53935';const X=st.bottom/m*w;x.beginPath();x.moveTo(X,0);x.lineTo(X,h);x.stroke()}}
+ if(st.bottom>0){x.strokeStyle='#e53935';const X=st.bottom/m*w;x.beginPath();x.moveTo(X,0);x.lineTo(X,h);x.stroke()}
+ const L=EH[EH.length-1];if(L&&L.o.length===n){const ln=(v,c,dash)=>{x.strokeStyle=c;x.setLineDash(dash);x.beginPath();for(let i=0;i<n;i++){const X=i*w/n,Y=h-(v[i]+100)*255/95*h/255;i?x.lineTo(X,Y):x.moveTo(X,Y)}x.stroke();x.setLineDash([])};ln(L.o,'#fb8c00',[]);if(L.b)ln(L.b,'#8e24aa',[4,3])}}
+// D125 experimental sharpened echogram (docs/SONAR_DECONV.md). Input: dB per bin (array), noise floor dB, bottom m,
+// bin size m. Output: {out: sharpened dB, area: area-equivalent dB} (same length; outside the window = input).
+// Steps: baseline = floor + ring-down decay through the lowest points (D126e) >= nf; linear
+// excess; Richardson-Lucy with the hump measured on the ball (07nov, 32 cycles); 5 cm re-blur; each lobe height-matched
+// to the raw excess at its peak (keeps peak height and small bumps, only narrows); area = lobe flux / hump area.
+// o.noDeconv (D126): skip the deconvolution (line already sharpened on the hub): baseline, lobes and area only.
+// Returns { out, area, base } (base = the baseline in dB inside the window, the input elsewhere).
+function sharpenEcho(db, nf, bottom, bin, o) {
+  o = o || {};
+  const dead = o.dead != null ? o.dead : 0.30, buf = o.buf != null ? o.buf : 0.35, IT = o.it || 100, P = 0.02;
+  const N = db.length, a = Math.max(1, Math.round(dead / bin)), b = Math.min(N, Math.round(((bottom > 0 ? bottom : N * bin) + buf) / bin));
+  const out = db.slice(), area = db.slice(), base = db.slice();
+  const n = b - a; if (n < 8) return { out, area, base };
+  // hump (2.5 cm bins, ref = index 3), resampled to this bin size
+  const H0 = [0, 0.58, 0.86, 1.0, 0.88, 0.56, 0.28, 0.10, 0.04], h0 = i => (i < 0 || i > 8) ? 0 : (H0[Math.floor(i)] * (1 - (i % 1)) + (H0[Math.min(8, Math.floor(i) + 1)] * (i % 1)));
+  const r = bin / 0.025, L0 = Math.floor(3 / r), H = []; for (let k = -L0; k * r <= 5; k++) H.push(h0(3 + k * r));
+  const C = L0, L = H.length, HS = H.reduce((s, v) => s + v, 0), HN = H.map(v => v / HS);
+  const y = db.slice(a, b);
+  const k0 = Math.min(n, Math.round(0.15 / bin));
+  const lin = v => Math.pow(10, v / 20), dbv = v => 20 * Math.log10(Math.max(v, 1e-9));
+  // D126e baseline: power = F + A exp(-d / tau) (floor + ring-down tail), F, A >= 0, fitted through the lowest points
+  // (points above the curve weigh 2 %, 8 passes, tau 2 cm .. 2 m): one continuous, never-rising line, >= nf
+  const Pw = y.map(v => Math.pow(10, v / 10)), pr = Math.min(...Pw), Q = Pw.map(v => v / pr);   // normalised (>= 1)
+  let w = new Array(n).fill(1), M = Q.slice();
+  for (let pass = 0; pass < 8; pass++) {
+    let best = null;
+    for (let t = 0; t < 30; t++) {
+      const tau = 0.02 * Math.pow(100, t / 29), rr = Math.exp(-bin / tau);
+      let s11 = 0, s12 = 0, s22 = 0, r1 = 0, r2 = 0, E = 1;
+      for (let i = 0; i < n; i++) { const sw = w[i] / (Q[i] * Q[i]); s11 += sw; s12 += sw * E; s22 += sw * E * E; r1 += sw * Q[i]; r2 += sw * E * Q[i]; E *= rr; }
+      const cands = [], det = s11 * s22 - s12 * s12;
+      if (det > 0) { const F = (r1 * s22 - r2 * s12) / det, A = (r2 * s11 - r1 * s12) / det; if (F >= 0 && A >= 0) cands.push([F, A]); }
+      if (s11 > 0) cands.push([Math.max(r1 / s11, 0), 0]); if (s22 > 0) cands.push([0, Math.max(r2 / s22, 0)]);
+      for (const [F, A] of cands) { let r = 0; E = 1; for (let i = 0; i < n; i++) { const m = F + A * E; r += w[i] * (m - Q[i]) * (m - Q[i]) / Math.max(m * Q[i], 1e-30); E *= rr; }
+        if (!best || r < best[0]) best = [r, F, A, rr]; }
+    }
+    let E = 1; for (let i = 0; i < n; i++) { M[i] = best[1] + best[2] * E; E *= best[3]; w[i] = Q[i] > M[i] ? P : 1; }
+  }
+  const B = M.map(v => Math.max(10 * Math.log10(Math.max(v * pr, 1e-30)), nf));
+  const e = y.map((v, i) => Math.max(lin(v) - lin(B[i]), 0));
+  // Richardson-Lucy
+  const conv = (v, k, ref) => { const res = new Array(n).fill(0); for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < k.length; j++) { const m = i + ref - j; if (m >= 0 && m < n) s += v[m] * k[j]; } res[i] = s; } return res; };
+  const HF = HN.slice().reverse(); let x = new Array(n).fill(Math.max(e.reduce((s, v) => s + v, 0) / n, 1e-9));
+  const ee = e.map(v => v + 1e-12);
+  if (o.noDeconv) x = e.slice();
+  else for (let it = 0; it < IT; it++) { const est = conv(x, HN, C); const q = ee.map((v, i) => v / (est[i] + 1e-12)); const c = conv(q, HF, L - 1 - C); x = x.map((v, i) => v * c[i]); }
+  const G = [-3, -2, -1, 0, 1, 2, 3].map(k => Math.exp(-0.5 * Math.pow(k * bin / 0.025 / 0.85, 2)));
+  const s = o.noDeconv ? e.slice() : conv(x.map(v => v / HS), G, 3);
+  const so = new Array(n).fill(0), ar = new Array(n).fill(0);
+  // D126e lobes (after the ring zone) between minima of s, merged into one echo unless the deconvolved dip is >= 6 dB AND
+  // the raw ping itself dips >= 3 dB between them (a flat plateau - barrel wall, weeds, a school - is not broken into
+  // fish); everything from 6 cm above the bottom on is one echo. Each echo comes down to the baseline valley to valley.
+  const smax = Math.max(...s, 1e-30), cc = Math.max(...e) / smax, lvl = i => dbv(s[i] * cc + lin(B[i]));
+  const kb = bottom > 0 ? Math.round((bottom - 0.06) / bin) - a : n, am = (i0, i1) => { let j = i0; for (let i = i0; i < i1; i++) if (s[i] > s[j]) j = i; return j; };
+  const mins = [k0]; for (let i = k0 + 1; i < n - 1; i++) if (s[i] <= s[i - 1] && s[i] <= s[i + 1]) mins.push(i); mins.push(n);
+  const groups = [];
+  for (let m = 0; m + 1 < mins.length; m++) { const i0 = mins[m], i1 = mins[m + 1]; if (i1 <= i0) continue; const jr = am(i0, i1);
+    if (groups.length) { const g = groups[groups.length - 1], jl = am(g[0], g[1]);
+      let pl = -1e9, pq = -1e9; for (let i = g[0]; i < g[1]; i++) pl = Math.max(pl, lvl(i)); for (let i = i0; i < i1; i++) pq = Math.max(pq, lvl(i));
+      let rmin = 1e9; for (let i = jl; i <= jr; i++) rmin = Math.min(rmin, y[i]);
+      if ((!(jr >= kb && jl < kb) && (Math.min(pl, pq) - lvl(i0) < 6 || Math.min(y[jl], y[jr]) - rmin < 3)) || (jr >= kb && jl >= kb)) { g[1] = i1; g[3] = jr; continue; } }
+    groups.push([i0, i1, jr, jr]); }
+  for (const g of groups) { const i0 = g[0], i1 = g[1], Lg = i1 - i0, l0 = i0 > k0 ? s[i0] : 0, l1 = i1 < n ? s[i1 - 1] : 0;
+    const v = []; for (let i = i0; i < i1; i++) v.push(Math.max(s[i] - (Lg > 1 ? l0 + (l1 - l0) * (i - i0) / (Lg - 1) : l0), 0));
+    let j = 0; for (let i = 0; i < Lg; i++) if (v[i] > v[j]) j = i; const pv = v[j]; if (pv <= 0) continue;
+    let raw = 0; for (let i = Math.max(0, i0 + j - 1); i < Math.min(n, i0 + j + 2); i++) raw = Math.max(raw, e[i]);
+    let sx = 0, sv = 0, ss = 0; for (let i = i0; i < i1; i++) { so[i] = v[i - i0] * raw / pv; sx += x[i]; sv += v[i - i0]; ss += s[i]; }
+    const jf = g[2], jl = i1 === n ? n - 1 : g[3]; if (jl > jf) for (let i = jf; i <= jl; i++) so[i] = Math.max(so[i], e[i] * 0.5);   // merged echo: no dip deeper than 6 dB under the raw ping
+    const fl = sx * sv / Math.max(ss, 1e-30); for (let i = i0; i < i1; i++) ar[i] = v[i - i0] >= 0.5 * pv ? fl : 0; }   // area: whole echo, painted on its core
+  for (let i = 0; i < k0; i++) { so[i] = e[i]; ar[i] = 0; }   // ring zone left raw
+  for (let i = 0; i < n; i++) { out[a + i] = Math.max(dbv(so[i] + lin(B[i])), B[i]); area[a + i] = ar[i] > 0 ? dbv(ar[i] / HS + lin(B[i])) : out[a + i]; base[a + i] = B[i]; }
+  return { out, area, base };
+}
+
+let EH=[],lastHex='';const PALS=[[0,10,30,38],[.16,17,65,76],[.32,27,119,120],[.48,88,174,124],[.62,211,192,74],[.76,238,139,47],[.9,216,67,47],[1,255,230,210]];
+function palc(v){v=Math.max(0,Math.min(1,v));for(let i=1;i<PALS.length;i++)if(v<=PALS[i][0]){const a=PALS[i-1],b=PALS[i],t=(v-a[0])/(b[0]-a[0]);return[0,1,2].map(k=>a[k+1]+(b[k+1]-a[k+1])*t)}return PALS[7].slice(1)}
+function addEcho(){const hex=st.codes||'';if(!hex||hex===lastHex||!st.bin_m)return;lastHex=hex;const n=hex.length/2,d=[];for(let i=0;i<n;i++)d.push(-100+parseInt(hex.substr(2*i,2),16)*95/255);
+ const f={};(st.line||'').replace(/(\w+)=([^\s|]+)/g,(a,k,v)=>{f[k]=v});let nf=parseFloat(f.noise);if(!(nf<0)){const t=d.slice(n>>1).sort((p,q)=>p-q);nf=t[t.length>>1]}
+ const bt=+st.bottom||0;let r;try{r=sharpenEcho(d,nf,bt,st.bin_m,{dead:0.3})}catch(e){r={out:d,area:d}}EH.push({d,o:r.out,a:r.area,b:r.base,nf,bt});if(EH.length>240)EH.shift();drawE()}
+function drawE(){if(!EH.length)return;const bin=st.bin_m,n=EH[EH.length-1].d.length;let mb=0;EH.forEach(e=>{if(e.bt>mb)mb=e.bt});const D=Math.min(n*bin,mb>0?mb+0.5:n*bin);
+ [['e0','d'],['e1',$('ear').checked?'a':'o']].forEach(([id,key])=>{const c=$(id),x=c.getContext('2d'),W=c.width,Hh=c.height,img=x.createImageData(W,Hh),c0=W-EH.length;
+  for(let col=0;col<W;col++){const e=EH[col-c0];for(let row=0;row<Hh;row++){const p=(row*W+col)*4;let rgb=[10,30,38];if(e){const i=Math.min(n-1,Math.floor(row/Hh*D/bin));rgb=($('ebg').checked&&key!=='d')?palc((e[key][i]-e.b[i]-2)/18):palc((e[key][i]-e.nf-4)/36)}img.data[p]=rgb[0];img.data[p+1]=rgb[1];img.data[p+2]=rgb[2];img.data[p+3]=255}}
+  x.putImageData(img,0,0);x.fillStyle='#fff';x.font='10px system-ui';x.fillText(D.toFixed(1)+' m',2,Hh-3)})}
 function show(){const L=st.line||'';const f={};L.replace(/(\w+)=([^\s|]+)/g,(a,k,v)=>{f[k]=v});
  const items=[['Bottom',f.bottom],['Bottom SNR',f.bot_snr],['Noise floor',f.noise],['Ring-down',f.ring],['ADC rate',(f.adc||'').replace('(want','')],['Time zero',f.t0],['Raw max',f.raw_max],['Ping time',f.ping]];
  const tg=(L.split('|')[2]||'').trim();
  $('vals').innerHTML=items.map(([k,v])=>'<div><div class="k">'+k+'</div><div class="v">'+(v||'-')+'</div></div>').join('')+'<div style="grid-column:1/-1"><div class="k">Targets</div><div class="v">'+(tg||'none')+'</div></div>'+
  ((/CLIPPED|FAULT|FALLBACK|ALARM/.test(L))?'<div style="grid-column:1/-1" class="bad">'+(L.match(/\((CLIPPED|FALLBACK|RING ALARM)\)|BURST FAULT\([^)]*\)/g)||[]).join(' ')+'</div>':'');
  $('node').textContent=st.node?('tip-up '+st.node+' · battery '+st.vbat+' mV · free RAM '+st.heap):'';draw()}
-async function poll(){try{const r=await fetch('s');st=await r.json();show();
+async function poll(){try{const r=await fetch('s');st=await r.json();addEcho();show();
  if(st.rec!==recOn&&!busy){recOn=st.rec;ui()}}catch(e){$('vals').innerHTML='<div class="bad">No connection to the tip-up</div>'}}
 async function pull(){if(!recOn||busy)return;busy=true;try{const r=await fetch('log?since='+last);const t=await r.text();
  for(const ln of t.split('\n')){if(!ln)continue;if(ln.startsWith('#first ')){const f=+ln.slice(7);if(last&&f>last+1)lost+=f-last-1;continue}
@@ -102,9 +188,9 @@ $('tn').onclick=async()=>{if(confirm('Tune the burst frequency and band-pass? Ab
 $('nb').onclick=async()=>{const t=$('note').value.trim();if(!t)return;await cmd('NOTE ['+stamp()+'] '+t);$('note').value=''};
 $('ap').onclick=async()=>{await cmd('RECEVERY '+$('every').value);await cmd('RAWEVERY '+$('rawe').value)};
 async function knobs(){try{const k=await (await fetch('k')).json();$('kn').innerHTML=k.map(o=>'<tr><td>'+o.label+'<div class="k">'+o.key+' · '+o.min+'-'+o.max+' '+o.unit+'</div></td><td><input id="k_'+o.key+'" type="number" value="'+o.val+'"></td><td><button data-k="'+o.key+'">Set</button></td></tr>').join('');
- document.querySelectorAll('#kn button').forEach(b=>b.onclick=async()=>{await cmd('KNOB '+b.dataset.k+' '+$('k_'+b.dataset.k).value)})}catch(e){}}
+ document.querySelectorAll('#kn button').forEach(b=>b.onclick=async()=>{const k=b.dataset.k;await cmd('KNOB '+k+' '+$('k_'+k).value);await knobs();const r=$('k_'+k);if(r){r.style.outline='2px solid var(--ok)';setTimeout(()=>r.style.outline='',2500)}})}catch(e){}}
 window.onbeforeunload=()=>lines.length?'Recording not downloaded':undefined;
-knobs();poll();setInterval(poll,1500);setInterval(pull,400);
+$('ear').onchange=drawE;$('ebg').onchange=drawE;knobs();poll();setInterval(poll,1500);setInterval(pull,400);
 </script></body></html>)HTML";
 
 static unsigned long g_served = 0;

@@ -28,7 +28,7 @@ enum ParamId : uint8_t {
   P_PING_HZ_X4,      // ping rate while something moves (x0.25/s: 16 = 4/s)
   P_CYCLES_FOCUS,    // burst cycles in focus mode (shorter = 2-3 cm resolution)
   P_IDLE_HZ_X4,      // ping rate when nothing moves (x0.25/s: 4 = 1/s)
-  P_AVG,             // bursts averaged per ping in base mode (1-4, +3-6 dB)
+  P_AVG,             // bursts averaged per ping (1-4; D134: also in focus, max 4 bursts x frequencies); narrows the noise flicker
   P_FREQ_MODE,       // 0 = 3 bursts per ping (190/200/210), 1 = one frequency per ping, rotating, 2 = 200 kHz only
   P_SOUND,           // sound speed - 1350 m/s (53 = 1403 m/s, water 0-2 degC)
   P_BPF,             // TUSS4470 band-pass code for 200 kHz (reg 0x10; 0x1D = 196.8 kHz, datasheet); 190/210 = -1/+1
@@ -48,6 +48,9 @@ enum ParamId : uint8_t {
   P_BOTTOM_MAX,      // D104: deepest bottom (x0.1 m, 0 = whole range). Barrel / bucket test only: its multiple can out-echo the floor
   P_FTRIM,           // D111: burst frequency of the 200 kHz mode, 180 + ftrim kHz (20 = 200 kHz); 190 / 210 = -/+10 kHz. Set by TUNE
   P_DRIVE,           // D118: 0 = direct drive (internal H-bridge), 1 = transformer (PRE_DRIVER_MODE: OUTA/OUTB drive two external FETs)
+  P_SHARP,           // D126: echogram line 0 = raw, 1 = sharpened on the hub (deconvolved), 2 = sharpened + doublet split (experimental)
+  P_DET,             // D127: fish detector 0 = peak over the noise floor + prominence (prototype), 1 = scene CFAR + matched filter (experimental)
+  P_ECHO_MODE,       // D133: echogram line 0 = raw cells (66 B), 1 = echo marks (baseline + one entry per echo, 14-35 B) with a raw line every 10th
   P_COUNT
 };
 
@@ -70,7 +73,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"},
     {"fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"},   // D107/D109: was 8; 07nov sweep 8 -> 16 -> 32 = +6.8 / +10.8 dB on the floor, ring-down end unchanged
     {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
-    {"avg", "Bursts averaged", 1, 4, 2, "per ping"},
+    {"avg", "Bursts averaged", 1, 4, 2, "per ping (D134: in focus too)"},
     {"freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"},
     {"sound", "Sound speed", 0, 255, 53, "+1350 m/s"},
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
@@ -84,6 +87,9 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"},
     {"ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"},   // D113: TUNE 07nov 15:15, peak 198.8 kHz (parabola through 196-200), -3 dB band 196-202 kHz
     {"drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"},
+    {"sharp", "Sharpened echogram", 0, 2, 2, "0 raw (legacy) 1 sharpened 2 + doublet split"},   // D126; D128: default 2 (was 0)
+    {"det", "Fish detector", 0, 1, 0, "0 classic 1 adaptive + matched filter (experimental: a still target fades)"},   // D127; D128: stays 0 (a fish holding still under the bait was lost)
+    {"echo", "Echogram sent as", 0, 1, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th"},   // D133; D135: default 1 (was 0)
   };
   return T[id < P_COUNT ? id : 0];
 }

@@ -58,6 +58,7 @@ class SonarProc {
   sreal gateScale() const { const sreal k = dt / sp::DT(); return k < R(1) ? R(1) : (k > R(8) ? R(8) : k); }   // D91: 1 at 4 pings/s, 4 at 1 ping/s
   enum { RING_LEARN = 40, RING_ALARM_PINGS = 8, COVER_PINGS = 240, EARLY_COVER_PINGS = 12 };   // D89: a still near-bottom echo is "cover" after 240 pings (1 min at 4/s), not 30
   static sreal ringAlarmExtra() { return R(0.15); }   // m longer than normal (est., re-check on real ice)
+  static sreal midwaterCoverS() { return R(600); }   // D124: a still mid-water echo becomes structure after 10 min
   // D103: the "near bottom" band (m above the detected bottom; a still echo inside it is cover after COVER_PINGS).
   // Floor 0.2 m = the bottom echo's own extent above its onset (pulse 0.06-0.11 m at 16-32 cycles + onset +-2 bins
   // + hard-bottom tail: the drum's bottom-tail track sits 0.16 m above the floor); slope 0.3 x depth = the room a
@@ -323,20 +324,56 @@ class SonarProc {
     sm[0] = c[0]; sm[N - 1] = c[N - 1];
     for (int i = 1; i < N - 1; i++) sm[i] = static_cast<float>((static_cast<sreal>(c[i - 1]) + static_cast<sreal>(c[i]) + static_cast<sreal>(c[i + 1])) / R(3));
     Peak* pk_ = S.peaks; int np = 0; uint16_t long_echoes = 0;
-    const int i0 = std::max(std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M())), rEnd), i1 = bI - 5;   // D90: past the ring-down too
+    // D127 knob det 1 (experimental): a peak is a fish candidate when its echo stands out from the LEARNED SCENE at
+    // that depth (static_ / sig_: per-bin level and spread, learned without the tracked targets) by a matched-filter
+    // statistic: the excess power over the scene summed under the hump of one target (power weights), divided by the
+    // scene's own fluctuation under the same hump (constant false alarm rate, like radar CFAR). It replaces "snr over
+    // the noise floor" + prominence, and searches from the blind-zone knob (the scene contains the ring-down tail, so
+    // a fish inside the ring tail can be seen). Threshold = snr knob / 2 in dB of that ratio (10 -> 5 dB).
+    // warm-up: the first 24 pings learn the scene fast and unmasked (ring-down tail, walls, weeds) with the classic
+    // detector; without it the ring tail (not yet in the scene) became a permanent false target (empty barrel 08nov)
+    const bool detWarm = prm[P_DET] == 1 && ping_n_ < 24;
+    const bool det1 = prm[P_DET] == 1 && have_static_ && !detWarm;
+    const int iDead = std::max(1, roundi(R(prm[P_DEADZONE_DM] / 10.0) / BIN_M()));
+    const int i0 = det1 ? iDead : std::max(iDead, rEnd), i1 = bI - 5;   // D90: past the ring-down too (classic)
+    float* mf = S.vpix;   // free until the display values below
+    if (det1) {
+      static const sreal HM[5] = {R(0.3364), R(0.7396), R(1), R(0.7744), R(0.3136)};   // hump^2 (power), 5 bins around its peak
+      for (int i = 0; i < N; i++) mf[i] = -100.f;
+      for (int i = std::max(2, i0 - 1); i < std::min(N - 2, i1 + 1); i++) {
+        sreal A = R(0), Nn = R(0);
+        for (int k = -2; k <= 2; k++) { const int j = i + k; const sreal ps = db2p(static_cast<sreal>(static_[j]));
+          const sreal ex = static_cast<sreal>(lin[j]) - ps; A += HM[k + 2] * (ex > R(0) ? ex : R(0));
+          Nn += HM[k + 2] * ps * (db2p(static_cast<sreal>(sig_[j])) - R(1)); }
+        mf[i] = static_cast<float>(R(10) * std::log10(R(1) + A / std::max(Nn, R(1e-20))));
+      }
+    }
     for (int i = i0; i < i1; i++) {
+      if (det1) {
+        if (!(mf[i] >= mf[i - 1] && mf[i] > mf[i + 1])) continue;
+        if (static_cast<sreal>(mf[i]) < R(prm[P_SNR_DB]) * R(0.5)) continue;
+      } else {
       if (!(sm[i] >= sm[i - 1] && sm[i] > sm[i + 1])) continue;
       const sreal snr = static_cast<sreal>(d[i]) - nf; if (snr < R(prm[P_SNR_DB])) continue;
       sreal mn = R(1e30);
       for (int k = -6; k <= 6; k++) { const int j = i + k; if (j >= 0 && j < N && static_cast<sreal>(sm[j]) < mn) mn = sm[j]; }
       if (static_cast<sreal>(sm[i]) - mn < R(prm[P_PROM_DB])) continue;
+      }
       const sreal A = sm[i - 1], B = sm[i], Cc = sm[i + 1], den = A - R(2) * B + Cc;
       const sreal dl = den < R(0) ? clampr(R(0.5) * (A - Cc) / den, R(-0.5), R(0.5)) : R(0);
       if (prm[P_ECHOLEN]) {   // D57 single-echo test (Echoview single-beam SED): echo length 6 dB below the peak
         const sreal top = static_cast<sreal>(d[i]) - R(6);
         // scan kept inside the search window: the ring-down (left) and the bottom echo (right) are not this echo
-        int l6 = i; while (l6 > i0 && static_cast<sreal>(d[l6 - 1]) > top) l6--;
-        int r6 = i; while (r6 + 1 < i1 && static_cast<sreal>(d[r6 + 1]) > top) r6++;
+        int l6 = i, r6 = i;
+        if (det1) {   // D127: a weak echo's -6 dB level is inside the noise: measure the excess over the scene instead
+          auto exs = [&](int j) { return static_cast<sreal>(lin[j]) - db2p(static_cast<sreal>(static_[j])); };
+          const sreal t4 = R(0.25) * exs(i);
+          while (l6 > i0 && exs(l6 - 1) > t4) l6--;
+          while (r6 + 1 < i1 && exs(r6 + 1) > t4) r6++;
+        } else {
+        while (l6 > i0 && static_cast<sreal>(d[l6 - 1]) > top) l6--;
+        while (r6 + 1 < i1 && static_cast<sreal>(d[r6 + 1]) > top) r6++;
+        }
         const sreal len = static_cast<sreal>(r6 - l6 + 1) * BIN_M();
         if (len > (pulse_m + BIN_M()) * R(prm[P_ECHOLEN] / 10.0)) { long_echoes++; continue; }
       }
@@ -407,7 +444,7 @@ class SonarProc {
       have_static_ = true;
     }
     uint8_t* mask = S.mask; memset(mask, 0, N);
-    for (int k = 0; k < n_tracks_; k++) {
+    for (int k = 0; k < n_tracks_ && !detWarm; k++) {   // D127: no mask while the det-1 scene warms up
       const Track& T = tracks_[k];
       if (T.age < 2 || T.label == LBL_COVER) continue;
       const int b = roundi(T.depth / BIN_M());
@@ -416,7 +453,7 @@ class SonarProc {
     for (int i = 0; i < N; i++) {
       const sreal dev = static_cast<sreal>(d[i]) - static_cast<sreal>(static_[i]);
       if (!mask[i]) {
-        static_[i] = static_cast<float>(static_cast<sreal>(static_[i]) + R(prm[P_STATIC_LEARN] / 1000.0) * dev);
+        static_[i] = static_cast<float>(static_cast<sreal>(static_[i]) + (detWarm ? R(0.2) : R(prm[P_STATIC_LEARN] / 1000.0)) * dev);
         sig_[i] = static_cast<float>(static_cast<sreal>(sig_[i]) + R(0.02) * (std::fabs(dev) - static_cast<sreal>(sig_[i])));
       }
       S.dyn[i] = static_cast<float>(dev - (R(2.2) * static_cast<sreal>(sig_[i]) + R(2)));
@@ -508,6 +545,9 @@ class SonarProc {
   const float* binSig() const { return sig_; }
   static const float* binStatic() { return scratch().bgv; }    // learned static scene (grey) 0..1
   static const float* binChanged() { return scratch().al; }    // 0..1: live echo differs from the static scene
+  // D126f: 4 work arrays of BINS floats (lin, c, sm, dyn) lent between two step() calls (the next step overwrites them;
+  // nothing reads them after step()). Used by the echogram sharpening so it needs no heap.
+  static float* lendScratch(int k) { Scratch& S = scratch(); return k == 0 ? S.lin : k == 1 ? S.c : k == 2 ? S.sm : k == 3 ? S.dyn : S.arr; }   // D133: 4 = arr (the echo line built from several pings)
 
  private:
   struct Peak { sreal depth; int bin; sreal s, width; float f0, f2; sreal v; };
@@ -631,7 +671,9 @@ class SonarProc {
     // in the 33 in no-ball file) stayed "Fish 1.4 ft" for good; on a lake a branch, a stuck line or a sinker with no bait
     // depth set does the same. A fish's echo flickers several dB from ping to ping (tilt, fins) even when it holds its
     // depth; this one varied 0.3 dB. Reversible: it is a fish again the moment it moves or flickers.
-    if (n >= 30 && T.age > COVER_PINGS && hi - lo < R(0.03)) {
+    // D124: after 10 minutes (was COVER_PINGS = 1 min at 4/s): under the ice a fish can hover still by the lure for a
+    // minute or more; commercial sounders never relabel a still mid-water echo. Time, not pings (1-4 pings/s).
+    if (n >= 30 && static_cast<sreal>(T.age) * dt > midwaterCoverS() && hi - lo < R(0.03)) {
       sreal sl = R(1e30), sh = R(-1e30);
       for (int k = 0; k < n; k++) { const sreal v = T.back(k).s; if (v < sl) sl = v; if (v > sh) sh = v; }
       if (sh - sl < R(2)) return LBL_COVER;

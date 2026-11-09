@@ -40,7 +40,8 @@ class SonarOutbox {
     int slot = -1;
     for (uint8_t i = 0; i < CAP && slot < 0; i++) {
       const Item& it = items_[i];
-      if (it.used && it.node == node && it.type == type && type != BT_DATA && (type != BT_BG || it.seg == seg)) slot = i;   // (an ECHO line replaces the node's older one: only the newest matters)
+      if (it.used && it.node == node && it.type == type && type != BT_DATA && (type != BT_BG || it.seg == seg) &&
+          (type != BT_ECHO || ((it.data[1] ^ blk[1]) & 0x04) == 0)) slot = i;   // an ECHO line replaces the node's older one of the same kind (D133b: a marks line never replaces a pending raw one)
     }
     for (uint8_t i = 0; i < CAP && slot < 0; i++) if (!items_[i].used) slot = i;
     if (slot < 0) { slot = victim(); dropped++; }

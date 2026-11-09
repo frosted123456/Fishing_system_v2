@@ -38,7 +38,7 @@ def chain_pings(since, mx, echo_since):
     r = {"node": state["focus"], "last": out[-1][0] if out else since, "pings": out}
     if echo_since is not None:
         es = {C * e["index"]: e for e in ch["echo"]}
-        lines = [[i + 1, i, es[i]["nf"], es[i]["c"], es[i].get("k", 0)] for i in range(max(0, k - 64), k) if i in es and i + 1 > echo_since][-16:]
+        lines = [[i + 1, i, es[i]["nf"], es[i]["c"], es[i].get("k", 0), es[i].get("s", 0), es[i].get("m", 0)] for i in range(max(0, k - 64), k) if i in es and i + 1 > echo_since][-16:]
         r["elast"] = lines[-1][0] if lines else echo_since; r["echo"] = lines
     return r
 state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "sil_until": 0,
@@ -56,10 +56,10 @@ KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contras
          ("range", "Colour range", 20, 80, 46, "dB"), ("tvg", "Range compensation", 0, 1, 1, ""),
          ("cycles", "Burst cycles, base", 1, 32, 32, "cycles"), ("gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"),
          ("pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"), ("fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"),
-         ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 2, "per ping"),
+         ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 2, "per ping (D134: in focus too)"),
          ("freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"), ("sound", "Sound speed", 0, 255, 53, "+1350 m/s"),
          ("bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"), ("thresh", "Edge threshold", 0, 15, 7, "reg 0x17"),
-         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"), ("vmode", "VDRV mode", 0, 2, 0, "0 on (proven) 1 quiet 2 external VDRV (D108)"), ("bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"), ("ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"), ("drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)")]
+         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"), ("vmode", "VDRV mode", 0, 2, 0, "0 on (proven) 1 quiet 2 external VDRV (D108)"), ("bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"), ("ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"), ("drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"), ("sharp", "Sharpened echogram", 0, 2, 2, "0 raw (legacy) 1 sharpened 2 + doublet split"), ("det", "Fish detector", 0, 1, 0, "0 classic 1 adaptive + matched filter (experimental: a still target fades)"), ("echo", "Echogram sent as", 0, 1, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th")]
 state["knobs"] = {k[0]: k[4] for k in KNOBS}
 if CHAIN and "knobs" in CHAIN: state["knobs"].update({k: v for k, v in CHAIN["knobs"].items() if k in state["knobs"]})   # the recording's knobs
 def knobs_json():

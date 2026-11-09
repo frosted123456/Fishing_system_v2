@@ -115,6 +115,7 @@ const unsigned long DISPLAY_SLEEP_MS = 5UL * 60UL * 1000UL;  // 5 minutes
 // watchdog loop shows on serial and on the boot screen instead of looking like "the box went to sleep".
 RTC_NOINIT_ATTR uint32_t g_bootCount;
 RTC_NOINIT_ATTR uint32_t g_bootMagic;
+RTC_NOINIT_ATTR uint32_t g_crashRun;   // D126c: crash resets in a row (panic / watchdog), cleared after 2 min of normal running
 static const char* resetReasonName(esp_reset_reason_t r) {
   switch (r) {
     case ESP_RST_POWERON: return "power-on";
@@ -186,6 +187,9 @@ void setup() {
     const esp_reset_reason_t r = esp_reset_reason();
     if (g_bootMagic != 0xB007C0DEUL || r == ESP_RST_POWERON) { g_bootMagic = 0xB007C0DEUL; g_bootCount = 0; }
     g_bootCount++;
+    const bool crash = r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT;
+    if (g_bootCount == 1) g_crashRun = 0;
+    g_crashRun = crash ? g_crashRun + 1 : 0;
     Serial.printf("Reset:       %s (boot %lu since power-on)%s\n", resetReasonName(r), (unsigned long)g_bootCount,
                   r == ESP_RST_BROWNOUT ? "  <- supply sagged: battery flat / weak, or a load spike" : "");
   }
@@ -204,6 +208,10 @@ void setup() {
   // Load persisted settings
   loadSettings();
   sonarKnobsLoad();
+  if (g_crashRun >= 2) {   // D126c: safe mode: 2 crash resets in a row: the experimental knobs (saved) off for this boot only
+    sonarPrm.set(icemesh::sonar::P_SHARP, 0); sonarPrm.set(icemesh::sonar::P_DET, 0); sonarPrm.set(icemesh::sonar::P_ECHO_MODE, 0); sonarPrm.set(icemesh::sonar::P_AVG, 1);
+    Serial.printf("SAFE MODE: %lu crash resets in a row: knobs sharp 0, det 0, echo 0, avg 1 until the next reboot (saved values kept)\n", (unsigned long)g_crashRun);
+  }
   baitLoad();
   posLoad();
   
@@ -349,6 +357,7 @@ void loop() {
   PerfScope perfLoop(PF_LOOP);
   // BUG FIX #8: Feed hardware watchdog to prevent reset
   esp_task_wdt_reset();
+  if (g_crashRun && millis() > 120000UL) g_crashRun = 0;   // D126c: 2 min without a crash: not a crash loop
 
   // BUG FIX #14: Refresh self-node status every 5 seconds
   // This prevents the self node from appearing stale and ensures
@@ -3336,7 +3345,19 @@ static String sonarWebCommand(const String& c) {
   String r = sonarCommandReply(c, true, handled);
   if (!handled) {
     String U = c; U.trim(); U.toUpperCase();
-    if (U.startsWith("KNOB")) { handleSerialCommandLine(c); r = "Knob set (saved on this hub)"; handled = true; }
+    if (U.startsWith("KNOB")) {   // D126b: say what happened (the old reply read the same for a typo)
+      String a = c; a.trim(); a = a.substring(4); a.trim(); const int sp = a.indexOf(' ');
+      String k = sp > 0 ? a.substring(0, sp) : a; k.toLowerCase();
+      int id = -1; for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (k == icemesh::sonar::paramInfo(i).key) id = i;
+      const int was = id >= 0 ? sonarPrm[id] : -1;
+      handleSerialCommandLine(c); handled = true;
+      if (id < 0) r = String("Unknown knob '") + k + "' (nothing changed)";
+      else {
+        const icemesh::sonar::ParamInfo& f = icemesh::sonar::paramInfo(id);
+        r = String(f.key) + " = " + String(sonarPrm[id]) + " " + f.unit + (was == sonarPrm[id] ? String(" (unchanged") : String(" (was ") + String(was)) +
+            ", range " + String(f.lo) + "-" + String(f.hi) + "), saved on this hub, used from the next ping";
+      }
+    }
   }
   if (!handled) r = "Sonar: REC ON|OFF, REC WEB ON|OFF, RECEVERY n, RAWEVERY s, NOTE text, RAW, SWEEP [RX|STOP], INFO, STAT, KNOB name value, REG addr [value], CAL [17 numbers]";
   if (SONAR_BENCH && r.length()) Serial.println(r);

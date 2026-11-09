@@ -1601,7 +1601,7 @@ static void appendEchoJson(String& s, uint8_t node, uint32_t since, uint8_t max)
     char cells[sonar::ECHO_CELLS + 1];
     for (uint8_t c = 0; c < sonar::ECHO_CELLS; c++) cells[c] = H[sonar::echoCell(copy[i].e, c)];
     cells[sonar::ECHO_CELLS] = 0;
-    s += cells; s += "\","; s += copy[i].e.scale; s += "]";   // D112: [seq, index, nf, cells, scale]
+    s += cells; s += "\","; s += copy[i].e.scale; s += ","; s += copy[i].e.sharp; s += ","; s += copy[i].e.marks; s += "]";   // D112 / D126 / D133: [seq, index, nf, cells, scale, sharpened, marks] (marks: cells = the payload, 2 nibbles per byte, low first)
   }
   s += "]";
 }

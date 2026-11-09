@@ -435,7 +435,12 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   if (g_asleep) { wake(); delay(SONAR_WAKE_MS); }
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
-  const uint8_t avg = focus ? 1 : p[P_AVG];
+  // D134: the bursts of one ping are averaged (power) in focus too (was: focus = 1 burst). Averaging does not raise the echo
+  // or the floor, it narrows the noise's ping-to-ping flicker (04nov sweep: 0.70 -> 0.34 dB with 4 bursts), so a weaker
+  // echo stands clear of the noise. Capped at 4 bursts x frequencies per focus ping (~116 ms at 200 kHz only).
+  const uint8_t nfq = p[P_FREQ_MODE] == 0 ? 3 : 1;
+  const uint8_t avgCap = (uint8_t)(4 / nfq), avgF = p[P_AVG] < avgCap ? p[P_AVG] : avgCap;
+  const uint8_t avg = focus ? (avgF < 1 ? 1 : avgF) : p[P_AVG];
   // VDRV_CTRL (0x16): bits 3:0 = VDRV - 5 V. vmode 0 = regulator always on, default charge current: exactly what the
   // the reference firmware writes (0x0F at 20 V) and what has fish on screen. vmode 1 = bit 6 DIS_VDRV_REG_LSTN (no
   // charging while listening) + bit 4 20 mA charge, re-armed by VDRV_TRIGGER in capture(): datasheet 7.3.1, unproven.

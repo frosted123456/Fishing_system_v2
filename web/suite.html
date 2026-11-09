@@ -37,6 +37,7 @@ a{color:var(--accent)}
 .seg{display:inline-flex;background:var(--chip);border-radius:12px;padding:3px;gap:2px}
 .seg button{border:0;background:transparent;color:var(--muted);padding:7px 14px;border-radius:9px;min-height:38px;font-weight:600;cursor:pointer}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:inset 0 0 0 1px var(--line)}
+.quick{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;font-size:.9rem}.quick label{display:flex;align-items:center;gap:6px;white-space:nowrap}.quick input[type=range]{width:130px}.quick b{min-width:44px;display:inline-block}.quick .btn{min-height:32px;padding:3px 10px}
 .modebar{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px}
 .hint{color:var(--muted);font-size:.92rem}
 .simb{background:#F2C94C;color:#3A2A00;border-radius:6px;padding:2px 8px;font-weight:700;font-size:.85rem;letter-spacing:.02em}
@@ -128,7 +129,7 @@ a{color:var(--accent)}
 .actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .actions .btn{min-height:38px;padding:5px 11px}
 .btn[aria-pressed="true"].warn{background:#F2C94C;border-color:#F2C94C;color:#3A2A00}
-.rtbar[hidden]{display:none}.rtbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#F2C94C;color:#3A2A00;padding:6px 14px;font-weight:700;font-size:.95rem}.rtbar .btn{background:#3A2A00;color:#fff;border-color:#3A2A00}.rtt td,.rtt th{padding:4px 8px;text-align:right}.rtt td:first-child,.rtt th:first-child{text-align:left}.follow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 8px}#follow[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.rtbar[hidden]{display:none}.rtbar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;background:#F2C94C;color:#3A2A00;padding:6px 14px;font-weight:700;font-size:.95rem}.rtbar .btn{background:#3A2A00;color:#fff;border-color:#3A2A00}.rtt td,.rtt th{padding:4px 8px;text-align:right}.rtt td:first-child,.rtt th:first-child{text-align:left}.follow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 8px}#bold[aria-pressed=true],#follow[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .alert{position:fixed;left:0;right:0;bottom:0;z-index:20;padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));pointer-events:none}
 .alert>div{pointer-events:auto;max-width:1240px;margin:0 auto;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px;background:var(--alert);color:var(--alert-ink);border-radius:14px;padding:10px 14px;font-size:1.05rem;box-shadow:0 6px 24px rgba(0,0,0,.35)}
 body.has-alert{padding-bottom:84px}
@@ -291,12 +292,18 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
   </div>
   <div class="playback">
     <button class="btn" id="play" type="button" aria-pressed="true">Pause</button>
+    <button class="btn" id="bold" type="button" aria-pressed="false" title="D137: echoes seen again at the same depth (within 10 cm) in 2 of the last 4 lines are drawn thicker. Display only.">Bold</button>
     <span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span>
   </div>
   <div class="modebar">
     <span class="simb" id="simb" hidden>FAKE DATA</span>
     <span class="tog"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
     <span class="hint" id="st"></span>
+  </div>
+  <div class="quick" role="group" aria-label="Quick colour controls">
+    <label title="D137: lifts faint echoes into brighter colours (0 = linear, as before). Faint noise lifts too: pair it with Weak echoes = Hide faint. This screen only.">Weak-echo boost <input type="range" id="vBoost" min="0" max="100" step="10"> <b id="vBoostV">0 %</b></label>
+    <label title="D137: dB over the noise floor painted as the brightest colour (default 40). Lower: weak echoes brighter, the bottom saturates sooner. This screen only.">Full colour at <input type="range" id="vRange" min="24" max="60" step="4"> <b id="vRangeV">40 dB</b></label>
+    <button class="btn" id="vReset" type="button" title="Boost 0 %, full colour at 40 dB">Reset</button>
   </div>
 </div>
 
@@ -355,7 +362,8 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <li><span class="name">Depth scale</span><select id="vDepth" aria-label="Depth scale"></select><span class="desc">Auto follows the bottom; a fixed scale zooms on the top of the water.</span></li>
       <li><span class="name">Colour gain</span><input type="range" id="vGain" min="-6" max="6" step="1" aria-label="Colour gain"><span class="desc">Brighter or darker echoes on this screen only.</span></li>
       <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only. Raw echogram: water is anything under 4 / 8 / 12 / 20 dB over the noise floor; full colour at 40 dB.</span></li>
-    </ul>
+    <li><span class="name">Bold (button above the echogram)</span><span class="desc">D137: an echo seen again at the same depth (within 10 cm) in at least 2 of the last 4 lines received is drawn thicker; one-off noise stays thin. Above the bottom only. The bottom and the ring-down repeat too, so they are left as they are.</span></li>
+      </ul>
     <details class="knobs"><summary>Processing on the holes (every sonar hole)</summary>
       <ul class="toggles">
         <li><span class="name">Noise filter</span><div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High</button></div><span class="desc">Low shows more (and more junk), High shows only clear echoes. Start Normal.</span></li>
@@ -518,7 +526,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
 'use strict';
 const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
 // v2 (D42) display knobs of this phone/PC: depth scale (auto or fixed, metres), colour gain, hide weak echoes
-const vopt = { depth: 'auto', gain: 0, weak: 0 };
+const vopt = { depth: 'auto', gain: 0, weak: 0, boost: 0, range: 40, bold: false };
 try { Object.assign(vopt, JSON.parse(localStorage.getItem('sonarView') || '{}')); } catch (e) { /* private mode */ }
 const saveV = () => { try { localStorage.setItem('sonarView', JSON.stringify(vopt)); } catch (e) { /* ignore */ } };
 const NICE = [2, 3, 4, 5, 6, 8, 10, MAXD];
@@ -543,6 +551,16 @@ const ETH = [1, 2, 3, 5];
 const ETOP = 10;
 let knobDeadM = 0.3;   // blind zone (dead knob, 0.1 m steps): the echogram is blanked there, it is the transmit ring-down
 const GAIN = () => Math.pow(1.15, vopt.gain || 0);
+// D137: adjustable colour scale (this screen only). Range = dB over the floor at full colour (default 40 = ETOP);
+// boost s lifts faint echoes: shade(v) = f + (1 - f) v^(1 - 0.6 s), f = 0.35 s; s = 0 is exactly the old drawing
+const RANGE_DB = () => Math.min(60, Math.max(24, +vopt.range || 40));
+const ETOPU = th => Math.max(RANGE_DB() / 4, th + 1);          // full colour level (4 dB steps), never at or under the start
+const BRTOP = () => 18 * RANGE_DB() / 40;                         // background removed: span over 2 dB (default 18)
+const BOOST = () => Math.min(1, Math.max(0, (+vopt.boost || 0) / 100));
+const SV = (x, below) => {   // x = scaled level (gain applied), below = under the bottom (dimmed after the boost, not lifted)
+  const s = BOOST(); if (s === 0) return clamp(x * (below ? 0.45 : 1), 0, 1);
+  const v = clamp(x, 0, 1); if (v <= 0) return 0; const f = 0.35 * s, y = f + (1 - f) * Math.pow(v, 1 - 0.6 * s); return below ? y * 0.45 : y;
+};
 const $ = id => document.getElementById(id);
 const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
 
@@ -571,13 +589,121 @@ const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
 /* ---------- State ---------- */
 let units = 'ft';
 try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
-const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true };
+const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true, sharp: false, sharpArea: false, bgRemove: false, hdMarks: true };   // D125 / D126: experimental views; D134: high-definition echo marks
+// D125 experimental sharpened echogram (docs/SONAR_DECONV.md). Input: dB per bin (array), noise floor dB, bottom m,
+// bin size m. Output: {out: sharpened dB, area: area-equivalent dB} (same length; outside the window = input).
+// Steps: baseline = floor + ring-down decay through the lowest points (D126e) >= nf; linear
+// excess; Richardson-Lucy with the hump measured on the ball (07nov, 32 cycles); 5 cm re-blur; each lobe height-matched
+// to the raw excess at its peak (keeps peak height and small bumps, only narrows); area = lobe flux / hump area.
+// o.noDeconv (D126): skip the deconvolution (line already sharpened on the hub): baseline, lobes and area only.
+// Returns { out, area, base } (base = the baseline in dB inside the window, the input elsewhere).
+function sharpenEcho(db, nf, bottom, bin, o) {
+  o = o || {};
+  const dead = o.dead != null ? o.dead : 0.30, buf = o.buf != null ? o.buf : 0.35, IT = o.it || 100, P = 0.02;
+  const N = db.length, a = Math.max(1, Math.round(dead / bin)), b = Math.min(N, Math.round(((bottom > 0 ? bottom : N * bin) + buf) / bin));
+  const out = db.slice(), area = db.slice(), base = db.slice();
+  const n = b - a; if (n < 8) return { out, area, base };
+  // hump (2.5 cm bins, ref = index 3), resampled to this bin size
+  const H0 = [0, 0.58, 0.86, 1.0, 0.88, 0.56, 0.28, 0.10, 0.04], h0 = i => (i < 0 || i > 8) ? 0 : (H0[Math.floor(i)] * (1 - (i % 1)) + (H0[Math.min(8, Math.floor(i) + 1)] * (i % 1)));
+  const r = bin / 0.025, L0 = Math.floor(3 / r), H = []; for (let k = -L0; k * r <= 5; k++) H.push(h0(3 + k * r));
+  const C = L0, L = H.length, HS = H.reduce((s, v) => s + v, 0), HN = H.map(v => v / HS);
+  const y = db.slice(a, b);
+  const k0 = Math.min(n, Math.round(0.15 / bin));
+  const lin = v => Math.pow(10, v / 20), dbv = v => 20 * Math.log10(Math.max(v, 1e-9));
+  // D126e baseline: power = F + A exp(-d / tau) (floor + ring-down tail), F, A >= 0, fitted through the lowest points
+  // (points above the curve weigh 2 %, 8 passes, tau 2 cm .. 2 m): one continuous, never-rising line, >= nf
+  const Pw = y.map(v => Math.pow(10, v / 10)), pr = Math.min(...Pw), Q = Pw.map(v => v / pr);   // normalised (>= 1)
+  let w = new Array(n).fill(1), M = Q.slice();
+  for (let pass = 0; pass < 8; pass++) {
+    let best = null;
+    for (let t = 0; t < 30; t++) {
+      const tau = 0.02 * Math.pow(100, t / 29), rr = Math.exp(-bin / tau);
+      let s11 = 0, s12 = 0, s22 = 0, r1 = 0, r2 = 0, E = 1;
+      for (let i = 0; i < n; i++) { const sw = w[i] / (Q[i] * Q[i]); s11 += sw; s12 += sw * E; s22 += sw * E * E; r1 += sw * Q[i]; r2 += sw * E * Q[i]; E *= rr; }
+      const cands = [], det = s11 * s22 - s12 * s12;
+      if (det > 0) { const F = (r1 * s22 - r2 * s12) / det, A = (r2 * s11 - r1 * s12) / det; if (F >= 0 && A >= 0) cands.push([F, A]); }
+      if (s11 > 0) cands.push([Math.max(r1 / s11, 0), 0]); if (s22 > 0) cands.push([0, Math.max(r2 / s22, 0)]);
+      for (const [F, A] of cands) { let r = 0; E = 1; for (let i = 0; i < n; i++) { const m = F + A * E; r += w[i] * (m - Q[i]) * (m - Q[i]) / Math.max(m * Q[i], 1e-30); E *= rr; }
+        if (!best || r < best[0]) best = [r, F, A, rr]; }
+    }
+    let E = 1; for (let i = 0; i < n; i++) { M[i] = best[1] + best[2] * E; E *= best[3]; w[i] = Q[i] > M[i] ? P : 1; }
+  }
+  const B = M.map(v => Math.max(10 * Math.log10(Math.max(v * pr, 1e-30)), nf));
+  const e = y.map((v, i) => Math.max(lin(v) - lin(B[i]), 0));
+  // Richardson-Lucy
+  const conv = (v, k, ref) => { const res = new Array(n).fill(0); for (let i = 0; i < n; i++) { let s = 0; for (let j = 0; j < k.length; j++) { const m = i + ref - j; if (m >= 0 && m < n) s += v[m] * k[j]; } res[i] = s; } return res; };
+  const HF = HN.slice().reverse(); let x = new Array(n).fill(Math.max(e.reduce((s, v) => s + v, 0) / n, 1e-9));
+  const ee = e.map(v => v + 1e-12);
+  if (o.noDeconv) x = e.slice();
+  else for (let it = 0; it < IT; it++) { const est = conv(x, HN, C); const q = ee.map((v, i) => v / (est[i] + 1e-12)); const c = conv(q, HF, L - 1 - C); x = x.map((v, i) => v * c[i]); }
+  const G = [-3, -2, -1, 0, 1, 2, 3].map(k => Math.exp(-0.5 * Math.pow(k * bin / 0.025 / 0.85, 2)));
+  const s = o.noDeconv ? e.slice() : conv(x.map(v => v / HS), G, 3);
+  const so = new Array(n).fill(0), ar = new Array(n).fill(0);
+  // D126e lobes (after the ring zone) between minima of s, merged into one echo unless the deconvolved dip is >= 6 dB AND
+  // the raw ping itself dips >= 3 dB between them (a flat plateau - barrel wall, weeds, a school - is not broken into
+  // fish); everything from 6 cm above the bottom on is one echo. Each echo comes down to the baseline valley to valley.
+  const smax = Math.max(...s, 1e-30), cc = Math.max(...e) / smax, lvl = i => dbv(s[i] * cc + lin(B[i]));
+  const kb = bottom > 0 ? Math.round((bottom - 0.06) / bin) - a : n, am = (i0, i1) => { let j = i0; for (let i = i0; i < i1; i++) if (s[i] > s[j]) j = i; return j; };
+  const mins = [k0]; for (let i = k0 + 1; i < n - 1; i++) if (s[i] <= s[i - 1] && s[i] <= s[i + 1]) mins.push(i); mins.push(n);
+  const groups = [];
+  for (let m = 0; m + 1 < mins.length; m++) { const i0 = mins[m], i1 = mins[m + 1]; if (i1 <= i0) continue; const jr = am(i0, i1);
+    if (groups.length) { const g = groups[groups.length - 1], jl = am(g[0], g[1]);
+      let pl = -1e9, pq = -1e9; for (let i = g[0]; i < g[1]; i++) pl = Math.max(pl, lvl(i)); for (let i = i0; i < i1; i++) pq = Math.max(pq, lvl(i));
+      let rmin = 1e9; for (let i = jl; i <= jr; i++) rmin = Math.min(rmin, y[i]);
+      if ((!(jr >= kb && jl < kb) && (Math.min(pl, pq) - lvl(i0) < 6 || Math.min(y[jl], y[jr]) - rmin < 3)) || (jr >= kb && jl >= kb)) { g[1] = i1; g[3] = jr; continue; } }
+    groups.push([i0, i1, jr, jr]); }
+  for (const g of groups) { const i0 = g[0], i1 = g[1], Lg = i1 - i0, l0 = i0 > k0 ? s[i0] : 0, l1 = i1 < n ? s[i1 - 1] : 0;
+    const v = []; for (let i = i0; i < i1; i++) v.push(Math.max(s[i] - (Lg > 1 ? l0 + (l1 - l0) * (i - i0) / (Lg - 1) : l0), 0));
+    let j = 0; for (let i = 0; i < Lg; i++) if (v[i] > v[j]) j = i; const pv = v[j]; if (pv <= 0) continue;
+    let raw = 0; for (let i = Math.max(0, i0 + j - 1); i < Math.min(n, i0 + j + 2); i++) raw = Math.max(raw, e[i]);
+    let sx = 0, sv = 0, ss = 0; for (let i = i0; i < i1; i++) { so[i] = v[i - i0] * raw / pv; sx += x[i]; sv += v[i - i0]; ss += s[i]; }
+    const jf = g[2], jl = i1 === n ? n - 1 : g[3]; if (jl > jf) for (let i = jf; i <= jl; i++) so[i] = Math.max(so[i], e[i] * 0.5);   // merged echo: no dip deeper than 6 dB under the raw ping
+    const fl = sx * sv / Math.max(ss, 1e-30); for (let i = i0; i < i1; i++) ar[i] = v[i - i0] >= 0.5 * pv ? fl : 0; }   // area: whole echo, painted on its core
+  for (let i = 0; i < k0; i++) { so[i] = e[i]; ar[i] = 0; }   // ring zone left raw
+  for (let i = 0; i < n; i++) { out[a + i] = Math.max(dbv(so[i] + lin(B[i])), B[i]); area[a + i] = ar[i] > 0 ? dbv(ar[i] / HS + lin(B[i])) : out[a + i]; base[a + i] = B[i]; }
+  return { out, area, base };
+}
+
 // D93: raw echogram lines of the focus hole, one per second: { i: ping index, nf: -dB, c: 122 hex cells (4-bit level over the floor, 4 dB each) }
 let echoes = [], echoSince = 0;
 window.suiteEchoCount = () => echoes.length;   // (preview / tests)
+// D133: the newest echo-marks line within 16 pings (the hub is in marks mode): a raw refresh line then draws as texture
+function marksFor(idx) {
+  for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d > 32768) continue; if (d >= 16) return null; if (echoes[k].m) return echoes[k]; }
+  return null;
+}
+// D133: the newest RAW line (not echo marks) within 64 pings: the faded texture under the marks
+function rawFor(idx) {
+  for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d > 32768) continue; if (d >= 64) return null; if (!echoes[k].m) return echoes[k]; }
+  return null;
+}
+// D133: echo-marks payload (sonar_codec.h): baseline (floor, value at the window start, decay) + marks {p bin, l dB over nf, w bins}
+function decodeMarks(e) {
+  const h = i => parseInt(e.c[i], 16) || 0, b = k => h(2 * k) | (h(2 * k + 1) << 4);
+  const a = b(0), n = b(1), F = b(2) / 2 - 128, B0 = b(3) / 2 - 128, tau = 0.02 * Math.pow(100, b(4) / 29), nm = Math.min(18, b(5)), r = Math.exp(-BIN / tau);
+  const pF = Math.pow(10, F / 10), pA = Math.pow(10, B0 / 10) - pF;
+  const base = i => (i < a || i >= a + n) ? e.nf : Math.max(e.nf, 10 * Math.log10(Math.max(pF + pA * Math.pow(r, i - a), 1e-30)));   // dB at bin i
+  const marks = []; for (let k = 0; k < nm; k++) { const v = b(6 + 3 * k) | (b(7 + 3 * k) << 8) | (b(8 + 3 * k) << 16); marks.push({ p: (v & 4095) / 8, l: ((v >> 12) & 127) / 2, w: ((v >> 19) & 31) / 2 }); }
+  return { a, n, base, marks };
+}
 function echoFor(idx) {   // the newest line at or before this ping (within 16 pings = 4 s: a dropped line leaves no hole, D101), else null
   for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d < 16) return echoes[k]; if (d > 32768) continue; if (d >= 16) return null; }
   return null;
+}
+// D137: bold = an echo seen again: a peak at the same depth (within 4 bins = 10 cm) in at least 2 of the last 4 lines
+function lineHits(e, th) {   // peak positions (bins) of one line, past the blind zone, cached per threshold
+  if (e.hit && e.hit.th === th && e.hit.dz === knobDeadM) return e.hit.a;
+  const a = [];
+  if (e.m) { for (const m of decodeMarks(e).marks) if (m.l / 4 > th && m.p * BIN >= knobDeadM) a.push(m.p); }
+  else { const F = 4 >> (e.k || 0), L = c => parseInt(e.c[c], 16) || 0;
+    for (let c = Math.ceil(knobDeadM / (BIN * F)); c < 122; c++) { const l = L(c); if (l > th && l >= L(c - 1) && l > L(c + 1)) a.push(c * F + (F - 1) / 2); } }
+  e.hit = { th, dz: knobDeadM, a }; return a;
+}
+function boldHits(e, th) {   // the peaks of line e also seen in at least 1 of the 3 lines before it (within 24 pings)
+  const k = echoes.indexOf(e); if (k < 0) return [];
+  const prev = []; for (let j = k - 1; j >= 0 && prev.length < 3; j--) { const d = (e.i - echoes[j].i + 65536) % 65536; if (d > 24) break; prev.push(lineHits(echoes[j], th)); }
+  if (!prev.length) return [];
+  return lineHits(e, th).filter(p => prev.some(h => h.some(q => Math.abs(q - p) <= 4)));
 }
 let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting (Settings tab); 14° per the transducer listing
 const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
@@ -606,7 +732,7 @@ function applyList(d) { L = d; renderHoles(); }
 function loadList() { if (listBusy) return; listBusy = true; sfetch('/api/sonar').then(r => r.json()).then(applyList).catch(() => {}).then(() => { listBusy = false; }); }
 function onStatus(d) { (d.nodes || []).forEach(n => { if (n.name) names[n.id] = n.name; lines[n.id] = n; }); renderHoles(); }
 function setBeam(deg) { if (deg >= 5 && deg <= 60 && deg !== beamDeg) { beamDeg = deg; if (recs.length && visible()) drawOverlay(); } }   // called by the suite with /api/status
-function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = null); if (recs.length) render(); } }).catch(() => {}); }
+function loadBg() { if (!focus) return; const n = focus; fetch('/api/sonar/bg?node=' + n).then(r => r.json()).then(d => { if (n === focus && d.levels && d.levels.length === N) { bg = d; recs.forEach(r => r.px = r.pxh = null); if (recs.length) render(); } }).catch(() => {}); }
 function loadPings() {
   if (!focus || pingBusy) return; const n = focus;
   pingBusy = true;
@@ -617,9 +743,9 @@ function loadPings() {
     if (d.elast != null && d.elast < echoSince) { echoSince = 0; echoes = []; }
     const ne = d.echo || [];
     if (ne.length) {   // D93: new raw lines: the last columns are drawn again with them underneath
-      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0 }); });   // D112: k = cell size 10 / 5 / 2.5 cm
+      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0, s: +l[5] || 0, m: +l[6] || 0 }); });   // D112: k = cell size 10 / 5 / 2.5 cm; D126: s = sharpened on the hub; D133: m = echo marks line
       if (echoes.length > 260) echoes.splice(0, echoes.length - 260);   // D107: a line per ping on ESP-NOW: keep the whole 60 s waterfall
-      for (let k = Math.max(0, recs.length - 24); k < recs.length; k++) recs[k].px = null;
+      for (let k = Math.max(0, recs.length - 24); k < recs.length; k++) recs[k].px = recs[k].pxh = null;
     }
   }).catch(() => {}).then(() => { pingBusy = false; });
 }
@@ -760,22 +886,61 @@ function addPing(p) {
   (p[7] || []).forEach(x => { info[x[0]] = { flick: x[1] * 0.25, spread: x[2] * 0.5, elen: x[3] * BIN, mature: !!x[4], i: rec.i }; });
   recs.push(rec); if (recs.length > HIST) recs.shift();
 }
-function pixels(rec) {
-  if (rec.px) return rec.px;
+function pixels(rec, hd) {   // D134: hd = the main waterfall: echo marks are drawn on the overlay in screen pixels instead
+  hd = !!hd && opts.hdMarks; const pkey = hd ? 'pxh' : 'px';
+  if (rec[pkey]) return rec[pkey];
   const px = new Uint8ClampedArray(N * 4), lv = bg ? bg.levels : null;
-  const put = (i, L, v) => { if (i < 0 || i >= N) return; const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
+  const VP = new Float32Array(N);   // D137: palette level painted per bin (for bold)
+  const put = (i, L, v) => { if (i < 0 || i >= N) return; if (L === PAL) VP[i] = clamp(v, 0, 1); const k = Math.round(clamp(v, 0, 1) * 255) * 3; px[i * 4] = L[k]; px[i * 4 + 1] = L[k + 1]; px[i * 4 + 2] = L[k + 2]; };
   const bedBin = rec.b != null ? Math.round(rec.b / BIN) - 2 : N;   // the bottom line of this ping splits bed from weeds
   const G = GAIN(), wt = WT[vopt.weak] || 0;   // v2 display knobs: colour gain, hide weak echoes
-  const e = opts.echogram ? echoFor(rec.i) : null;
+  let e = opts.echogram ? echoFor(rec.i) : null;
+  if (e && !e.m) { const pm = marksFor(rec.i); if (pm) e = pm; }   // D133: the 1-in-10 raw line is texture, not a column of its own
   for (let i = 0; i < N; i++) { px[i * 4] = 10; px[i * 4 + 1] = 30; px[i * 4 + 2] = 38; px[i * 4 + 3] = 255; if (lv && !e) { const l = lv.charCodeAt(i) - 48; if (l > 0) put(i, opts.bgsep ? (i >= bedBin ? SEDIMENT : WEED) : PAL, BGV[l]); } }
-  if (e) {   // D93: the raw ping underneath (10 cm cells, 4 dB per level over the floor), the marks on top
+  if (e && e.m) {   // D133: echo marks: each echo a crisp mark at its exact depth over the fitted baseline; the last raw
+    // line (1 in 10) faded underneath for texture, or the baseline itself; "Background removed": marks only
+    const th = ETH[vopt.weak] || ETH[0], cb = rec.b != null ? Math.ceil((rec.b + 0.1) / BIN) : N, M = decodeMarks(e);
+    const dz = Math.min(N, Math.round(knobDeadM / BIN));
+    for (let i = 0; i < dz; i++) { px[i * 4] = 36; px[i * 4 + 1] = 48; px[i * 4 + 2] = 54; }
+    const VV = new Float32Array(N).fill(-1), putM = (i, v) => { if (i < 0 || i >= N || v <= VV[i]) return; VV[i] = v; put(i, PAL, v); };   // D133b: the brighter wins (a mark's tail never erases a neighbour)
+    const ET = ETOPU(th), lv = (l, i, f) => { if (l <= th) return; putM(i, SV(((l - th) / (ET - th)) * G * f, i >= cb)); };   // D137: range, boost
+    if (!opts.bgRemove) {
+      const rw = rawFor(rec.i);
+      if (rw) { const F = 4 >> (rw.k || 0); for (let c = Math.round(knobDeadM / (BIN * F)); c < 122; c++) { const l = parseInt(rw.c[c], 16) || 0; for (let k = 0; k < F; k++) lv(l, c * F + k, 0.5); } }
+      else for (let i = dz; i < N; i++) lv((M.base(i) - e.nf) / 4, i, 0.5);
+    }
+    rec.mk = { ms: M.marks, base: M.base, nf: e.nf, th, G, et: ET, bold: vopt.bold ? new Set(boldHits(e, th)) : null };   // D134: for the high-definition overlay
+    if (!hd) for (const m of M.marks) {   // a gaussian bell of the mark's width at -6 dB, drawn per 2.5 cm bin
+      const hw = Math.max(0.5, m.w / 2), wide = opts.sharpArea ? 20 * Math.log10(Math.max(m.w, 1) / 2.5) : 0;
+      for (let i = Math.max(dz, Math.floor(m.p - 2 * hw)); i <= Math.min(N - 1, Math.ceil(m.p + 2 * hw)); i++) {
+        const u = (i - m.p) / hw, l = m.l + wide - 6 * u * u;   // dB over the noise floor at this bin
+        if (opts.bgRemove) { const o = l - (M.base(i) - e.nf); if (o > 2) putM(i, SV(((o - 2) / BRTOP()) * G, i >= cb)); }
+        else lv(l / 4, i, 1);
+      }
+    }
+  } else if (e) {   // D93: the raw ping underneath (10 cm cells, 4 dB per level over the floor), the marks on top
     // D101: like a fish finder, not a heat map. Water = anything at or below the sensitivity level, left dark; the
     // rest stretched over the palette; the blind zone (ring-down) a flat grey band; below the bottom echo dimmed so
     // the second bottom echo (and a barrel's wall reverb) does not look like a fish.
     const F = 4 >> (e.k || 0), CM = 0.025 * F;   // D112: bins per cell (4 / 2 / 1) and the cell size in m
     const th = ETH[vopt.weak] || ETH[0], c0 = Math.round(knobDeadM / CM), cb = rec.b != null ? Math.ceil((rec.b + 0.1) / CM) : 122;
     for (let i = 0; i < Math.min(N, Math.round(knobDeadM / BIN)); i++) { px[i * 4] = 36; px[i * 4 + 1] = 48; px[i * 4 + 2] = 54; }
-    for (let c = c0; c < 122; c++) { const l = parseInt(e.c[c], 16) || 0; if (l <= th) continue; const v = clamp(((l - th) / (ETOP - th)) * G * (c >= cb ? 0.45 : 1), 0, 1); for (let k = 0; k < F; k++) put(c * F + k, PAL, v); }
+    let SH = null;   // D125 / D126 experimental: sharpened cells (browser, or already on the hub: e.s), colour by area,
+    // background removed (baseline = lower envelope); levels as floats; 10 cm cells too coarse: raw
+    const jsSharp = opts.sharp && !e.s;
+    if (F < 4 && (jsSharp || opts.sharpArea || opts.bgRemove)) { const dbs = []; for (let c = 0; c < 122; c++) dbs.push((parseInt(e.c[c], 16) || 0) * 4);
+      try { const r = sharpenEcho(dbs, 0, rec.b || 0, CM, { dead: knobDeadM, noDeconv: !jsSharp }); let v = opts.sharpArea ? r.area : r.out;
+        if (opts.bgRemove) v = v.map((x, c) => Math.max(0, x - r.base[c])); SH = v.map(x => x / 4); } catch (err) { SH = null; } }
+    // D126: background removed = levels over the baseline, not over the noise floor: an echo sits ~10 dB over a ring
+    // tail or reverb that is itself ~20 dB over the floor, so its own scale: shown from 2 dB, full colour at 20 dB
+    const thU = opts.bgRemove && SH ? Math.max(0.5, th / 2) : th, topU = opts.bgRemove && SH ? Math.max(5 * RANGE_DB() / 40, thU + 1) : ETOPU(th);   // D137: range
+    for (let c = c0; c < 122; c++) { const l = SH ? Math.min(15, SH[c]) : (parseInt(e.c[c], 16) || 0); if (l <= thU) continue; const v = SV(((l - thU) / (topU - thU)) * G, c >= cb); for (let k = 0; k < F; k++) put(c * F + k, PAL, v); }
+  }
+  if (e && vopt.bold && !(hd && e.m)) {   // D137: bold = seen again (HD marks: drawn thicker on the overlay instead)
+    const thB = ETH[vopt.weak] || ETH[0], F = e.m ? 1 : 4 >> (e.k || 0), hw = e.m ? 1 : F / 2 + 1;   // thicker by 2.5 cm each side: two echoes 10 cm apart stay two
+    for (const p of boldHits(e, thB)) { if (p >= bedBin - 2) continue; const i = Math.round(p);
+      let v0 = 0; for (let j = i - 1; j <= i + 1; j++) if (j >= 0 && j < N) v0 = Math.max(v0, VP[j]); if (v0 <= 0) continue;
+      for (let j = Math.floor(p - hw); j <= Math.ceil(p + hw); j++) if (j >= 0 && j < N && VP[j] < 0.9 * v0) put(j, PAL, 0.9 * v0); }
   }
   for (const r of rec.r) { const v = RV[r[1]]; if (v >= wt) put(r[0], PAL, v * G); }
   for (const t of rec.t) {          // echo body (pulse tail below the target), then the sharp trace
@@ -784,7 +949,7 @@ function pixels(rec) {
     for (let k = -1; k <= t.w; k++) put(j0 + k, PAL, t.s * 0.78 * G * (k < 0 ? 0.6 : Math.exp(-k * BIN / 0.07)));
     const v = clamp(Math.max(t.s, 0.5) * 1.12 * G, 0, 1); put(j0 - 1, PAL, v); put(j0, PAL, v);
   }
-  return rec.px = px;
+  return rec[pkey] = px;
 }
 function baitLine() {
   const ds = []; for (let k = Math.max(0, recs.length - 40); k < recs.length; k++) for (const t of recs[k].t) if (t.slot === 0) ds.push(t.d);
@@ -815,7 +980,7 @@ function drawFall() {
   if (fallC.height !== R) { fallC.height = R; fallImg = fallX.createImageData(HIST, R); }   // only the rows shown
   const data = fallImg.data, off = HIST - recs.length;
   for (let x = 0; x < HIST; x++) {
-    const p = x >= off ? pixels(recs[x - off]) : null;
+    const p = x >= off ? pixels(recs[x - off], true) : null;
     for (let i = 0; i < R; i++) {
       const o = (i * HIST + x) * 4;
       if (p) { data[o] = p[i * 4]; data[o + 1] = p[i * 4 + 1]; data[o + 2] = p[i * 4 + 2]; } else { data[o] = 10; data[o + 1] = 30; data[o + 2] = 38; }
@@ -873,6 +1038,32 @@ function drawOverlay() {
   g.fillStyle = 'rgba(215,230,234,0.5)';
   g.fillText('60 s ago', 6 * dpr, h - 5 * dpr);
   const nw = g.measureText('now').width; g.fillText('now', w - nw - 6 * dpr, h - 5 * dpr);
+  if (opts.hdMarks && opts.echogram) {   // D134: echo marks in screen pixels: exact depth, measured thickness (width at -6 dB), soft edges
+    const cw = w / HIST + 0.5, pxm = h / vd;   // column width, pixels per metre
+    recs.forEach((r, k) => {
+      const M = r.mk; if (!M || r.pxh == null) return;
+      const x0 = Math.floor(xOf(k) - cw / 2), cwi = Math.ceil(cw) + 1;   // whole pixels: no seams between columns
+      for (const m of M.ms) {
+        const wide = opts.sharpArea ? 20 * Math.log10(Math.max(m.w, 1) / 2.5) : 0, dm = m.p * BIN, below = r.b != null && dm > r.b + 0.1;
+        let v;
+        if (opts.bgRemove) { const o = m.l + wide - (M.base(Math.round(m.p)) - M.nf); if (o <= 2) continue; v = SV(((o - 2) / BRTOP()) * M.G, false); }   // D137: range, boost
+        else { const l = (m.l + wide) / 4; if (l <= M.th) continue; v = SV(((l - M.th) / (M.et - M.th)) * M.G, false); }
+        if (below) v *= 0.45;
+        if (dm < knobDeadM) continue;
+        const col = palCss(v), bold = M.bold && M.bold.has(m.p) && r.b != null && dm < r.b - 0.05;   // D137
+        const thick = bold ? Math.max(m.w * BIN * pxm * 1.5, 4 * dpr) : Math.max(m.w * BIN * pxm, 2 * dpr);
+        if (r.b != null && dm >= r.b - 0.01) {   // the bottom echo: from the bottom line down, fading (the lake bed)
+          const y0 = yOf(r.b), y1 = y0 + Math.max(2 * thick, 4 * dpr), gr = g.createLinearGradient(0, y0, 0, y1);
+          gr.addColorStop(0, col); gr.addColorStop(1, 'rgba(10,30,38,0)'); g.fillStyle = gr; g.fillRect(x0, y0, cwi, y1 - y0);
+        } else {   // a flat core as thick as the echo measured, soft 30 % edges
+          const yc = yOf(dm), e0 = 0.3 * thick, gr = g.createLinearGradient(0, yc - thick / 2 - e0, 0, yc + thick / 2 + e0);
+          const f = e0 / (thick + 2 * e0);
+          gr.addColorStop(0, 'rgba(10,30,38,0)'); gr.addColorStop(f, col); gr.addColorStop(1 - f, col); gr.addColorStop(1, 'rgba(10,30,38,0)');
+          g.fillStyle = gr; g.fillRect(x0, yc - thick / 2 - e0, cwi, thick + 2 * e0);
+        }
+      }
+    });
+  }
   if (!opts.overlays || !recs.length) return;
   const bait = baitLine();
   if (bait != null) {
@@ -994,6 +1185,12 @@ function updReadouts() {
   $('roBottom').textContent = cur ? HARD[cur.hard].t : '–';
   $('roNoise').textContent = cur ? cur.nf.toFixed(0) + ' dB' : '–';
   $('roCone').textContent = cur && cur.b != null ? fmtD(coneWidth(cur.b)) + ' wide' : '–';
+  { const e = cur && opts.echogram ? echoFor(cur.i) : null, F = e ? 4 >> (e.k || 0) : 0, any = opts.sharp || opts.bgRemove || opts.sharpArea;   // D126b
+    $('expSt').textContent = !opts.echogram ? 'Raw echogram is off: the experimental views work on it, nothing to show.'
+      : !e ? 'No raw echo line from the focus hole in the last 4 s: nothing to sharpen (raw echogram knob on the hole? hole in focus?).'
+      : e.m ? 'Echo marks from the hub (knob echo 1): each echo drawn at its exact depth over the fitted baseline, the last raw line faded underneath (a raw line every 10th).' + (opts.bgRemove ? ' Background removed: marks only.' : '')
+      : F === 4 ? '10 cm cells (bottom deeper than 6 m, or no bottom found yet): too coarse, experimental views stay raw.'
+      : (F === 1 ? '2.5' : '5') + ' cm cells' + (e.s ? ', sharpened on the hub (knob sharp): the browser switch is ignored' : ', raw from the hub') + (any ? '. Applied.' : '. No experimental switch on.'); }
   $('zoomSpan').textContent = units === 'ft' ? 'last 5 ft above bottom, stretched' : 'last 1.5 m above bottom, stretched';
 }
 function render() { if (!focus || !visible()) return; drawFall(); drawZoom(); drawOverlay(); drawFlash(); updTargets(); updEcho(); updReadouts(); }
@@ -1003,21 +1200,28 @@ $('tlist').addEventListener('click', pickRow);
 /* ---------- Controls ---------- */
 const TOGGLES = [
   ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second on LoRa, every ping on ESP-NOW (cells of 2.5 cm in a barrel, 5 cm to 6 m, 10 cm deeper, 4 dB per step over the noise floor): the waterfall shows it underneath the marks, like a fish finder. Water (under the "Weak echoes" level) stays dark, the blind zone is a grey band, below the bottom is dimmed. Off: only what the detector reported.'],
+  ['sharp', 'Sharpened echogram (experimental)', 'D125: the raw echogram with each echo narrowed in this browser (deconvolved with the hump of one target, measured on the ball): two echoes 7-10 cm apart show as two, peak heights kept. Better: knob "Sharpened echogram" (Settings, sonar knobs) does it on the hub before the line is sent (finer, 1 = sharpened, 2 = + doublet split, two echoes ~5 cm apart); this switch is then ignored. Cells of 2.5 or 5 cm only (deeper than 6 m the 10 cm cells stay raw).'],
+  ['bgRemove', 'Background removed (experimental)', 'D126: paints only what rises over the lower envelope of the ping (ring-down tail, noise floor and slow swells removed, like a baseline-restored cytometry plot): water goes dark, echoes stand out. With "Colour by echo area": strength by area.'],
+  ['sharpArea', 'Colour by echo area (experimental)', 'D125: with the sharpened echogram, each echo is coloured by its area (total echo) instead of its peak: a single fish keeps its colour, a school, weeds or the bottom (wider) look stronger, a one-cell noise spike weaker.'],
+  ['hdMarks', 'High-definition echo marks', 'D134: with echo marks from the hub (knob "Echogram sent as" = 1), each echo is drawn at its exact depth (3 mm) with its measured thickness, in screen pixels, instead of in 2.5 cm rows; the bottom is drawn from the bottom line down. Off: the marks are painted in the echogram grid as before. No effect on raw lines.'],
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
   ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
   ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
   ['dz', 'Bottom blind band', 'Light band just above the bottom line: a fish that close to the bottom returns at the same time as the bottom itself and cannot be told apart (any sonar). Thicker in deep water and with a long ping.']
 ];
 const tUl = $('toggles');
-tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('');
+tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('')
+  + '<li><span class="name">Experimental views now</span><span class="desc" id="expSt">–</span></li>';   // D126b
 function syncControls() {
   tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
   document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
   $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
+  $('bold').setAttribute('aria-pressed', String(!!vopt.bold));   // D137
 }
-tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'bgsep' || k === 'echogram') recs.forEach(r => r.px = null); render(); syncControls(); });
+tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'hdMarks' || k === 'bgsep' || k === 'echogram' || k === 'sharp' || k === 'sharpArea' || k === 'bgRemove') recs.forEach(r => r.px = r.pxh = null); render(); syncControls(); });
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
 $('play').addEventListener('click', () => { playing = !playing; syncControls(); });
+$('bold').addEventListener('click', () => { vopt.bold = !vopt.bold; syncControls(); vChanged(); });   // D137
 // v2 (D42) display knobs (this phone / PC only)
 function fillDepth() {
   const list = units === 'ft' ? [5, 10, 15, 20, 25, 30, 40] : [2, 3, 4, 5, 6, 8, 10, 12];
@@ -1025,11 +1229,16 @@ function fillDepth() {
   const opt = [...$('vDepth').options].find(o => vopt.depth !== 'auto' && Math.abs(+o.value - +vopt.depth) < 0.01);
   $('vDepth').value = opt ? opt.value : 'auto'; if (!opt) vopt.depth = 'auto';
   $('vGain').value = String(vopt.gain || 0); $('vWeak').value = String(vopt.weak || 0);
+  $('vBoost').value = String(vopt.boost || 0); $('vRange').value = String(RANGE_DB()); vLabels();
 }
-const vChanged = () => { saveV(); recs.forEach(r => r.px = null); render(); };
+const vChanged = () => { saveV(); recs.forEach(r => r.px = r.pxh = null); render(); };
 $('vDepth').addEventListener('change', e => { vopt.depth = e.target.value; vChanged(); });
 $('vGain').addEventListener('input', e => { vopt.gain = +e.target.value; vChanged(); });
 $('vWeak').addEventListener('change', e => { vopt.weak = +e.target.value; vChanged(); });
+function vLabels() { $('vBoostV').textContent = `${vopt.boost || 0} %`; $('vRangeV').textContent = `${RANGE_DB()} dB`; }   // D137
+$('vBoost').addEventListener('input', e => { vopt.boost = +e.target.value; vLabels(); vChanged(); });
+$('vRange').addEventListener('input', e => { vopt.range = +e.target.value; vLabels(); vChanged(); });
+$('vReset').addEventListener('click', () => { vopt.boost = 0; vopt.range = 40; $('vBoost').value = '0'; $('vRange').value = '40'; vLabels(); vChanged(); });   // D137b
 fillDepth();
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', fillDepth));
 // processing knobs on the holes (chalet -> every sonar hole)
@@ -1051,11 +1260,14 @@ const KHELP = {
   gain: ['Receiver gain', '0-3 = 10 / 12.5 / 15 / 20x. Lower if the bench line says CLIPPED.'],
   pinghz: ['Ping rate when busy', 'Pings per second (x0.25) while fish are around or you watch the hole.'],
   idlehz: ['Ping rate when quiet', 'Pings per second (x0.25) when nothing is in the water. Lower saves battery.'],
-  avg: ['Pings averaged', 'Overview mode averages this many bursts: smoother, slower.'],
+  avg: ['Bursts averaged', 'Bursts fired and averaged for each ping, also while you watch the hole (D134). Averaging does not make an echo louder: it narrows the noise flicker so a weaker echo stands clear of it (2 bursts ~ +2 dB, 4 ~ +3.5 dB detection, measured on the 04nov sweep). Each burst costs drive energy (battery) and ~30 ms. 1 = one burst per ping in focus (before D134).'],
   freq: ['Frequencies', '2 = 200 kHz only (default since D94: the transducer is 14-16 dB down at 190 and 210 kHz, so mixing them cost 4.4 dB of echo and tripled the ping time). 0 = 190/200/210 kHz every ping, 1 = one at a time.'],
   sound: ['Speed of sound', '1350 + value m/s. 53 = 1403 m/s, fresh water near 0 C.'],
   bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
   thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
+  det: ['Fish detector (experimental)', '0 = classic (prototype): a peak 10 dB (snr knob) over the noise floor and over its surroundings, searched after the ring-down. 1 = adaptive: an echo that stands out from the learned scene at its depth, summed under the shape of one echo (matched filter) and compared with that depth\'s own fluctuation (radar-style constant false alarm rate); threshold = snr / 2 dB; also searches inside the ring-down tail. The first 24 pings learn the scene. Barrel test 08nov: the ball still found at 50 % when 15 dB weaker (classic: 3 dB), no more false targets. D127.'],
+  sharp: ['Sharpened echogram', '2 = default (D128): the hub sharpens each line before sending it (deconvolution with the hump of one target, peak heights kept, each echo down to the baseline, a flat echo is not broken into fish) + doublet split: an echo that is really two (about 5 cm apart or more) is drawn as two. 1 = sharpened without the doublet split. 0 = legacy raw echogram line. Echogram only: bottom, fish marks and alarms stay on the raw data. No extra memory (D126f). D126.'],
+  echo: ['Echogram sent as', '1 = echo marks (default since D135): the hub sends the fitted baseline (3 numbers) and one entry per echo (depth to 3 mm, height to 0.5 dB, width), 14-35 bytes instead of 66, with a raw line every 10th for the texture: about 60 % less echogram airtime, crisp marks at any depth (switch "High-definition echo marks"). On LoRa each line holds the strongest of the 4 pings since the last one. 0 = legacy raw line: 122 cells of 4 dB. D133.'],
   drive: ['Drive stage', '0 = the TUSS4470 drives the transducer itself (shield, pod as ordered). 1 = transformer: only with the transformer parts fitted on the pod v0.8 (docs: TRANSFORMER_200K.md); a direct-drive board pings nothing in this mode.'],
   ftrim: ['Burst frequency', 'Ping frequency, 180 + this value in kHz (20 = 200 kHz). The bench page Tune button measures the best one for your transducer.'],
   bmax: ['Look for the bottom above', 'The bottom is searched shallower than this (x0.1 m, 0 = everywhere). Only for the barrel test: there the floor\'s second echo can be stronger than the floor itself (a lake never does that).'],
@@ -1072,7 +1284,7 @@ function renderKnobs() {
   document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
   const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
   if (kv.cycles) dzK.cycles = kv.cycles; if (kv.sound != null) dzK.sound = kv.sound;
-  if (kv.dead != null && kv.dead * 0.1 !== knobDeadM) { knobDeadM = kv.dead * 0.1; recs.forEach(r => { r.px = null; }); }   // D101: blind band
+  if (kv.dead != null && kv.dead * 0.1 !== knobDeadM) { knobDeadM = kv.dead * 0.1; recs.forEach(r => { r.px = r.pxh = null; }); }   // D101: blind band
   const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin && WATER[w].bmax === (kv.bmax || 0) && WATER[w].gain === kv.gain) || null;
   document.querySelectorAll('#kWater [data-water]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.water === water)));
   $('knobs').hidden = !$('kAdv').checked;

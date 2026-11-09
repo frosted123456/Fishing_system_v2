@@ -110,7 +110,8 @@ ice, sliding arm with the Hall sensor, magnet clamp on the shaft. Model v3.0.1, 
 |---|---|---|
 | 1 | Open Echo TUSS4470 shield 002 | |
 | 1 | 200 kHz transducer, BBDM-40200K-DA | 14° beam |
-| 1 | MT3608 boost, set to 21.5 V | Into J4 middle pin |
+| 1 | MT3608 boost, set to 21.5 V | Into J4 middle pin. Standard build (40 V p-p on the transducer) |
+| (1) | **Optional high-drive (4.4.6):** XL6009 boost module (replaces the MT3608) + DB107 bridge rectifier + 1N4148 | ~60 V p-p instead of 40: +3 to +4.6 dB (est.). Not an XL6019 (180 kHz switching sits in the sonar band) |
 
 ### 3.5 Software
 
@@ -235,6 +236,7 @@ Turn the pack off when USB is plugged in.
 - Transducer: cable shield → **top** pin, signal → bottom pin.
 - MT3608 into the **J4 middle pin** only. Not VIN, not the XT30.
 - MT3608 at **21.5 V** (max ~22 V).
+- High-drive option: XL6009 instead of the MT3608, see 4.4.6.
 - Optional: remove R3 (power LED).
 
 #### 4.4.4 Chalet box (offshore module)
@@ -273,6 +275,43 @@ A reed switch can replace the Hall latch to detect FISH ON. The code is still ac
 
 Default polarity: trips when the pin goes HIGH (contact opens). With a reed, the trip follows the switch level, not
 spool turns.
+
+#### 4.4.6 High-drive option (external VDRV, knob `vmode 2`)
+
+More voltage on the transducer: the TUSS4470's own drive regulator stops at 20 V (40 V p-p). Feeding its VDRV pin
+from outside at ~30 V gives ~60 V p-p, **+3 to +4.6 dB (est.)**. No new board; the firmware already has the mode.
+
+![High-drive wiring](images/wiring_high_drive.png)
+
+| # | From | To | Note |
+|---|---|---|---|
+| 1 | Pack + / GND | XL6009 IN + / IN − | Replaces the MT3608. **Set the output to 31.5 V with a meter before connecting anything** |
+| 2 | XL6009 OUT + | Shield **J4 middle pin** (wire A) | Same pin as the MT3608 today; no jumper on J4. Becomes VPWR ≈ 30.7 V after the shield's 1N4001 |
+| 3 | XL6009 OUT + | DB107 **−** leg | DB107: use only − and +, cut the two ~ legs |
+| 4 | DB107 **+** leg → **1N4148** (stripe toward C6) | Shield **C6, the pad closer to the TUSS4470** (wire B) | VDRV ≈ 29.6 V. The other C6 pad is GND (beeps to ground) |
+| 5 | XL6009 OUT − | Shield GND | Common ground |
+
+Rule: **VPWR > VDRV + 0.3 V at all times, power-up included** (datasheet 6.3 note / 7.3.1: otherwise reverse current
+flows from VDRV into VPWR). VPWR draws only 150-340 µA, so the shield's 1N4001 drops just ~0.45-0.5 V; VDRV idles at
+microamps, where the DB107's two diodes drop only ~0.7-0.8 V (est.): ~0.25 V gap, too tight. The 1N4148 adds ~0.4-0.6 V:
+**~0.7-1 V gap** for ~−0.2 dB. Never wire B without the DB107 + 1N4148.
+
+Bring-up:
+
+1. Meter, diode mode: DB107 − to + reads 1.0-1.3 V, reversed OL.
+2. **Check the gap before wire B touches C6.** Connect wire A only, power on, sonar pinging (`vmode 0`, the chip makes
+   its own 20 V: safe). Measure VPWR on the **C7** pad that is not GND (small capacitor just left of C6). Measure the
+   1N4148 end of the DB107 chain, unconnected (worst case: no current). Gap = VPWR − that end. **≥ 0.5 V: connect wire B.** Less: add
+   a second 1N4148.
+   Then wire B on: C6 pad must read below C7.
+3. Chalet: `KNOB vmode 2`. Every flash resets the knobs: set `vmode 2` again after each flash (the Water presets
+   do not touch it).
+4. Bench line: no `BURST FAULT`. `ring=` a bit longer: raise `dead` one step if needed. (No `VDRV LOW` in this mode.)
+5. Compare echo **minus floor** (bottom, a weight) with `vmode 0` vs `vmode 2`: expect +3 to +4.6 dB.
+
+Limits: chip 36 V max (40 V absolute), C6 rated 40 V, XL6009 output caps often 35 V: stay at **31.5 V**.
+Back to 20 V: `vmode 0` **and** unplug wire B (with wire B in place VDRV stays ~30 V; safe, not 20 V).
+The XL6009 must still make ≥ 29 V on a half-used pack; if not, keep the MT3608 at 12 V in front of it.
 
 ### 4.5 Bench check
 
@@ -535,6 +574,7 @@ Nothing is lost, updates are slower.
 | FISH ON bar missing a hole | Offline holes are not shown in the bar; the chalet still rings |
 | Hub stuck at SF7 | It still runs firmware older than D80. Re-flash it |
 | Wiring check fails on the sonar | Shield 5V pin on 3.3 V? MT3608 at 21.5 V into J4? JP3 + JP4 on? |
+| High-drive: no gain or BURST FAULT | `vmode 2` set (lost after a flash)? C6 pad lower than J4 middle? DB107 − / + the right way? XL6009 still ≥ 29 V? |
 | Forgot the PIN | Serial `PIN CLEAR` |
 | Everything acts weird | Hold PRG 10 s on the chalet (network reset) |
 

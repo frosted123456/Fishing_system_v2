@@ -9,6 +9,7 @@
 #include "sonar_codec.h"
 #include "sonar_scene.h"
 #include "sonar_proc.h"
+#include "sonar_deconv.h"   // D126
 
 namespace icemesh {
 namespace sonar {
@@ -43,7 +44,7 @@ class SonarSource {
     bg_ver_ = 0; bg_valid_ = false; data_blocks_ = 0; act_bits_ = 0; was_focus_ = false; last_fish_ = 0; since_echo_ = ECHO_EVERY;
     tick_n_ = 0; rot_f_ = 0; last_status_ = 0; status_ = 0; last_base_status_ = 0xFF; last_base_bottom_ = 0xFFFF;
     memset(slot_id_, 0, sizeof(slot_id_)); memset(slot_used_, 0, sizeof(slot_used_));
-    memset(&last_, 0, sizeof(last_)); memset(&out_, 0, sizeof(out_)); memset(bg_, 0, sizeof(bg_));
+    memset(&last_, 0, sizeof(last_)); memset(&out_, 0, sizeof(out_)); memset(bg_, 0, sizeof(bg_)); marks_n_ = 0; if (hold().owner == node_) hold().n = 0;
   }
 
   // Called every 250 ms. Pings at the active rate while something moves (or in focus), at the idle rate
@@ -96,7 +97,7 @@ class SonarSource {
     uint8_t fish = 0;
     for (uint8_t i = 0; i < last_.n_targets; i++) if (last_.t[i].track != 0) fish++;
     act_bits_ = static_cast<uint16_t>((act_bits_ << 1) | (fish ? 1u : 0u));
-    if (focus != was_focus_) { n_pend_ = 0; bg_seg_ = 0; since_bg_ = BG_EVERY; data_blocks_ = 0; was_focus_ = focus; }
+    if (focus != was_focus_) { n_pend_ = 0; bg_seg_ = 0; since_bg_ = BG_EVERY; data_blocks_ = 0; was_focus_ = focus; holdReset(); }   // D133b: no stale pings in the hold
 
     uint8_t n_out = 0;
     if (focus) {
@@ -120,6 +121,8 @@ class SonarSource {
         bg_seg_ = static_cast<uint8_t>((bg_seg_ + 1) % BG_SEGMENTS);
         since_bg_ = 0;
       }
+      // D133: every focus ping goes into the hold; the line sent is built from all the pings since the last one
+      if (echo_on) holdAdd(SonarProc::binDb());
       // D93: the raw line of this ping (the caller passes out[4] so it is never squeezed out by DATA + BG + BASE)
       if (echo_on && ++since_echo_ >= (echo_every ? echo_every : 1) && n_out < max_out) {
         // D112: the finest cells that still cover the bottom +25 % +0.3 m (the page's auto depth), with 10 % hysteresis
@@ -127,10 +130,31 @@ class SonarSource {
           const float cover[ECHO_SCALES] = {12.2f, 6.1f, 3.05f};
           uint8_t sc = 0; for (uint8_t k = 1; k < ECHO_SCALES; k++) if (need <= cover[k] * (k <= echo_scale_ ? 1.0f : 0.9f)) sc = k;
           echo_scale_ = sc; }
-        EchoLine e; echoFromBins(e, node_, last_.index, SonarProc::binDb(), static_cast<float>(out_.nf), echo_scale_);
+        // D126: knob sharp 1 / 2 = the line is sharpened here (deconvolved, sonar_deconv.h) before it is folded into cells
+        // D126f: no heap: the work memory is 4 processor scratch arrays, free until the next ping (10 cm cells: raw)
+        const float* src = holdLine(SonarProc::binDb(), SonarProc::lendScratch(4)); bool sharp = false;
+        static_assert(BINS >= 2 * deconv::MAXW && deconv::MAXN >= BINS, "lent scratch arrays too short for the sharpening");
+        // D133: echo marks (knob echo 1): the baseline + one entry per echo instead of 122 cells, a raw line every 10th
+        const bool marksMode = proc.prm[P_ECHO_MODE] == 1 && echo_scale_ > 0;
+        const bool marksTurn = marksMode && marks_n_ != MARKS_RAW_EVERY - 1;
+        if (marksMode) marks_n_ = static_cast<uint8_t>((marks_n_ + 1) % MARKS_RAW_EVERY);   // D133b: no 256 wrap
+        EchoLine e; bool built = false;
+        if (marksTurn) {
+          static deconv::Marks mk;
+          deconv::Work w = deconv::workFrom(SonarProc::lendScratch(0), SonarProc::lendScratch(1), SonarProc::lendScratch(2), SonarProc::lendScratch(3));
+          const uint8_t mode = proc.prm[P_SHARP] ? proc.prm[P_SHARP] : 1;
+          if (deconv::sharpen(src, BINS, static_cast<float>(sp::BIN_M()), static_cast<float>(out_.nf), out_.bottom > 0.f ? static_cast<float>(out_.bottom) : 0.f,
+                              proc.prm[P_DEADZONE_DM] * 0.1f, mode, w.out, w, &mk)) { marksLine(e, mk); built = true; }
+        }
+        if (!built && proc.prm[P_SHARP] && echo_scale_ > 0) {
+          deconv::Work w = deconv::workFrom(SonarProc::lendScratch(0), SonarProc::lendScratch(1), SonarProc::lendScratch(2), SonarProc::lendScratch(3));
+          if (deconv::sharpen(src, BINS, static_cast<float>(sp::BIN_M()), static_cast<float>(out_.nf), out_.bottom > 0.f ? static_cast<float>(out_.bottom) : 0.f,
+                              proc.prm[P_DEADZONE_DM] * 0.1f, proc.prm[P_SHARP], w.out, w)) { src = w.out; sharp = true; }
+        }
+        if (!built) { echoFromBins(e, node_, last_.index, src, static_cast<float>(out_.nf), echo_scale_); e.sharp = sharp ? 1 : 0; }
         const size_t len = encodeEcho(e, out[n_out].data, MAX_BLOCK);
-        if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; }
-        since_echo_ = 0;
+        if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; echo_bytes += static_cast<uint32_t>(len); }
+        since_echo_ = 0; holdReset();
       }
     }
     // BASE every 2 s (also in focus: it carries the status flags), at once for a new fish (not in focus)
@@ -321,6 +345,60 @@ class SonarSource {
   uint8_t n_pend_ = 0;
   uint16_t since_base_ = 0, since_bg_ = 0, since_echo_ = 0;
   uint8_t echo_scale_ = 0;   // D112
+  uint8_t marks_n_ = 0;      // D133: lines since the last raw one in echo-marks mode
+  enum { MARKS_RAW_EVERY = 10, MARKS_PER_LINE = 8, HOLD_BINS = 244, HOLD_MAX = 16 };
+  // D133 hold (Frank: average the background, keep the signal): the pings between two lines (4 on LoRa, 1 on ESP-NOW)
+  // are combined per bin: the larger of the mean level (dB, the background) and the strongest ping - 3 dB (D133b; an echo
+  // seen on 1 ping of 4 loses 3 dB instead of being divided by 4; noise: max of 4 is ~3-4 dB over the mean, so ~+0-1 dB). 0.5 dB codes, 244 bins (the 2.5 / 5 cm
+  // lines; 10 cm lines: the last ping past bin 244). Shared static (one focus source at a time; 732 B).
+  struct Hold { uint16_t sum[HOLD_BINS]; uint8_t mx[HOLD_BINS]; uint8_t n; uint8_t owner; };
+  static Hold& hold() { static Hold h; return h; }
+  static uint8_t dbCode(float db) { const float c = (db + 128.f) * 2.f; return static_cast<uint8_t>(c < 0.f ? 0.f : (c > 255.f ? 255.f : c + 0.5f)); }
+  static float codeDb(float c) { return c * 0.5f - 128.f; }
+  void holdReset() { Hold& h = hold(); h.n = 0; h.owner = node_; }
+  void holdAdd(const float* db) {
+    Hold& h = hold();
+    if (h.owner != node_ || h.n >= HOLD_MAX) { h.n = 0; h.owner = node_; }
+    for (int i = 0; i < HOLD_BINS; i++) { const uint8_t c = dbCode(db[i]); if (h.n == 0) { h.sum[i] = c; h.mx[i] = c; } else { h.sum[i] = static_cast<uint16_t>(h.sum[i] + c); if (c > h.mx[i]) h.mx[i] = c; } }
+    h.n++;
+  }
+  const float* holdLine(const float* db, float* buf) const {
+    const Hold& h = hold();
+    if (h.owner != node_ || h.n <= 1) return db;   // one ping (ESP-NOW): the ping itself
+    for (int i = 0; i < BINS; i++) buf[i] = db[i];
+    for (int i = 0; i < HOLD_BINS; i++) {
+      const float mean = static_cast<float>(h.sum[i]) / static_cast<float>(h.n), mx = static_cast<float>(h.mx[i]);
+      buf[i] = codeDb(mx - 6.f > mean ? mx - 6.f : mean);   // D133b: max - 3 dB (6 codes), never under the mean: monotonic (review: the 6 dB switch was not)
+    }
+    return buf;
+  }
+  // D133: Marks -> the payload in e.cells (sonar_codec.h); at most MARKS_PER_LINE, the strongest, in depth order
+  void marksLine(EchoLine& e, const deconv::Marks& mk) const {
+    e.node = node_; e.index = last_.index; e.scale = echo_scale_; e.sharp = 1; e.marks = 1;
+    const float n = -static_cast<float>(out_.nf); e.nf_neg = static_cast<uint8_t>(n < 0 ? 0 : (n > 255 ? 255 : n + 0.5f));
+    const float nfR = -static_cast<float>(e.nf_neg);
+    memset(e.cells, 0, ECHO_BYTES);
+    e.cells[0] = static_cast<uint8_t>(mk.a < 255 ? mk.a : 255); e.cells[1] = static_cast<uint8_t>(mk.n < 255 ? mk.n : 255);
+    e.cells[2] = dbCode(mk.floorDb); e.cells[3] = dbCode(mk.b0Db); e.cells[4] = mk.tau;
+    int idx[deconv::MARKS_CAP]; int m = 0;
+    for (int k = 0; k < mk.nm; k++) idx[m++] = k;
+    for (int i = 1; i < m; i++) { const int v = idx[i]; int j = i - 1; while (j >= 0 && mk.lvl[idx[j]] < mk.lvl[v]) { idx[j + 1] = idx[j]; j--; } idx[j + 1] = v; }   // strongest first
+    if (m > MARKS_PER_LINE) m = MARKS_PER_LINE;
+    for (int i = 1; i < m; i++) { const int v = idx[i]; int j = i - 1; while (j >= 0 && mk.pos[idx[j]] > mk.pos[v]) { idx[j + 1] = idx[j]; j--; } idx[j + 1] = v; }   // depth order
+    e.cells[5] = static_cast<uint8_t>(m);
+    for (int i = 0; i < m; i++) {
+      const int k = idx[i];
+      const float p8 = mk.pos[k] * 8.f + 0.5f, lv = (mk.lvl[k] - nfR) * 2.f + 0.5f, w4 = mk.w[k] * 2.f + 0.5f;   // D133b: width in 1/2 bin (to 15.5 bins)
+      const uint32_t pp = static_cast<uint32_t>(p8 < 0.f ? 0.f : (p8 > 4095.f ? 4095.f : p8));
+      const uint32_t ll = static_cast<uint32_t>(lv < 0.f ? 0.f : (lv > 127.f ? 127.f : lv));
+      const uint32_t ww = static_cast<uint32_t>(w4 < 1.f ? 1.f : (w4 > 31.f ? 31.f : w4));
+      const uint32_t v = pp | (ll << 12) | (ww << 19);
+      e.cells[MARKS_HDR + 3 * i] = static_cast<uint8_t>(v); e.cells[MARKS_HDR + 3 * i + 1] = static_cast<uint8_t>(v >> 8); e.cells[MARKS_HDR + 3 * i + 2] = static_cast<uint8_t>(v >> 16);
+    }
+  }
+ public:
+  uint32_t echo_bytes = 0;   // D133: bytes of echogram lines sent (airtime check)
+ private:
   uint8_t last_base_status_ = 0xFF; uint16_t last_base_bottom_ = 0xFFFF;   // D79: what the last summary said
   uint8_t bg_seg_ = 0, bg_ver_ = 0;
   bool bg_valid_ = false;

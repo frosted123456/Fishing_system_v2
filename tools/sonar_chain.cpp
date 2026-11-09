@@ -57,7 +57,8 @@ int main(int argc, char** argv) {
       printf("],\"r\":["); for (uint8_t k = 0; k < p.n_resid; k++) printf("%s[%u,%u]", k ? "," : "", p.r[k].bin, p.r[k].level); printf("]}%s", i + 1 < m ? "," : ""); } }
   printf("],\"echo\":[");
   { const StoredEcho* out[250]; const uint16_t m = store.echoSince(1, 0, out, 250);
-    for (uint16_t i = 0; i < m; i++) { printf("%s{\"index\":%u,\"nf\":%u,\"c\":\"", i ? "," : "", out[i]->e.index, out[i]->e.nf_neg); for (uint8_t c = 0; c < ECHO_CELLS; c++) putchar("0123456789ABCDEF"[echoCell(out[i]->e, c)]); printf("\",\"k\":%u}", out[i]->e.scale); } }
+    for (uint16_t i = 0; i < m; i++) { printf("%s{\"index\":%u,\"nf\":%u,\"c\":\"", i ? "," : "", out[i]->e.index, out[i]->e.nf_neg); for (uint8_t c = 0; c < ECHO_CELLS; c++) putchar("0123456789ABCDEF"[echoCell(out[i]->e, c)]); printf("\",\"k\":%u,\"s\":%u,\"m\":%u}", out[i]->e.scale, out[i]->e.sharp, out[i]->e.marks); }
+    fprintf(stderr, "echo lines: %u bytes sent\n", (unsigned)src.echo_bytes); }
   printf("],\"bg\":\"");
   { const NodeSonar* ns = store.find(1); if (ns) for (int b = 0; b < BINS; b++) putchar('0' + (ns->bg[b] & 3)); }
   printf("\",\"bg_mask\":%u},\"knobs\":{", store.find(1) ? store.find(1)->bg_mask : 0);
