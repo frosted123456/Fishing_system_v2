@@ -129,6 +129,8 @@ bool meshCmdPending(uint8_t cmd, uint8_t target, uint8_t& value);   // D68: queu
 void meshSetSelfTest(uint8_t hole);                                   // D70: chalet asks a hole for its wiring check
 void meshHubSelfTestReport(uint8_t node, const uint8_t* r12);         // D70: hub: a hole's result, to the chalet
 bool meshSelfTestResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms);   // D70: chalet: last result
+void meshSetTune(uint8_t hole, uint8_t value);                                 // D141: chalet asks a hole to tune its transducer (1) / forget it (2)
+bool meshTuneResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms);        // D141: chalet: last tune result (icemesh::sonar::TuneResult)
 enum : uint8_t { MESH_SIM_SONAR = 0x01, MESH_SIM_HALL = 0x02, MESH_LF_LOWBAT = 0x01, MESH_LF_SIM = 0x02, MESH_LF_DISARMED = 0x04 };
 bool meshPollChannelChanged(uint8_t& ch);                // both: channel changed (to save in NVS)
 uint32_t meshSetupArmInS();                              // both: setup phase, s until the automatic fallbacks arm (0 = armed)

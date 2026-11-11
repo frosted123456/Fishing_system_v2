@@ -21,6 +21,10 @@
 #include <soc/syscon_struct.h>
 #endif
 
+#ifndef SONAR_BURST_COUNT_ADJ
+#define SONAR_BURST_COUNT_ADJ 0      // D139, see ping()
+#endif
+
 using namespace icemesh::sonar;
 
 namespace tuss {
@@ -176,6 +180,28 @@ static bool IRAM_ATTR capCb(mcpwm_unit_t, mcpwm_capture_channel_id_t ch, const c
   return false;
 }
 
+// D141 per-hole tune, see the header
+static bool g_ntValid = false, g_ovrOn = false;
+static uint8_t g_ntF = 0, g_ntB = 0, g_ntKf = 0, g_ntKb = 0, g_ovrF = 0, g_ovrB = 0;
+static uint32_t g_lastHz = 0;
+static void loadNodeTune() {
+  Preferences p; p.begin("sonartune", true);
+  uint8_t b[4]; const size_t n = p.getBytes("t", b, sizeof(b));
+  p.end();
+  g_ntValid = n == sizeof(b) && b[0] <= 40 && b[1] >= 1 && b[1] <= 62;
+  if (g_ntValid) { g_ntF = b[0]; g_ntB = b[1]; g_ntKf = b[2]; g_ntKb = b[3]; }
+}
+bool nodeTune(uint8_t& ftrim, uint8_t& bpf) { if (!g_ntValid) return false; ftrim = g_ntF; bpf = g_ntB; return true; }
+void saveNodeTune(uint8_t ftrim, uint8_t bpf, uint8_t knob_ftrim, uint8_t knob_bpf) {
+  g_ntF = ftrim; g_ntB = bpf; g_ntKf = knob_ftrim; g_ntKb = knob_bpf; g_ntValid = true;
+  const uint8_t b[4] = {ftrim, bpf, knob_ftrim, knob_bpf};
+  Preferences p; p.begin("sonartune", false); p.putBytes("t", b, sizeof(b)); p.end();
+}
+void effectiveTune(uint8_t kf, uint8_t kb, uint8_t& f, uint8_t& b) { const bool t = g_ntValid && kf == g_ntKf && kb == g_ntKb; f = t ? g_ntF : kf; b = t ? g_ntB : kb; }
+void clearNodeTune() { g_ntValid = false; Preferences p; p.begin("sonartune", false); p.remove("t"); p.end(); }
+void setTuneOverride(bool on, uint8_t ftrim, uint8_t bpf) { g_ovrOn = on; g_ovrF = ftrim; g_ovrB = bpf; }
+uint32_t lastBurstHz() { return g_lastHz; }
+
 static void loadCal() {
   Preferences p; p.begin("sonarcal", true);
   const size_t n = p.getBytes("c", g_cal, sizeof(g_cal));
@@ -194,6 +220,7 @@ static inline uint16_t cal(uint16_t raw) {   // piecewise linear, 16 segments
 
 bool begin() {
   loadCal();
+  loadNodeTune();
   pinMode(SONAR_PIN_IO1, OUTPUT); digitalWrite(SONAR_PIN_IO1, HIGH);   // as the shield reference firmware: IO1 high, burst on IO2
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
   spiUp();
@@ -312,7 +339,7 @@ static void burst(uint32_t hz, uint8_t cycles) {
   rmt_write_items(RMT_CH, items, cycles + 1, false);
 }
 
-// one capture at one frequency -> dB per bin (power average into `acc`)
+// one capture at one frequency -> dB per bin, summed into `acc` (D140: dB sum, ping() divides by the burst count)
 static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (reference firmware), 1 = quiet listen (datasheet)
 
 static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], PingInfo& info) {
@@ -359,6 +386,7 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   } else if (++g_limited_n >= 64) { g_nolimit = true; g_limited_n = 0; }   // try the continuous mode again now and then
   i2s_adc_disable(I2S_NUM_0);
   writeReg(0x1B, 0x00);
+  info.burst_state = lastStatus() & 0x03;   // D139: DEV_STATE before this write (0 listen, 1 burst)
   const size_t n = got / 2;
   g_raw_n = 0;
   if (n < 200 || timeout || n + 64 < want) return false;   // D92: a short capture leaves bins at -100 dB and poisons the noise floor: drop it
@@ -390,6 +418,7 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   info.adc_hz = (tB > tA && words > wordsA) ? (uint32_t)((uint64_t)(words - wordsA) * 1000000ULL / (tB - tA)) : 0;
   info.clk_ok = (g_clock_hz && info.adc_hz && (uint32_t)labs((long)info.adc_hz - (long)g_clock_hz) * 1000 <= g_clock_hz * 5) ? 1 : 0;
   writeReg(0x1B, 0x00);
+  info.burst_state = lastStatus() & 0x03;   // D139: DEV_STATE before this write (0 listen, 1 burst)
   const size_t n = got;
   g_raw_n = 0;
   if (n < 200 || fail || n + 64 < want) return false;   // D92: a short capture leaves bins at -100 dB and poisons the noise floor: drop it
@@ -414,15 +443,19 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   else { t0 = SONAR_T0_FALLBACK; info.t0_ok = 0; }
   info.t0 = (int16_t)t0;
   // bins: depth d -> round trip 2 d / c -> sample t0 + 2 d / c * rate; mean of the samples of each bin
-  const float spb = 2.0f * 0.025f / sound * (float)rate;   // samples per bin (~5.6)
+  const float spb = 2.0f * 0.025f / sound * (float)rate;   // samples per bin (~5.6; S3: ~2.97)
+  // D140: every bin averages the SAME number of samples (round(spb): 6 on the classic ESP32, 3 on the S3), centred on the
+  // bin. Before, the S3 bins alternated 2 and 3 samples (2.97 per bin truncated): the noise sd alternated bin to bin.
+  const int W = (int)(spb + 0.5f) < 1 ? 1 : (int)(spb + 0.5f);
   for (int b = 0; b < BINS; b++) {
-    const size_t s0 = t0 + (size_t)(b * spb), s1 = t0 + (size_t)((b + 1) * spb);
+    const float c = (float)t0 + ((float)b + 0.5f) * spb - 0.5f * (float)W;
+    const size_t s0 = c > 0.f ? (size_t)(c + 0.5f) : 0, s1 = s0 + (size_t)W;
     uint32_t sum = 0; size_t k = 0;
     for (size_t s = s0; s < s1 && s < n; s++, k++) sum += g_raw[s];
     // raw -> dB: log-amp slope (datasheet typ.) over the ADC full scale; -100 dB at code 0 (relative scale,
     // the processing works on differences to its noise floor). Clipped above code 255 (-5 dB) later.
     const float db = k ? -100.0f + (float)sum / (float)k * (SONAR_ADC_FS_MV / 4096.0f / SONAR_MV_PER_DB) : -100.0f;
-    acc[b] += powf(10.0f, db / 10.0f);
+    acc[b] += db;   // D140: the bursts of one ping are averaged in dB (was power: one spike in one burst lifted the bin)
   }
   return true;
 }
@@ -461,13 +494,23 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   writeReg(0x17, (uint8_t)((p[P_THRESH] & 0x0F) | (SONAR_PIN_O4 >= 0 ? 0x10 : 0)));
   // BURST_PULSE bits 5:0 = pulse count, and 0 = CONTINUOUS burst (datasheet): never write 0. Bits 7:6
   // (half-bridge, pre-driver mode) stay 0. The RMT on IO2 sends the real count.
-  writeReg(0x1A, (uint8_t)(((cycles < 1 ? 1 : cycles) & 0x3F) | (p[P_DRIVE] == 1 ? 0x40 : 0x00)));   // D118: bit 6 PRE_DRIVER_MODE
+  // D139: build flag SONAR_BURST_COUNT_ADJ (default 0) is subtracted from the count written here. The RMT sends `cycles`
+  // cycles from an idle-low line = `cycles` falling edges = cycles - 1 falling-to-falling pulses (datasheet fig. 7-1); Open
+  // Echo writes 15 for its 16 cycles. If PINGX shows bst=1, build with -D SONAR_BURST_COUNT_ADJ=1 and compare echo and nf.
+  const uint8_t bcount = (uint8_t)(cycles > SONAR_BURST_COUNT_ADJ ? cycles - SONAR_BURST_COUNT_ADJ : 1);
+  writeReg(0x1A, (uint8_t)((bcount & 0x3F) | (p[P_DRIVE] == 1 ? 0x40 : 0x00)));   // D118: bit 6 PRE_DRIVER_MODE
   g_blind_ticks = (uint32_t)(2.0f * p[P_DEADZONE_DM] * 0.1f / sound * 80e6f);
   static uint8_t rot = 0;
   const uint8_t mode = p[P_FREQ_MODE];
   // D111: the 200 kHz mode runs at 180 + ftrim kHz (TUNE finds the transducer's best); 190 / 210 stay 10 kHz either side.
   // The RMT half period is 40 MHz / f ticks: 1 kHz steps are exact to ~0.5 % around 200 kHz.
-  const uint32_t f1 = 180000UL + 1000UL * (uint32_t)(p[P_FTRIM] <= 40 ? p[P_FTRIM] : 20);
+  // D141: this hole's own tune replaces the two shared knobs while they still hold the values they had at the tune; a
+  // running tune (setTuneOverride) decides alone
+  uint8_t kF = p[P_FTRIM], kB = p[P_BPF];
+  if (g_ovrOn) { kF = g_ovrF; kB = g_ovrB; }
+  else if (g_ntValid && kF == g_ntKf && kB == g_ntKb) { kF = g_ntF; kB = g_ntB; }
+  const uint32_t f1 = 180000UL + 1000UL * (uint32_t)(kF <= 40 ? kF : 20);
+  g_lastHz = f1;
   const uint32_t HZ[3] = {f1 - 10000UL, f1, f1 + 10000UL};
   uint8_t fset[3]; uint8_t nf;
   if (mode == 0) { fset[0] = 0; fset[1] = 1; fset[2] = 2; nf = 3; info.rot_f = -1; }
@@ -478,7 +521,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
     for (int b = 0; b < BINS; b++) acc[b] = 0;
     // BPF_CONFIG_1 (0x10) centre frequency, datasheet table: 0x1C 185.8, 0x1D 196.8, 0x1E 206.1, 0x1F 218.3 kHz:
     // one code step per 10 kHz here, so knob = the 200 kHz code, 190 = knob - 1, 210 = knob + 1
-    const int bpf = (int)p[P_BPF] + ((int)fset[f] - 1);
+    const int bpf = (int)kB + ((int)fset[f] - 1);
     writeReg(0x10, (uint8_t)(bpf < 0 ? 0 : (bpf > 63 ? 63 : bpf)));
     uint8_t good = 0;
     for (uint8_t a = 0; a < avg; a++) {
@@ -489,8 +532,8 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
       if (capture(HZ[fset[f]], cycles, sound, acc, info)) good++;
     }
     if (!good) return false;
-    for (int b = 0; b < BINS; b++) {   // power mean -> dB -> code (95 dB / 255)
-      const float db = 10.0f * log10f(acc[b] / good + 1e-12f);
+    for (int b = 0; b < BINS; b++) {   // dB mean of the bursts (D140) -> code (95 dB / 255)
+      const float db = acc[b] / (float)good;
       const float c = (db + 100.0f) * 255.0f / 95.0f;
       codes[f][b] = (uint8_t)(c < 0 ? 0 : (c > 255 ? 255 : c + 0.5f));
     }
@@ -557,6 +600,12 @@ bool pinsSwapped() { return false; }
 void shieldTest(ShieldTest& t) { memset(&t, 0, sizeof(t)); t.not_built = true; }
 void lastRaw(const uint16_t*& samples, size_t& n, uint32_t& burst_hz) { samples = nullptr; n = 0; burst_hz = 0; }
 void setCalibration(const uint16_t[17]) {}
+bool nodeTune(uint8_t&, uint8_t&) { return false; }
+void saveNodeTune(uint8_t, uint8_t, uint8_t, uint8_t) {}
+void clearNodeTune() {}
+void effectiveTune(uint8_t kf, uint8_t kb, uint8_t& f, uint8_t& b) { f = kf; b = kb; }
+void setTuneOverride(bool, uint8_t, uint8_t) {}
+uint32_t lastBurstHz() { return 0; }
 void getCalibration(uint16_t pts[17]) { for (int i = 0; i < 17; i++) pts[i] = (uint16_t)(i * 256); }
 }
 #endif

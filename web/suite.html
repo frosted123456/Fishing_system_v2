@@ -489,6 +489,10 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <p class="sm" style="margin:0 0 6px">Asks a hole to test itself: sensor pin, arming button, battery, sonar shield (SPI, VDRV, a test ping) and radio. The result comes back over the mesh: a hub answers in a few seconds, a sleeping tip-up at its next heartbeat (up to 1 min).</p>
       <div class="acts" style="margin:0 0 6px"><select id="stHole"></select> <button class="btn small primary" type="button" id="stRun">Run</button> <span class="msg" id="stMsg"></span></div>
       <div id="stOut"></div>
+      <h3>Transducer tune</h3>
+      <p class="sm" style="margin:0 0 6px">Each hole finds the burst frequency its own transducer answers best at (they differ by a few kHz, and cold water moves them). Run it once per outing, when every transducer has been in the water about 10 minutes and sees the bottom. About 35 s per hole (a sleeping tip-up starts at its next heartbeat); the hole pings faster and may show false marks meanwhile. The result is kept in the hole until the next tune.</p>
+      <div class="acts" style="margin:0 0 6px"><button class="btn small primary" type="button" id="tnAll">Tune all holes</button> <button class="btn small" type="button" id="tnRead">Read results</button> <button class="btn small" type="button" id="tnClear">Forget all tunes</button> <span class="msg" id="tnMsg"></span></div>
+      <div id="tnOut"></div>
       <h3>Map storage</h3>
       <p class="sm" style="margin:0 0 6px">Map tiles come from the internet through the phone; every tile seen stays on this phone, and <b>Save area</b> on the Holes tab keeps the tiles of an area on the chalet for any phone on the ice. Depth contours (optional, where CHS has data): a pack made on the PC with <code>tools/lake_prep.py</code>.</p>
       <p class="hint" id="tlInfo" style="margin:0 0 6px"></p>
@@ -589,7 +593,7 @@ const FONT = '"Barlow Semi Condensed","Arial Narrow",sans-serif';
 /* ---------- State ---------- */
 let units = 'ft';
 try { units = localStorage.getItem('sonarUnits') || 'ft'; } catch (e) { /* private mode */ }
-const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true, sharp: false, sharpArea: false, bgRemove: false, hdMarks: true };   // D125 / D126: experimental views; D134: high-definition echo marks
+const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true, showAll: false, sharp: false, sharpArea: false, bgRemove: false, hdMarks: true };   // D125 / D126: experimental views; D134: high-definition echo marks
 // D125 experimental sharpened echogram (docs/SONAR_DECONV.md). Input: dB per bin (array), noise floor dB, bottom m,
 // bin size m. Output: {out: sharpened dB, area: area-equivalent dB} (same length; outside the window = input).
 // Steps: baseline = floor + ring-down decay through the lowest points (D126e) >= nf; linear
@@ -668,6 +672,22 @@ function sharpenEcho(db, nf, bottom, bin, o) {
 let echoes = [], echoSince = 0;
 window.suiteEchoCount = () => echoes.length;   // (preview / tests)
 // D133: the newest echo-marks line within 16 pings (the hub is in marks mode): a raw refresh line then draws as texture
+// D142 "show all" lines (knob echo 2): 16 levels = these dB over the noise floor (1 dB steps to 6 dB). Cells under 8 dB are
+// drawn from the mean of this line and the two before it at the same depth: the floor's flicker shrinks, an echo that
+// stays (a fish, the lure) keeps its level; stronger cells stay per line (no smear).
+const FINE_DB = [0, 1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20, 25, 31, 38, 46];
+function fineCells(e) {
+  if (e.fd) return e.fd;
+  const a = new Float32Array(122), at = echoes.indexOf(e), prev = [];
+  for (let j = at - 1; j >= 0 && prev.length < 2; j--) { const q = echoes[j]; if (!q.f || q.m || q.k !== e.k || e.i - q.i > 24 || e.i < q.i) break; prev.push(q); }
+  for (let c = 0; c < 122; c++) {
+    const d = FINE_DB[parseInt(e.c[c], 16) || 0];
+    if (d >= 8 || !prev.length) { a[c] = d; continue; }
+    let sum = d, n = 1; for (const q of prev) { const x = FINE_DB[parseInt(q.c[c], 16) || 0]; if (x < 8) { sum += x; n++; } }
+    a[c] = sum / n;
+  }
+  return (e.fd = a);
+}
 function marksFor(idx) {
   for (let k = echoes.length - 1; k >= 0; k--) { const d = (idx - echoes[k].i + 65536) % 65536; if (d > 32768) continue; if (d >= 16) return null; if (echoes[k].m) return echoes[k]; }
   return null;
@@ -743,7 +763,7 @@ function loadPings() {
     if (d.elast != null && d.elast < echoSince) { echoSince = 0; echoes = []; }
     const ne = d.echo || [];
     if (ne.length) {   // D93: new raw lines: the last columns are drawn again with them underneath
-      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0, s: +l[5] || 0, m: +l[6] || 0 }); });   // D112: k = cell size 10 / 5 / 2.5 cm; D126: s = sharpened on the hub; D133: m = echo marks line
+      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0, s: +l[5] || 0, m: +l[6] || 0, f: +l[7] || 0 }); });   // D142: f = fine levels (show all)   // D112: k = cell size 10 / 5 / 2.5 cm; D126: s = sharpened on the hub; D133: m = echo marks line
       if (echoes.length > 260) echoes.splice(0, echoes.length - 260);   // D107: a line per ping on ESP-NOW: keep the whole 60 s waterfall
       for (let k = Math.max(0, recs.length - 24); k < recs.length; k++) recs[k].px = recs[k].pxh = null;
     }
@@ -928,13 +948,19 @@ function pixels(rec, hd) {   // D134: hd = the main waterfall: echo marks are dr
     let SH = null;   // D125 / D126 experimental: sharpened cells (browser, or already on the hub: e.s), colour by area,
     // background removed (baseline = lower envelope); levels as floats; 10 cm cells too coarse: raw
     const jsSharp = opts.sharp && !e.s;
-    if (F < 4 && (jsSharp || opts.sharpArea || opts.bgRemove)) { const dbs = []; for (let c = 0; c < 122; c++) dbs.push((parseInt(e.c[c], 16) || 0) * 4);
+    const FD = e.f ? fineCells(e) : null;   // D142: show-all line, dB over the floor per cell
+    if (F < 4 && (jsSharp || opts.sharpArea || opts.bgRemove)) { const dbs = []; for (let c = 0; c < 122; c++) dbs.push(FD ? FD[c] : (parseInt(e.c[c], 16) || 0) * 4);
       try { const r = sharpenEcho(dbs, 0, rec.b || 0, CM, { dead: knobDeadM, noDeconv: !jsSharp }); let v = opts.sharpArea ? r.area : r.out;
         if (opts.bgRemove) v = v.map((x, c) => Math.max(0, x - r.base[c])); SH = v.map(x => x / 4); } catch (err) { SH = null; } }
     // D126: background removed = levels over the baseline, not over the noise floor: an echo sits ~10 dB over a ring
     // tail or reverb that is itself ~20 dB over the floor, so its own scale: shown from 2 dB, full colour at 20 dB
     const thU = opts.bgRemove && SH ? Math.max(0.5, th / 2) : th, topU = opts.bgRemove && SH ? Math.max(5 * RANGE_DB() / 40, thU + 1) : ETOPU(th);   // D137: range
-    for (let c = c0; c < 122; c++) { const l = SH ? Math.min(15, SH[c]) : (parseInt(e.c[c], 16) || 0); if (l <= thU) continue; const v = SV(((l - thU) / (topU - thU)) * G, c >= cb); for (let k = 0; k < F; k++) put(c * F + k, PAL, v); }
+    // D142: a show-all line with "Weak echoes" on Show all is painted from the floor up (the noise is a dim texture the eye
+    // integrates: a weak echo that repeats stands out of it), on a curve that gives the first 10 dB a third of the palette
+    const allV = FD && !SH && !vopt.weak;
+    for (let c = c0; c < 122; c++) { const l = SH ? Math.min(15, SH[c]) : FD ? FD[c] / 4 : (parseInt(e.c[c], 16) || 0); const t0 = allV ? 0 : thU; if (l <= t0) continue;
+      let x = (l - t0) / (topU - t0); if (allV) x = Math.pow(clamp(x, 0, 1), 0.6);
+      const v = SV(x * G, c >= cb); for (let k = 0; k < F; k++) put(c * F + k, PAL, v); }
   }
   if (e && vopt.bold && !(hd && e.m)) {   // D137: bold = seen again (HD marks: drawn thicker on the overlay instead)
     const thB = ETH[vopt.weak] || ETH[0], F = e.m ? 1 : 4 >> (e.k || 0), hw = e.m ? 1 : F / 2 + 1;   // thicker by 2.5 cm each side: two echoes 10 cm apart stay two
@@ -1200,6 +1226,7 @@ $('tlist').addEventListener('click', pickRow);
 /* ---------- Controls ---------- */
 const TOGGLES = [
   ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second on LoRa, every ping on ESP-NOW (cells of 2.5 cm in a barrel, 5 cm to 6 m, 10 cm deeper, 4 dB per step over the noise floor): the waterfall shows it underneath the marks, like a fish finder. Water (under the "Weak echoes" level) stays dark, the blind zone is a grey band, below the bottom is dimmed. Off: only what the detector reported.'],
+  ['showAll', 'Show all (weak echoes)', 'D142: the watched hole sends its raw ping on every line with 1 dB steps near the noise floor (knob "Echogram sent as" = 2, set for every hole from here), and the echogram is painted from the floor up: the noise shows as a dim texture and a weak echo that repeats (a fish at 4-5 m, the lure) stands out of it. No echo marks, no sharpening in this mode. Off: back to echo marks.'],
   ['sharp', 'Sharpened echogram (experimental)', 'D125: the raw echogram with each echo narrowed in this browser (deconvolved with the hump of one target, measured on the ball): two echoes 7-10 cm apart show as two, peak heights kept. Better: knob "Sharpened echogram" (Settings, sonar knobs) does it on the hub before the line is sent (finer, 1 = sharpened, 2 = + doublet split, two echoes ~5 cm apart); this switch is then ignored. Cells of 2.5 or 5 cm only (deeper than 6 m the 10 cm cells stay raw).'],
   ['bgRemove', 'Background removed (experimental)', 'D126: paints only what rises over the lower envelope of the ping (ring-down tail, noise floor and slow swells removed, like a baseline-restored cytometry plot): water goes dark, echoes stand out. With "Colour by echo area": strength by area.'],
   ['sharpArea', 'Colour by echo area (experimental)', 'D125: with the sharpened echogram, each echo is coloured by its area (total echo) instead of its peak: a single fish keeps its colour, a school, weeds or the bottom (wider) look stronger, a one-cell noise spike weaker.'],
@@ -1218,7 +1245,9 @@ function syncControls() {
   $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
   $('bold').setAttribute('aria-pressed', String(!!vopt.bold));   // D137
 }
-tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key; opts[k] = !opts[k]; if (k === 'hdMarks' || k === 'bgsep' || k === 'echogram' || k === 'sharp' || k === 'sharpArea' || k === 'bgRemove') recs.forEach(r => r.px = r.pxh = null); render(); syncControls(); });
+tUl.addEventListener('click', e => { const b = e.target.closest('.switch'); if (!b) return; const k = b.dataset.key;
+  if (k === 'showAll') { opts.showAll = !opts.showAll; postKnobs({ key: 'echo', v: opts.showAll ? 2 : 1 }); recs.forEach(r => r.px = r.pxh = null); render(); syncControls(); return; }   // D142: a hub knob, not a local view
+  opts[k] = !opts[k]; if (k === 'hdMarks' || k === 'bgsep' || k === 'echogram' || k === 'sharp' || k === 'sharpArea' || k === 'bgRemove') recs.forEach(r => r.px = r.pxh = null); render(); syncControls(); });
 document.querySelectorAll('[data-units]').forEach(b => b.addEventListener('click', () => { units = b.dataset.units; try { localStorage.setItem('sonarUnits', units); } catch (e) { /* ignore */ } render(); renderHoles(); syncControls(); }));
 $('play').addEventListener('click', () => { playing = !playing; syncControls(); });
 $('bold').addEventListener('click', () => { vopt.bold = !vopt.bold; syncControls(); vChanged(); });   // D137
@@ -1283,6 +1312,7 @@ function renderKnobs() {
   if (!K) return;
   document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
   const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
+  if (opts.showAll !== (kv.echo === 2)) { opts.showAll = kv.echo === 2; tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key]))); }   // D142: the switch follows the knob
   if (kv.cycles) dzK.cycles = kv.cycles; if (kv.sound != null) dzK.sound = kv.sound;
   if (kv.dead != null && kv.dead * 0.1 !== knobDeadM) { knobDeadM = kv.dead * 0.1; recs.forEach(r => { r.px = r.pxh = null; }); }   // D101: blind band
   const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin && WATER[w].bmax === (kv.bmax || 0) && WATER[w].gain === kv.gain) || null;
@@ -2238,6 +2268,61 @@ $('stRun').addEventListener('click', () => {
   const t0 = Date.now();
   api('/api/node/selftest', { nodeId: id }).then(() => stPoll(id, t0, run)).catch(() => { $('stMsg').textContent = 'Chalet not reachable.'; $('stRun').disabled = false; });
 });
+/* ---------- D141 transducer tune (per hole) ---------- */
+const TN_ST = ['tuned', 'already right (no change)', 'no bottom echo: setting unchanged', 'no sonar running on this hole', 'tune forgotten: shared setting', 'timed out: setting unchanged'];
+let tnRun = 0; const tnState = {};   // hole id -> { name, t0, d, msg }
+function tnHoles() {
+  const a = (st.nodes || []).filter(n => n.id > 0 && n.id < 128 && n.id !== st.node_id).map(n => ({ id: n.id, name: nodeName(n) }));
+  if (st.role !== 'Chalet' && st.node_id) a.unshift({ id: st.node_id, name: "This hub's own hole" });
+  return a;
+}
+function tnRender() {
+  const ids = Object.keys(tnState).map(Number).sort((a, b) => a - b);
+  if (!ids.length) { $('tnOut').innerHTML = ''; return; }
+  let h = '<table class="tbl"><tr><th>Hole</th><th>Result</th><th>Frequency</th><th>Bottom</th><th>Gain</th></tr>';
+  for (const id of ids) {
+    const s = tnState[id], d = s.d;
+    if (!d) { h += `<tr><td>${esc(s.name)} (#${id})</td><td colspan="4">${esc(s.msg || '–')}</td></tr>`; continue; }
+    const good = d.status <= 1, moved = d.status === 0 && d.khz !== d.was_khz;
+    h += `<tr><td>${esc(s.name)} (#${id})</td><td><span class="badge ${good ? 'on' : d.status === 4 ? '' : 'warn'}">${TN_ST[d.status] || 'status ' + d.status}</span></td>` +
+      `<td>${d.khz} kHz${moved ? ` <small>(was ${d.was_khz})</small>` : ''}${d.band_lo ? ` <small>band ${d.band_lo}-${d.band_hi}, filter ${d.bpf}</small>` : ''}</td>` +
+      `<td>${d.snr ? d.snr.toFixed(1) + ' dB' : '–'}${d.steps_ok ? ` <small>${d.steps_ok}/17 steps</small>` : ''}</td>` +
+      `<td>${d.status === 0 ? (d.gain >= 31.7 ? 'bottom found' : '+' + d.gain.toFixed(1) + ' dB') : '–'} <small>${d.age_s} s ago</small></td></tr>`;
+  }
+  $('tnOut').innerHTML = h + '</table>';
+}
+function tnPoll(id, run, wait) {
+  api('/api/tune?id=' + id).then(d => {
+    if (run !== tnRun || !tnState[id]) return;
+    const s = tnState[id];
+    if (d.have) { s.d = d; s.msg = ''; tnRender(); return; }
+    if (!wait) { s.msg = 'no result stored'; tnRender(); return; }
+    const sec = Math.round((Date.now() - s.t0) / 1000);
+    if (sec > 240) { s.msg = 'no answer in 4 min: asleep, out of reach, no sonar, or older firmware'; tnRender(); return; }
+    s.msg = `tuning… ${sec} s`; tnRender();
+    setTimeout(() => tnPoll(id, run, true), 3000);
+  }).catch(() => { if (run === tnRun) setTimeout(() => tnPoll(id, run, wait), 4000); });
+}
+function tnGo(mode) {   // 'run' | 'read' | 'clear'
+  const holes = tnHoles(), run = ++tnRun;
+  for (const k of Object.keys(tnState)) delete tnState[k];
+  if (!holes.length) { $('tnMsg').textContent = 'No hole heard yet.'; tnRender(); return; }
+  $('tnMsg').textContent = mode === 'read' ? '' : mode === 'clear' ? 'Asking every hole to forget its tune…' : 'Asking every hole. Keep the transducers still.';
+  holes.forEach((hl, i) => {
+    tnState[hl.id] = { name: hl.name, t0: Date.now(), d: null, msg: mode === 'read' ? 'reading…' : 'queued' };
+    if (mode === 'read') { tnPoll(hl.id, run, false); return; }
+    setTimeout(() => {   // one request every 1.5 s: the chalet beacons one command at a time
+      if (run !== tnRun) return;
+      tnState[hl.id].t0 = Date.now(); tnState[hl.id].msg = 'sent, waiting for the hole…'; tnRender();
+      api('/api/node/tune', mode === 'clear' ? { nodeId: hl.id, clear: true } : { nodeId: hl.id }).then(() => tnPoll(hl.id, run, true))
+        .catch(() => { if (run === tnRun) { tnState[hl.id].msg = 'chalet not reachable'; tnRender(); } });
+    }, i * 1500);
+  });
+  tnRender();
+}
+$('tnAll').addEventListener('click', () => tnGo('run'));
+$('tnRead').addEventListener('click', () => tnGo('read'));
+$('tnClear').addEventListener('click', () => { if (confirm('Forget the tune of every hole? They go back to the shared frequency.')) tnGo('clear'); });
 /* ---------- Test & simulation ---------- */
 let sim = null;
 function loadSim() { return api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }

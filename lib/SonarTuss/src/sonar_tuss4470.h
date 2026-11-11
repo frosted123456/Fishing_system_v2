@@ -119,6 +119,9 @@ struct PingInfo {
                           // restarts, see capture()): clk_ok = 0 and the driver keeps the limit on for the next pings
   uint8_t clk_ok;         // 1 = delivered rate within 0.3 % of the clock rate
   uint8_t nolimit;        // 1 = this capture ran with the conversion limit cleared (continuous sampling). S3: always 1
+  uint8_t burst_state;    // D139: TUSS4470 DEV_STATE (SPI status bits 1:0) at the END of the last capture, read from the reply to the
+                          // frame that clears CMD_TRIGGER (the status is the state before that write): 0 = LISTEN (expected),
+                          // 1 = still BURST = the pulse count never completed and the bridge stayed driven while we listened
   uint8_t vdrv_ready;     // D88: VDRV_READY status bit at the end of the ping: 0 = the regulator never reached the vdrv
                           // knob (VPWR / MT3608 too low for it: the knob then changes nothing, D55 table)
 };
@@ -153,6 +156,17 @@ void writeReg(uint8_t addr, uint8_t v);
 // D56: the last capture's samples (last frequency / last average of the last ping), after the I2S pair swap and
 // the CAL curve, 12 bit. For the RAW recording line. n = 0 before the first ping.
 void lastRaw(const uint16_t*& samples, size_t& n, uint32_t& burst_hz);
+// D141 per-hole tune (lib/IceMesh/src/sonar_tune.h): this transducer's own burst frequency (ftrim) and band-pass code,
+// kept in NVS "sonartune" with the values the shared knobs had when it was found. ping() uses the hole's values instead of
+// the knobs p[P_FTRIM] / p[P_BPF] as long as both knobs still have those values: a knob changed by hand, a bench TUNE or
+// SWEEP (they step the knobs) win at once, and the tune applies again when the knobs come back.
+bool nodeTune(uint8_t& ftrim, uint8_t& bpf);              // false = this hole was never tuned (or cleared)
+void saveNodeTune(uint8_t ftrim, uint8_t bpf, uint8_t knob_ftrim, uint8_t knob_bpf);
+void clearNodeTune();
+void effectiveTune(uint8_t knob_ftrim, uint8_t knob_bpf, uint8_t& ftrim, uint8_t& bpf);   // what ping() uses with these knobs (no override)
+// While a tune runs: ping() uses exactly these, whatever the knobs / the stored tune say. on = false ends it.
+void setTuneOverride(bool on, uint8_t ftrim = 0, uint8_t bpf = 0);
+uint32_t lastBurstHz();                                   // burst frequency of the last ping's 200 kHz row (what was really sent)
 // Calibration: 17-point ADC curve (raw 0, 256, ... 4096 -> corrected), kept in NVS "sonarcal".
 void setCalibration(const uint16_t pts[17]);
 void getCalibration(uint16_t pts[17]);

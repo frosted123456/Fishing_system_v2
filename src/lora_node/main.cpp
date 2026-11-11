@@ -21,6 +21,7 @@
 #include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
 #include <esp_system.h>   // D65: esp_reset_reason()
 #include <bottom_memory.h>   // D116
+#include <sonar_tune.h>      // D141: per-hole transducer tune (lib/IceMesh, host-tested)
 #include <new>             // D99: std::nothrow
 static bool isMyVirtualHole(uint8_t node);   // D70: used by the beacon command handler above its definition
 
@@ -2666,6 +2667,7 @@ void meshLoop() {
     }
     if (meshPollReset()) networkResetFromChalet();
     sonarHubLoop();
+    nodeTuneWatch();   // D141
     meshEbTick();   // v2: hub packet on the ESP-NOW backbone when the transport policy says so
     uint8_t cmd, dev, val;
     while (meshPollDevCmd(cmd, dev, val)) {   // from the chalet beacon: this hub, its holes, or its tip-ups
@@ -2686,7 +2688,11 @@ void meshLoop() {
       } else if (cmd == MESH_CMD_SET_ARM) {
         armApply(dev, val != 0);    // D61: own hole here, tip-ups after their next message
       } else if (cmd == MESH_CMD_SELFTEST) {   // D70
-        if (dev == NODE_ID) { SelfTestResult r; holeSelfTest(r, true); meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r); }
+        if (val != 0) {   // D141: 1 = tune this hole's transducer, 2 = forget its tune
+          if (dev == NODE_ID) nodeTuneCmd(val);
+          else if (!isMyVirtualHole(dev)) devCmdQueue(dev, DEVCMD_SELFTEST, val);
+        }
+        else if (dev == NODE_ID) { SelfTestResult r; holeSelfTest(r, true); meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r); }
         else if (!isMyVirtualHole(dev)) devCmdQueue(dev, DEVCMD_SELFTEST, 0);
       }
     }
@@ -3191,9 +3197,9 @@ static void sonarRecordLine(const uint8_t codes[icemesh::sonar::sp::NFREQ][iceme
 static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   if (!sonarRecAny()) return;
   char buf[640];
-  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
+  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u bst=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
                    "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u heap=%u heap_min=%u",
-                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
+                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, pi.burst_state, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
                    (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                    o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());   // D110: heap on every ping (find the slope)
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
@@ -3410,6 +3416,10 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
     return "Noted";
   } else if (w == "RAW") {
     sonarRawAsk = true; r = "RAW capture after the next ping";
+  } else if (w == "NODETUNE") {   // D141: the own hole's transducer tune, as the chalet asks it (NODETUNE CLEAR forgets it)
+    String a = rest; a.trim(); a.toUpperCase();
+    nodeTuneCmd(a == "CLEAR" ? icemesh::sonar::TUNE_CMD_CLEAR : icemesh::sonar::TUNE_CMD_RUN);
+    r = a == "CLEAR" ? "NODETUNE cleared" : "NODETUNE asked (result printed when done)";
   } else if (w == "TUNE") {   // D111
     #if SONAR_REAL
     r = tuneCommand(rest);
@@ -3456,6 +3466,68 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
   return r;
 }
 
+// D141 per-hole transducer tune of the OWN hole (lib/IceMesh/src/sonar_tune.h; the tip-ups have the same in
+// src/sensor_node). Asked by the chalet (CMD_SELFTEST value 1; 2 = forget it), the hub page, or serial NODETUNE.
+// Separate from the bench TUNE above (D111), which steps the shared knobs and reports on the bench log only.
+static icemesh::sonar::Tuner g_nodeTuner;
+static uint32_t g_nodeTuneStartMs = 0;
+static uint8_t g_nodeTuneKf = 0, g_nodeTuneKb = 0;
+static icemesh::sonar::TuneResult g_nodeTuneLast; static uint32_t g_nodeTuneLastAt = 0;
+static void nodeTuneReport(const icemesh::sonar::TuneResult& r) {
+  g_nodeTuneLast = r; g_nodeTuneLastAt = millis() ? millis() : 1;
+  meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r);
+  Serial.printf("NODETUNE own hole: status=%u ftrim=%u (%u kHz) bpf=%u snr=%.1f dB gain=%+.2f dB was=%u kHz band=%u-%u kHz ring=%u cm nf=-%u steps_ok=%u\n",
+                r.status, r.ftrim, 180u + r.ftrim, r.bpf, r.snr_x2 * 0.5, r.gain_x4 * 0.25, 180u + r.ref_ftrim, 180u + r.band_lo, 180u + r.band_hi, r.ring_cm, r.nf_neg, r.steps_ok);
+}
+bool nodeTuneLast(uint8_t out12[12], uint32_t& age_ms) {
+  if (!g_nodeTuneLastAt) return false;
+  memcpy(out12, &g_nodeTuneLast, 12); age_ms = millis() - g_nodeTuneLastAt; return true;
+}
+bool nodeTuneRunning() { return g_nodeTuner.active(); }
+void nodeTuneCmd(uint8_t value) {
+  using namespace icemesh::sonar;
+  uint8_t f, b; tuss::effectiveTune(sonarPrm[P_FTRIM], sonarPrm[P_BPF], f, b);
+  if (value == TUNE_CMD_CLEAR) {
+    g_nodeTuner.stop(); tuss::setTuneOverride(false); tuss::clearNodeTune();
+    nodeTuneReport(Tuner::status(TUNE_CLEARED, sonarPrm[P_FTRIM], sonarPrm[P_BPF]));
+    return;
+  }
+  #if SONAR_REAL
+  const bool busy = g_tuneStep >= 0 || g_sweepStep >= 0;   // a bench TUNE / SWEEP is stepping the knobs
+  #else
+  const bool busy = true;                                   // no sonar in this build
+  #endif
+  if (busy || sonarReal == nullptr || !tuss::ok()) { nodeTuneReport(Tuner::status(TUNE_NO_SONAR, f, b)); return; }
+  if (g_nodeTuner.active()) return;
+  g_nodeTuneKf = sonarPrm[P_FTRIM]; g_nodeTuneKb = sonarPrm[P_BPF];
+  g_nodeTuner.start(f, b); g_nodeTuneStartMs = millis();
+  tuss::setTuneOverride(true, g_nodeTuner.ftrim(), g_nodeTuner.bpf());
+  Serial.println(F("NODETUNE started (17 steps x 8 pings, ~35 s). Keep the transducer still, bottom in view"));
+}
+static void nodeTuneAbort(uint8_t status) {
+  if (!g_nodeTuner.active()) return;
+  uint8_t f, b; tuss::effectiveTune(g_nodeTuneKf, g_nodeTuneKb, f, b);
+  g_nodeTuner.stop(); tuss::setTuneOverride(false);
+  nodeTuneReport(icemesh::sonar::Tuner::status(status, f, b));
+}
+void nodeTuneWatch() {   // loop(): the own sonar stopped or the pings fail: give up, the old setting is back
+  if (g_nodeTuner.active() && millis() - g_nodeTuneStartMs > 180000UL) nodeTuneAbort(icemesh::sonar::TUNE_TIMEOUT);
+}
+static_assert(sizeof(icemesh::sonar::TuneResult) == sizeof(SelfTestResult), "TuneResult travels in the SelfTestResult slot");
+#if SONAR_REAL
+static void nodeTuneOnPing(const icemesh::sonar::SonarProc::Out& o) {
+  using namespace icemesh::sonar;
+  if (!g_nodeTuner.active()) return;
+  if (!g_nodeTuner.onPing((float)o.bottom > 0.f, (float)o.bottom_snr)) { tuss::setTuneOverride(true, g_nodeTuner.ftrim(), g_nodeTuner.bpf()); return; }
+  tuss::setTuneOverride(false);
+  TuneResult r = g_nodeTuner.result();
+  const float ring = (float)o.ring_m * 100.f, nf = -(float)o.nf;
+  r.ring_cm = (uint8_t)(ring < 0 ? 0 : (ring > 255 ? 255 : ring)); r.nf_neg = (uint8_t)(nf < 0 ? 0 : (nf > 255 ? 255 : nf));
+  if (g_nodeTuner.changed()) tuss::saveNodeTune(r.ftrim, r.bpf, g_nodeTuneKf, g_nodeTuneKb);
+  nodeTuneReport(r);
+}
+#endif
+
 // D62: the real hole's bait: the chalet's value when set (D43), else no bait labels / flags (D47; the fake own hole
 // keeps the prototype's lure)
 static void sonarRealBait() {
@@ -3472,7 +3544,7 @@ static void sonarRealTick(bool focus) {
   static uint32_t deferredAtUs = 0;
   static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
   static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0, lastBench = 0;
-  const uint8_t tpp = sonarReal->ticksPerPing(focus);
+  const uint8_t tpp = g_nodeTuner.active() ? 1 : sonarReal->ticksPerPing(focus);   // D141: a tune pings 4 times a second
   if (++tick_n < tpp) return;
   // radio quiet: nothing in flight on ESP-NOW (2 ms guard after the last send callback) and no LoRa transmit on
   // the air or planned inside the ping. Not quiet: wait one tick, once.
@@ -3495,6 +3567,7 @@ static void sonarRealTick(bool focus) {
     if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecordLine(codes, pi); recPingX(pi, sonarReal->lastProc()); sweepOnPing(); }
     else if (g_sweepStep >= 0 && !sonarRecAny()) sweepApply(-1);   // recording stopped mid-sweep: put the knobs back
     tuneOnPing(sonarReal->lastProc());   // D111: runs with or without a recording
+    nodeTuneOnPing(sonarReal->lastProc());   // D141
     bottommem::tick(sonarReal->proc.hasBottom(), (float)sonarReal->proc.lockedBottom());   // D116
     if (sonarRawAsk || (sonarRecAny() && sonarRawEverySec && millis() - lastRaw >= sonarRawEverySec * 1000UL)) {
       recRaw(pi, sonarRawAsk && !sonarRecAny());   // asked while not recording: print it anyway

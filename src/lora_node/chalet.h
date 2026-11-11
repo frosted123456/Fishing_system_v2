@@ -359,6 +359,10 @@ void holeScreenLine(char* out, size_t n);   // D64: hub home footer
 void holeTripClear();                 // D64: serial HOLE CLEAR (= button press while tripped)
 uint16_t holeTurns();                 // D69: quarter turns of the own hole since armed / cleared
 void holeSelfTest(SelfTestResult& r, bool toSerial);   // D70: wiring check of the own hole
+void nodeTuneCmd(uint8_t value);                       // D141: own hole: 1 = run the transducer tune, 2 = forget it
+bool nodeTuneLast(uint8_t out12[12], uint32_t& age_ms);   // D141: own hole: last tune result (icemesh::sonar::TuneResult)
+bool nodeTuneRunning();
+void nodeTuneWatch();
 // D73: GPS (chalet)
 struct GpsStatus { bool fix, swapped, scanning, origin_set; int8_t rx_pin; uint8_t sats, hh, mm, ss; uint16_t hdop_x10; int32_t lat_e7, lon_e7, lat0_e7, lon0_e7; uint32_t sentences, bad, data_age_s, baud; const char* levels; };
 void gpsSetup();
@@ -467,6 +471,8 @@ int8_t armPendingFor(uint8_t hole);          // D68: -1 none, else the value bei
 void handleWebApiNodeArm();
 void handleWebApiNodeSelfTest();   // D70
 void handleWebApiSelfTest();       // D70
+void handleWebApiNodeTune();       // D141
+void handleWebApiTune();           // D141
 // D74: offline map pack on LittleFS + optional write PIN (mappack.cpp)
 bool mapPackSetup();
 size_t mapPackBytes();

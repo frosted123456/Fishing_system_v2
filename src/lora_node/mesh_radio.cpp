@@ -90,10 +90,13 @@ static constexpr uint8_t SONAR_HIST = 60;    // D84c: summaries per hole for the
 struct ChaletSink : public sonar::SonarStore<16, SONAR_RING, SONAR_HIST> {
   struct R { uint8_t node; uint8_t r[12]; uint32_t at_ms; };
   R st[16]; uint8_t st_n = 0;
+  R tn[16]; uint8_t tn_n = 0;   // D141: last transducer-tune result of each hole (same section, 12 B with version 2)
   void onSelfTest(uint8_t, uint8_t node, const uint8_t* r12, uint16_t) override {
+    const bool tune = r12[0] == 2;   // icemesh::sonar::TUNE_RESULT_VER
+    R* a = tune ? tn : st; uint8_t& n = tune ? tn_n : st_n;
     R* p = nullptr;
-    for (uint8_t i = 0; i < st_n && p == nullptr; i++) if (st[i].node == node) p = &st[i];
-    if (p == nullptr) { if (st_n < 16) p = &st[st_n++]; else p = &st[0]; }
+    for (uint8_t i = 0; i < n && p == nullptr; i++) if (a[i].node == node) p = &a[i];
+    if (p == nullptr) { if (n < 16) p = &a[n++]; else p = &a[0]; }
     p->node = node; memcpy(p->r, r12, 12); p->at_ms = millis() ? millis() : 1;
   }
 };
@@ -1156,6 +1159,20 @@ void meshSetSelfTest(uint8_t hole) {   // chalet: ask one hole (beacon command, 
     for (uint8_t i = 0; i < g_sonar->st_n; i++) if (g_sonar->st[i].node == hole) { g_sonar->st[i] = g_sonar->st[--g_sonar->st_n]; break; }
   cmdQueue(CMD_SELFTEST, hole, 0);
 }
+// D141: transducer tune of one hole (value 1 = run, 2 = forget). Same beacon command as the wiring check, value != 0
+void meshSetTune(uint8_t hole, uint8_t value) {
+  if (!g_chalet || g_ch == nullptr || hole == 0 || value == 0) return;
+  Lock l;
+  if (g_sonar != nullptr)   // the old result goes: the page shows "waiting" until the fresh one lands
+    for (uint8_t i = 0; i < g_sonar->tn_n; i++) if (g_sonar->tn[i].node == hole) { g_sonar->tn[i] = g_sonar->tn[--g_sonar->tn_n]; break; }
+  cmdQueue(CMD_SELFTEST, hole, value);
+}
+bool meshTuneResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms) {   // chalet: last tune result of a hole
+  if (g_sonar == nullptr) return false;
+  Lock l;
+  for (uint8_t i = 0; i < g_sonar->tn_n; i++) if (g_sonar->tn[i].node == node) { memcpy(out12, g_sonar->tn[i].r, 12); age_ms = millis() - g_sonar->tn[i].at_ms; return true; }
+  return false;
+}
 void meshHubSelfTestReport(uint8_t node, const uint8_t* r12) {   // hub: result in the next 3 packets
   if (g_hub == nullptr) return;
   uint8_t b[SELFTEST_SECTION_LEN]; b[0] = node; memcpy(b + 1, r12, 12);
@@ -1601,7 +1618,7 @@ static void appendEchoJson(String& s, uint8_t node, uint32_t since, uint8_t max)
     char cells[sonar::ECHO_CELLS + 1];
     for (uint8_t c = 0; c < sonar::ECHO_CELLS; c++) cells[c] = H[sonar::echoCell(copy[i].e, c)];
     cells[sonar::ECHO_CELLS] = 0;
-    s += cells; s += "\","; s += copy[i].e.scale; s += ","; s += copy[i].e.sharp; s += ","; s += copy[i].e.marks; s += "]";   // D112 / D126 / D133: [seq, index, nf, cells, scale, sharpened, marks] (marks: cells = the payload, 2 nibbles per byte, low first)
+    s += cells; s += "\","; s += copy[i].e.scale; s += ","; s += copy[i].e.sharp; s += ","; s += copy[i].e.marks; s += ","; s += copy[i].e.fine; s += "]";   // D112 / D126 / D133: [seq, index, nf, cells, scale, sharpened, marks] (marks: cells = the payload, 2 nibbles per byte, low first)
   }
   s += "]";
 }

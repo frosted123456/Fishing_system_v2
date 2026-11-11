@@ -36,6 +36,8 @@ void setupWebServer() {
   POST_PIN("/api/node/arm", handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
   POST_PIN("/api/node/selftest", handleWebApiNodeSelfTest);   // D70: ask a hole for its wiring check
   server.on("/api/selftest", HTTP_GET, handleWebApiSelfTest);               // D70: last result of ?id=
+  POST_PIN("/api/node/tune", handleWebApiNodeTune);           // D141: ask a hole to tune its transducer ({"nodeId":n,"clear":true} forgets it)
+  server.on("/api/tune", HTTP_GET, handleWebApiTune);                       // D141: last tune result of ?id=
   POST_PIN("/api/node/pos", handleWebApiNodePos);      // v2 (D51): position on the pocket map
   server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
@@ -352,6 +354,34 @@ void handleWebApiSelfTest() {
   doc["vdrv_ready"] = (r->shield & ST_SH_VDRV_READY) != 0; doc["pulse_fault"] = (r->shield & ST_SH_PULSE_FLT) != 0; doc["drv_fault"] = (r->shield & ST_SH_DRV_FLT) != 0;
   doc["ee_fault"] = (r->shield & ST_SH_EE_FLT) != 0; doc["leakage"] = (r->shield & ST_SH_LEAKAGE) != 0;
   doc["raw_max"] = r->raw_max_16 * 16; doc["ring_bins"] = r->ring_bins; doc["noise_code"] = r->noise_code; doc["rssi"] = r->rssi_abs ? -(int)r->rssi_abs : 0;
+  String out; serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// D141 POST {"nodeId":n[,"clear":true]}: the chalet beacons CMD_SELFTEST with value 1 (run) / 2 (forget); the hub runs it
+// on its own hole or hands it to the tip-up; the result comes back in SEC_SELFTEST as a 12-byte TuneResult (version 2).
+void handleWebApiNodeTune() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  const uint8_t v = (doc["clear"] | false) ? 2 : 1;
+  if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetTune((uint8_t)id, v);
+  else if (id == NODE_ID) nodeTuneCmd(v);
+  else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, v);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handleWebApiTune() {
+  const int id = server.hasArg("id") ? server.arg("id").toInt() : 0;
+  uint8_t b[12]; uint32_t age = 0; bool have = false;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) have = id > 0 && id < 255 && meshTuneResult((uint8_t)id, b, age);
+  else if (id == NODE_ID) have = nodeTuneLast(b, age);   // hub hotspot page: the own hole
+  if (!have) { server.send(200, "application/json", (currentRole != ROLE_GATEWAY_OFFSHORE && id == NODE_ID && nodeTuneRunning()) ? "{\"have\":false,\"running\":true}" : "{\"have\":false}"); return; }
+  StaticJsonDocument<384> doc;
+  doc["have"] = true; doc["id"] = id; doc["age_s"] = age / 1000;
+  doc["status"] = b[1]; doc["khz"] = 180 + b[2]; doc["bpf"] = b[3]; doc["snr"] = b[4] * 0.5f; doc["gain"] = (int8_t)b[5] * 0.25f;
+  doc["was_khz"] = 180 + b[6]; doc["band_lo"] = b[7] ? 180 + b[7] : 0; doc["band_hi"] = b[8] ? 180 + b[8] : 0;
+  doc["ring_cm"] = b[9]; doc["nf"] = -(int)b[10]; doc["steps_ok"] = b[11];
   String out; serializeJson(doc, out);
   server.send(200, "application/json", out);
 }

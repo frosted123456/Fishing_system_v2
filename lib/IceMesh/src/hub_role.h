@@ -44,8 +44,20 @@ class HubRole {
   uint8_t last_cmd_seq = 0;
   uint8_t last_cmd_target = 0, last_cmd_value = 0;   // arguments of the last command returned by onBeacon/onEbBeacon
   sonar::SonarOutbox sonar;   // blocks waiting for this hub's slot
-  uint8_t selftest[SELFTEST_SECTION_LEN]; uint8_t selftest_frames = 0;   // D70: result to repeat in the next 3 packets
-  void setSelfTest(const uint8_t* b13) { memcpy(selftest, b13, SELFTEST_SECTION_LEN); selftest_frames = 3; }
+  // D70: a result ([node] + 12 B) to repeat in the next 3 packets. D141: up to ST_Q results wait (three holes of one hub
+  // finish their tune within seconds of each other; one slot lost all but the last). Same node + same kind (byte 0 of the
+  // 12 = version: 1 wiring check, 2 tune) replaces its older result; a full queue drops the oldest.
+  enum { ST_Q = 4 };
+  uint8_t st_q[ST_Q][SELFTEST_SECTION_LEN]; uint8_t st_frames[ST_Q] = {0, 0, 0, 0}; uint8_t st_next = 0;
+  void setSelfTest(const uint8_t* b13) {
+    int8_t slot = -1;
+    for (uint8_t i = 0; i < ST_Q && slot < 0; i++) if (st_frames[i] && st_q[i][0] == b13[0] && st_q[i][1] == b13[1]) slot = static_cast<int8_t>(i);
+    for (uint8_t i = 0; i < ST_Q && slot < 0; i++) if (!st_frames[i]) slot = static_cast<int8_t>(i);
+    if (slot < 0) { slot = static_cast<int8_t>(st_next); st_next = static_cast<uint8_t>((st_next + 1) % ST_Q); }
+    memcpy(st_q[slot], b13, SELFTEST_SECTION_LEN); st_frames[slot] = 3;
+  }
+  const uint8_t* selfTestCur() const { for (uint8_t i = 0; i < ST_Q; i++) if (st_frames[i]) return st_q[i]; return nullptr; }
+  void selfTestSent() { for (uint8_t i = 0; i < ST_Q; i++) if (st_frames[i]) { st_frames[i]--; return; } }
 
   // Chalet state from the latest beacon, LoRa or ESP-NOW backbone (whichever came last)
   bool have_info = false;
@@ -200,9 +212,9 @@ class HubRole {
     in.line_rot = line_rot_;
     in.test = test; in.test_counter = test_counter; in.test_mode_seen = plan.test_mode;
     in.sonar = &sonar; in.sonar_path = sonar::SonarOutbox::PATH_LORA;
-    in.selftest = (selftest_frames && primary) ? selftest : nullptr;
+    in.selftest = primary ? selfTestCur() : nullptr;
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
-    if (r.selftest_sent && selftest_frames && primary) selftest_frames--;
+    if (r.selftest_sent && primary) selfTestSent();
     if (r.len > 0 && primary) n_relayed_ = 0;   // D81: the relayed packets went out; a second turn carries fresh data only
     nodeinfo_idx_ = r.nodeinfo_next;
     line_rot_ = r.line_rot_next;
@@ -231,9 +243,9 @@ class HubRole {
     in.nodeinfo_start = nodeinfo_idx_;
     in.line_rot = line_rot_;
     in.sonar = &sonar; in.sonar_path = sonar::SonarOutbox::PATH_EB;
-    in.selftest = selftest_frames ? selftest : nullptr;
+    in.selftest = selfTestCur();
     const HubBuildResult r = buildHubPacket(in, table, buf, cap);
-    if (r.selftest_sent && selftest_frames) selftest_frames--;
+    if (r.selftest_sent) selfTestSent();
     nodeinfo_idx_ = r.nodeinfo_next;
     line_rot_ = r.line_rot_next;
     return r.len;

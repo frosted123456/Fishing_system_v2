@@ -135,6 +135,7 @@ class SonarSource {
         const float* src = holdLine(SonarProc::binDb(), SonarProc::lendScratch(4)); bool sharp = false;
         static_assert(BINS >= 2 * deconv::MAXW && deconv::MAXN >= BINS, "lent scratch arrays too short for the sharpening");
         // D133: echo marks (knob echo 1): the baseline + one entry per echo instead of 122 cells, a raw line every 10th
+        const bool fineMode = proc.prm[P_ECHO_MODE] == 2;   // D142 "show all": raw cells with fine levels near the floor, never sharpened
         const bool marksMode = proc.prm[P_ECHO_MODE] == 1 && echo_scale_ > 0;
         const bool marksTurn = marksMode && marks_n_ != MARKS_RAW_EVERY - 1;
         if (marksMode) marks_n_ = static_cast<uint8_t>((marks_n_ + 1) % MARKS_RAW_EVERY);   // D133b: no 256 wrap
@@ -146,12 +147,12 @@ class SonarSource {
           if (deconv::sharpen(src, BINS, static_cast<float>(sp::BIN_M()), static_cast<float>(out_.nf), out_.bottom > 0.f ? static_cast<float>(out_.bottom) : 0.f,
                               proc.prm[P_DEADZONE_DM] * 0.1f, mode, w.out, w, &mk)) { marksLine(e, mk); built = true; }
         }
-        if (!built && proc.prm[P_SHARP] && echo_scale_ > 0) {
+        if (!built && !fineMode && proc.prm[P_SHARP] && echo_scale_ > 0) {
           deconv::Work w = deconv::workFrom(SonarProc::lendScratch(0), SonarProc::lendScratch(1), SonarProc::lendScratch(2), SonarProc::lendScratch(3));
           if (deconv::sharpen(src, BINS, static_cast<float>(sp::BIN_M()), static_cast<float>(out_.nf), out_.bottom > 0.f ? static_cast<float>(out_.bottom) : 0.f,
                               proc.prm[P_DEADZONE_DM] * 0.1f, proc.prm[P_SHARP], w.out, w)) { src = w.out; sharp = true; }
         }
-        if (!built) { echoFromBins(e, node_, last_.index, src, static_cast<float>(out_.nf), echo_scale_); e.sharp = sharp ? 1 : 0; }
+        if (!built) { echoFromBins(e, node_, last_.index, src, static_cast<float>(out_.nf), echo_scale_, fineMode); e.sharp = sharp ? 1 : 0; }
         const size_t len = encodeEcho(e, out[n_out].data, MAX_BLOCK);
         if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; echo_bytes += static_cast<uint32_t>(len); }
         since_echo_ = 0; holdReset();
@@ -374,7 +375,7 @@ class SonarSource {
   }
   // D133: Marks -> the payload in e.cells (sonar_codec.h); at most MARKS_PER_LINE, the strongest, in depth order
   void marksLine(EchoLine& e, const deconv::Marks& mk) const {
-    e.node = node_; e.index = last_.index; e.scale = echo_scale_; e.sharp = 1; e.marks = 1;
+    e.node = node_; e.index = last_.index; e.scale = echo_scale_; e.sharp = 1; e.marks = 1; e.fine = 0;
     const float n = -static_cast<float>(out_.nf); e.nf_neg = static_cast<uint8_t>(n < 0 ? 0 : (n > 255 ? 255 : n + 0.5f));
     const float nfR = -static_cast<float>(e.nf_neg);
     memset(e.cells, 0, ECHO_BYTES);

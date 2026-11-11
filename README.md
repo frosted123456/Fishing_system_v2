@@ -111,7 +111,7 @@ ice, sliding arm with the Hall sensor, magnet clamp on the shaft. Model v3.0.1, 
 | 1 | Open Echo TUSS4470 shield 002 | |
 | 1 | 200 kHz transducer, BBDM-40200K-DA | 14° beam |
 | 1 | MT3608 boost, set to 21.5 V | Into J4 middle pin. Standard build (40 V p-p on the transducer) |
-| (1) | **Optional high-drive (4.4.6):** XL6009 boost module (replaces the MT3608) + DB107 bridge rectifier + 1N4148 | ~60 V p-p instead of 40: +3 to +4.6 dB (est.). Not an XL6019 (180 kHz switching sits in the sonar band) |
+| (1) | **Optional high-drive (4.4.6):** XL6009 boost module (replaces the MT3608) + DB107 bridge rectifier + 1N4148 + one 47-100 kΩ resistor | ~60 V p-p instead of 40: +3 to +4.6 dB (est.). Not an XL6019 (180 kHz switching sits in the sonar band) |
 
 ### 3.5 Software
 
@@ -290,11 +290,25 @@ from outside at ~30 V gives ~60 V p-p, **+3 to +4.6 dB (est.)**. No new board; t
 | 3 | XL6009 OUT + | DB107 **−** leg | DB107: use only − and +, cut the two ~ legs |
 | 4 | DB107 **+** leg → **1N4148** (stripe toward C6) | Shield **C6, the pad closer to the TUSS4470** (wire B) | VDRV ≈ 29.6 V. The other C6 pad is GND (beeps to ground) |
 | 5 | XL6009 OUT − | Shield GND | Common ground |
+| 6 | Shield **C6, the pad closer to the TUSS4470** | The **other C6 pad** (GND), through a **47-100 kΩ resistor** soldered across C6, pad to pad (bleed) | Drains C6 when the power goes off, see below. Draws 0.3-0.65 mA at 30 V (about 3-7 mA from the pack, est.) |
 
 Rule: **VPWR > VDRV + 0.3 V at all times, power-up included** (datasheet 6.3 note / 7.3.1: otherwise reverse current
 flows from VDRV into VPWR). VPWR draws only 150-340 µA, so the shield's 1N4001 drops just ~0.45-0.5 V; VDRV idles at
 microamps, where the DB107's two diodes drop only ~0.7-0.8 V (est.): ~0.25 V gap, too tight. The 1N4148 adds ~0.4-0.6 V:
 **~0.7-1 V gap** for ~−0.2 dB. Never wire B without the DB107 + 1N4148.
+
+Power-off (D143): the diodes of wire B stop C6 from discharging backwards, and nothing loads VDRV in this mode, while
+VPWR follows the boost output down. Without the bleed resistor (row 6) VDRV stays near 30 V with VPWR falling under it
+at every switch-off: the reverse-current case of the rule above. With 47-100 kΩ, C6 empties in 0.1-0.2 s, faster than the
+boost output falls. The bleed also keeps 0.3-0.65 mA flowing in the DB107 + 1N4148 while idle, so their drop is a real
+~1.5 V (est.) instead of a microamp-level one: the gap no longer depends on leakage. It has no effect on a ping.
+
+The picture shows the shield photo with the J4 pin, and a zoom drawn from the board file (`referance/shield002_tmp/TUSS4470_shield.kicad_pcb`)
+with the exact pads: C6 lower pad = VDRV, C6 upper pad = GND, R1 lower pad = VPWR (an easier meter point than C7).
+
+Battery (est., to measure with a meter in series with the XL6009 input): the XL6009 itself draws 2.5-5 mA (datasheet) plus its
+own feedback divider; expect 10-15 mA from the pack with a light divider, 40 mA or more if the module's divider is a few
+hundred ohms, against ~2-3 mA for the MT3608 today. Datasheet minimum input 3.6 V: the end of the pack.
 
 Bring-up:
 
@@ -307,7 +321,14 @@ Bring-up:
 3. Chalet: `KNOB vmode 2`. Every flash resets the knobs: set `vmode 2` again after each flash (the Water presets
    do not touch it).
 4. Bench line: no `BURST FAULT`. `ring=` a bit longer: raise `dead` one step if needed. (No `VDRV LOW` in this mode.)
-5. Compare echo **minus floor** (bottom, a weight) with `vmode 0` vs `vmode 2`: expect +3 to +4.6 dB.
+5. Gain check: measure echo **minus floor** (bottom, a weight) **before wire B goes on** (20 V drive) and after
+   (`vmode 2`): expect +3 to +4.6 dB. With wire B connected, `vmode 0` does NOT go back to 20 V.
+
+**Mixed fleet** (knobs are global: the hub broadcasts the same `vmode` to every pod): `vmode 2` on a pod WITHOUT wire B
+leaves its VDRV unpowered (weak pings). With some pods modded and some not, keep **`vmode 0` everywhere**: modded pods
+still drive at ~30 V (the chip's 20 V regulator only charges and stays off above its target; inferred, confirm once:
+same echo, no `BURST FAULT` with `vmode 0` and `vmode 2` on a modded hub). WROOM pods: same shield, same wiring, knobs
+from the hub; `TUNE` runs on the Heltec only.
 
 Limits: chip 36 V max (40 V absolute), C6 rated 40 V, XL6009 output caps often 35 V: stay at **31.5 V**.
 Back to 20 V: `vmode 0` **and** unplug wire B (with wire B in place VDRV stays ~30 V; safe, not 20 V).

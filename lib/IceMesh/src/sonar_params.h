@@ -50,7 +50,8 @@ enum ParamId : uint8_t {
   P_DRIVE,           // D118: 0 = direct drive (internal H-bridge), 1 = transformer (PRE_DRIVER_MODE: OUTA/OUTB drive two external FETs)
   P_SHARP,           // D126: echogram line 0 = raw, 1 = sharpened on the hub (deconvolved), 2 = sharpened + doublet split (experimental)
   P_DET,             // D127: fish detector 0 = peak over the noise floor + prominence (prototype), 1 = scene CFAR + matched filter (experimental)
-  P_ECHO_MODE,       // D133: echogram line 0 = raw cells (66 B), 1 = echo marks (baseline + one entry per echo, 14-35 B) with a raw line every 10th
+  P_ECHO_MODE,       // D133: echogram line 0 = raw cells (66 B), 1 = echo marks (baseline + one entry per echo, 14-35 B) with a raw line every 10th;
+                     // D142: 2 = "show all": raw cells every line, 16 levels spent on 0-46 dB with 1 dB steps to 6 dB, not sharpened
   P_COUNT
 };
 
@@ -69,11 +70,11 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"range", "Colour range", 20, 80, 46, "dB"},
     {"tvg", "Range compensation", 0, 1, 1, ""},
     {"cycles", "Burst cycles, base", 1, 32, 32, "cycles"},   // D109: 07nov sweep, 16 -> 32 = +4 dB on the floor, ring-down end unchanged
-    {"gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"},
+    {"gain", "Receiver gain", 0, 3, 3, "10/12.5/15/20 V/V"},   // D140: 2 -> 3 (20 V/V): the pedestal is log-amp noise (datasheet fig. 6-4), 07nov sweep +1.8 dB SNR
     {"pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"},
     {"fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"},   // D107/D109: was 8; 07nov sweep 8 -> 16 -> 32 = +6.8 / +10.8 dB on the floor, ring-down end unchanged
     {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
-    {"avg", "Bursts averaged", 1, 4, 2, "per ping (D134: in focus too)"},
+    {"avg", "Bursts averaged", 1, 4, 4, "per ping (D134: in focus too)"},   // D140: 2 -> 4 (04nov sweep: flicker 0.70 -> 0.34 dB)
     {"freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"},
     {"sound", "Sound speed", 0, 255, 53, "+1350 m/s"},
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
@@ -89,7 +90,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"},
     {"sharp", "Sharpened echogram", 0, 2, 2, "0 raw (legacy) 1 sharpened 2 + doublet split"},   // D126; D128: default 2 (was 0)
     {"det", "Fish detector", 0, 1, 0, "0 classic 1 adaptive + matched filter (experimental: a still target fades)"},   // D127; D128: stays 0 (a fish holding still under the bait was lost)
-    {"echo", "Echogram sent as", 0, 1, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th"},   // D133; D135: default 1 (was 0)
+    {"echo", "Echogram sent as", 0, 2, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th 2 show all (raw, 1 dB steps near the floor)"},   // D133; D135: default 1 (was 0)
   };
   return T[id < P_COUNT ? id : 0];
 }
