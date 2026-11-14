@@ -1,4 +1,5 @@
 // Chalet / hub Wi-Fi: hotspot, cabin network, credentials, retry (split out of main.cpp, D49). Shared declarations: chalet.h
+#include "ota_update.h"   // D148
 #include "chalet.h"
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -351,6 +352,9 @@ void handleSerialCommandLine(String line) {
     Serial.printf("MAP: pack %u bytes, %u KB free for tiles%s\n", (unsigned)mapPackBytes(), (unsigned)(mapFree() / 1024), currentRole == ROLE_GATEWAY_OFFSHORE ? "" : " (chalet only)");
   } else if (line == "PERF") {
     perfPrint();   // v2: loop timing since the last PERF
+  } else if (line == "OTA") {   // D148: restart into the firmware update mode
+    if (!otaSupported()) Serial.println(F("OTA: this board has a single firmware slot: update over USB"));
+    else otaRequest();
   } else if (line == "RADIO") {
     meshPrintStatus(Serial);
   } else if (line == "RADIO RESET") {

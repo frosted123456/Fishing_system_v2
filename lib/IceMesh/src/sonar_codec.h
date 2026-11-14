@@ -33,7 +33,7 @@ static const uint8_t MAX_BLOCK = 120;       // bytes; fits an ESP-NOW frame and 
 static const uint8_t RESID_RICE_K = 6;
 static const uint8_t BG_RICE_K = 3;
 
-enum BlockType : uint8_t { BT_NONE = 0, BT_BASE = 1, BT_DATA = 2, BT_BG = 3, BT_ECHO = 4 };
+enum BlockType : uint8_t { BT_NONE = 0, BT_BASE = 1, BT_DATA = 2, BT_BG = 3, BT_ECHO = 4, BT_HD = 5 };   // D144: BT_HD = high-definition echogram line
 // D93 echogram line: the raw ping of the FOCUS hole, 488 bins folded 4:1 (max) into 122 cells of 10 cm, each a 4-bit
 // level over the noise floor (0 = at the floor, 15 = 60 dB over, ECHO_DB_PER_LEVEL per step). One line per second in
 // focus, 66 bytes: what the hub's A-scan shows, on the chalet, under the detector's marks.
@@ -147,7 +147,7 @@ inline uint16_t binToDepth(uint16_t bin) { return static_cast<uint16_t>(static_c
 inline bool peekBlock(const uint8_t* in, size_t len, uint8_t& node, uint8_t& type) {
   if (len < 2) return false;
   node = in[0]; type = static_cast<uint8_t>(in[1] >> 4);
-  return type == BT_BASE || type == BT_DATA || type == BT_BG || type == BT_ECHO;
+  return type == BT_BASE || type == BT_DATA || type == BT_BG || type == BT_ECHO || type == BT_HD;
 }
 
 // ---- BASE summary -----------------------------------------------------------------------------
@@ -416,6 +416,105 @@ inline void echoFromBins(EchoLine& e, uint8_t node, uint16_t index, const float*
     const float l = (m - nf) / ECHO_DB_PER_LEVEL + 0.5f;
     echoSetCell(e, c, static_cast<uint8_t>(l < 0 ? 0 : (l > 15 ? 15 : l)));
   }
+}
+
+// ---- HD (D144 high-definition echogram line) -----------------------------------------------------------------------
+// The raw ping of the FOCUS hole at full depth resolution: one cell per 2.5 cm bin (fold 1; 5 cm = fold 2 when a very
+// noisy line would not fit a block), 16 levels over the noise floor on the D142 table (1 dB steps to 6 dB, wider above),
+// only from the surface to the bottom + 0.6 m. Empty water costs almost nothing: the cells are sent as
+//   [zero run: Rice(kr)] then [cells of an echo: the step from the cell before, zig-zag, Rice(kv)] until a cell is 0 again.
+// Block: [node][BT_HD << 4][index lo][index hi][nf_neg], then bits: cells n (9) | fold - 1 (1) | all (1) | kr (3) | kv (2),
+// then the tokens. 12 Nov study (docs/LORA_COMPRESSION_2026-11-12.md): 36 B median for 5 m of water, 23 B in the bin,
+// against 66 B for the 10 cm / 4 dB line; a context model + table coding gave the same size on quiet water.
+// all = 1: levels from the floor (knob echo 2 "show all"); 0 = cells under the cut were set to 0 (texture under the marks).
+static const uint8_t HD_HDR = 5;
+static const float HD_BELOW_M = 0.6f;          // water sent below the bottom (the bottom echo's thickness)
+struct HdLine { uint8_t node; uint16_t index; uint8_t nf_neg; uint8_t fold; uint8_t all; uint16_t n; uint8_t lv[BINS]; };
+inline size_t encodeHd(const HdLine& h, uint8_t* out, size_t cap) {
+  if (cap < static_cast<size_t>(HD_HDR + 3) || h.n == 0 || (h.fold != 1 && h.fold != 2) || static_cast<uint32_t>(h.n) * h.fold > BINS) return 0;
+  uint32_t cr[8], cv[4];
+  for (uint8_t k = 0; k < 8; k++) cr[k] = 0;
+  for (uint8_t k = 0; k < 4; k++) cv[k] = 0;
+  for (uint8_t pass = 0; pass < 2; pass++) {   // pass 0: cost of every Rice parameter; pass 1: write with the cheapest
+    uint8_t kr = 0, kv = 0;
+    if (pass == 1) { for (uint8_t k = 1; k < 8; k++) if (cr[k] < cr[kr]) kr = k; for (uint8_t k = 1; k < 4; k++) if (cv[k] < cv[kv]) kv = k; }
+    BitWriter w(out + HD_HDR, pass == 1 ? cap - HD_HDR : 0);
+    if (pass == 1) { w.put(h.n, 9); w.put(static_cast<uint32_t>(h.fold - 1), 1); w.put(h.all ? 1u : 0u, 1); w.put(kr, 3); w.put(kv, 2); }
+    uint16_t i = 0;
+    while (i < h.n) {
+      uint16_t j = i;
+      while (j < h.n && (h.lv[j] & 15u) == 0) j++;
+      const uint32_t run = static_cast<uint32_t>(j - i);
+      if (pass == 0) { for (uint8_t k = 0; k < 8; k++) cr[k] += (run >> k) + 1u + k; } else w.putRice(run, kr);
+      i = j;
+      int32_t prev = 0;
+      while (i < h.n) {
+        const int32_t v = static_cast<int32_t>(h.lv[i] & 15u), d = v - prev;
+        const uint32_t z = d >= 0 ? static_cast<uint32_t>(2 * d) : static_cast<uint32_t>(-2 * d - 1);
+        if (pass == 0) { for (uint8_t k = 0; k < 4; k++) cv[k] += (z >> k) + 1u + k; } else w.putRice(z, kv);
+        prev = v; i++;
+        if (v == 0) break;   // back at the floor: the next token is a zero run again
+      }
+    }
+    if (pass == 1) {
+      if (w.overflow()) return 0;
+      out[0] = h.node; out[1] = static_cast<uint8_t>(BT_HD << 4); out[2] = static_cast<uint8_t>(h.index); out[3] = static_cast<uint8_t>(h.index >> 8);
+      out[4] = static_cast<uint8_t>(h.nf_neg > 127 ? 127 : h.nf_neg);
+      return HD_HDR + w.bytes();
+    }
+  }
+  return 0;
+}
+// Header of an HD block + a full check of its tokens. lv = nullptr: check only (the chalet store keeps the block itself and
+// needs no 488-byte line); else lv[0..BINS) gets the levels (0 past the last cell).
+struct HdInfo { uint8_t node; uint16_t index; uint8_t nf_neg; uint8_t fold; uint8_t all; uint16_t n; };
+inline bool hdParse(const uint8_t* in, size_t len, HdInfo& h, uint8_t* lv) {
+  if (len < static_cast<size_t>(HD_HDR + 3) || (in[1] >> 4) != BT_HD) return false;
+  h.node = in[0]; h.index = static_cast<uint16_t>(in[2] | (in[3] << 8)); h.nf_neg = static_cast<uint8_t>(in[4] & 0x7F);
+  BitReader r(in + HD_HDR, len - HD_HDR);
+  h.n = static_cast<uint16_t>(r.get(9)); h.fold = static_cast<uint8_t>(r.get(1) + 1); h.all = static_cast<uint8_t>(r.get(1));
+  const uint8_t kr = static_cast<uint8_t>(r.get(3)), kv = static_cast<uint8_t>(r.get(2));
+  if (h.n == 0 || static_cast<uint32_t>(h.n) * h.fold > BINS) return false;
+  uint16_t i = 0;
+  while (i < h.n) {
+    const uint32_t run = r.getRice(kr, BINS);
+    if (r.bad() || run > static_cast<uint32_t>(h.n - i)) return false;
+    for (uint32_t k = 0; k < run; k++) { if (lv) lv[i] = 0; i++; }
+    int32_t prev = 0;
+    while (i < h.n) {
+      const uint32_t z = r.getRice(kv, 32);
+      if (r.bad()) return false;
+      const int32_t v = prev + ((z & 1u) ? -static_cast<int32_t>((z + 1u) >> 1) : static_cast<int32_t>(z >> 1));
+      if (v < 0 || v > 15) return false;
+      if (lv) lv[i] = static_cast<uint8_t>(v);
+      i++; prev = v;
+      if (v == 0) break;
+    }
+  }
+  if (lv) for (uint16_t k = h.n; k < BINS; k++) lv[k] = 0;
+  return !r.bad() && r.bitsLeft() < 8;
+}
+inline bool decodeHd(const uint8_t* in, size_t len, HdLine& h) {
+  HdInfo o;
+  if (!hdParse(in, len, o, h.lv)) return false;
+  h.node = o.node; h.index = o.index; h.nf_neg = o.nf_neg; h.fold = o.fold; h.all = o.all; h.n = o.n;
+  return true;
+}
+// bins (dB) -> HD cells: the strongest bin of each cell, fine level over the floor; levels under cut_db are 0 (cut 0 = show all)
+inline void hdFromBins(HdLine& h, uint8_t node, uint16_t index, const float* db, float nf, float bottom_m, uint8_t fold, float cut_db) {
+  h.node = node; h.index = index; h.fold = fold == 2 ? 2 : 1; h.all = cut_db <= 0.f ? 1 : 0;
+  const float n = -nf; h.nf_neg = static_cast<uint8_t>(n < 0 ? 0 : (n > 127 ? 127 : n + 0.5f));
+  int32_t nb = bottom_m > 0.f ? static_cast<int32_t>((bottom_m + HD_BELOW_M) / (static_cast<float>(BIN_MM) * 0.001f) + 0.999f) : static_cast<int32_t>(BINS);
+  if (nb > BINS) nb = BINS;
+  if (nb < 2 * h.fold) nb = 2 * h.fold;
+  h.n = static_cast<uint16_t>(nb / h.fold);
+  for (uint16_t c = 0; c < h.n; c++) {
+    float m = db[c * h.fold];
+    if (h.fold == 2 && db[c * 2 + 1] > m) m = db[c * 2 + 1];
+    const float over = m - nf;
+    h.lv[c] = over < cut_db ? 0 : echoFineLevel(over);
+  }
+  for (uint16_t c = h.n; c < BINS; c++) h.lv[c] = 0;
 }
 
 // ---- BG (background profile segment) ---------------------------------------------------------------

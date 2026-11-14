@@ -32,7 +32,7 @@ def rl(y, h, c, it=100):
     for _ in range(it):
         x = x * conv(y / (conv(x, h, c) + 1e-12), hf, L - 1 - c)
     return x
-HRAW = np.array([0, 0.58, 0.86, 1.0, 0.88, 0.56, 0.28, 0.10, 0.04]); C = 3   # 32 cycles, 2.5 cm bins, peak = ref
+HRAW = np.array([0, 0.40, 0.95, 1.0, 0.60, 0.22, 0.03, 0, 0]); C = 3   # D156: 8 cycles (14nov ball), 2.5 cm bins, peak = ref
 HN = HRAW / HRAW.sum()
 G = np.exp(-0.5 * (np.arange(-3, 4) / 0.85) ** 2)
 NTAU, TAU0, TAU1, BIT = 30, 0.02, 2.0, 8

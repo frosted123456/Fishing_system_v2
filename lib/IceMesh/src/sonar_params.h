@@ -67,12 +67,12 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"dead", "Dead zone", 0, 50, 5, "x0.1 m"},
     {"bsmooth", "Bottom smoothing", 5, 100, 25, "%"},
     {"learn", "Static scene learning", 1, 100, 12, "x0.001"},
-    {"range", "Colour range", 20, 80, 46, "dB"},
+    {"range", "Colour range", 20, 80, 46, "dB"},   // D164: back to 46. D157 raised it to 60 by mistake: this knob scales the legacy cells / still scene under the BOTTOM echo (sonar_proc top_ / lo_); the echogram colours Frank judged at 60 are the page's own "Full colour at" (suite.html vopt.range). D157 text was: Echoes are ~30 dB stronger since the burst-count fix (D146); at 46 the ball and the bin reverberation both sat on the top colour, at 60 the ball is a thin band (Frank, 14nov)
     {"tvg", "Range compensation", 0, 1, 1, ""},
-    {"cycles", "Burst cycles, base", 1, 32, 32, "cycles"},   // D109: 07nov sweep, 16 -> 32 = +4 dB on the floor, ring-down end unchanged
-    {"gain", "Receiver gain", 0, 3, 3, "10/12.5/15/20 V/V"},   // D140: 2 -> 3 (20 V/V): the pedestal is log-amp noise (datasheet fig. 6-4), 07nov sweep +1.8 dB SNR
+    {"cycles", "Burst cycles, base", 1, 32, 8, "cycles"},   // D156: 32 -> 8. 14nov ball sweep after the burst-count fix: at 8 the ball is one clean echo 10 cm wide, +14 dB over the empty bin; at 16 it runs into the ring-down, at 24 / 32 it cannot be told apart. Was   // D109: 07nov sweep, 16 -> 32 = +4 dB on the floor, ring-down end unchanged
+    {"gain", "Receiver gain", 0, 3, 0, "10/12.5/15/20 V/V"},   // D152: 3 -> 0. Two sweeps on 14 Nov (after the burst-count fix): the floor follows the gain one for one (raw 55 / 60 / 64 / 70), so gain adds no margin and 0 keeps the most room under clipping. (D140 chose 3 from recordings made through the fault.)
     {"pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"},
-    {"fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"},   // D107/D109: was 8; 07nov sweep 8 -> 16 -> 32 = +6.8 / +10.8 dB on the floor, ring-down end unchanged
+    {"fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"},   // D156: 32 -> 8, same sweep. Was   // D107/D109: was 8; 07nov sweep 8 -> 16 -> 32 = +6.8 / +10.8 dB on the floor, ring-down end unchanged
     {"idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"},
     {"avg", "Bursts averaged", 1, 4, 4, "per ping (D134: in focus too)"},   // D140: 2 -> 4 (04nov sweep: flicker 0.70 -> 0.34 dB)
     {"freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"},
@@ -80,8 +80,8 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"},
     {"thresh", "Edge threshold", 0, 15, 7, "reg 0x17"},
     {"bmin", "Bottom search from", 1, 50, 6, "x0.1 m"},
-    {"vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"},   // D109: the MT3608 goes to 22 V (VPWR ~21.2 V after the 1N4001): 20 V regulates with margin
-    {"vmode", "VDRV mode", 0, 2, 0, "0 on (proven) 1 quiet 2 external VDRV (D108)"},
+    {"vdrv", "Drive voltage", 5, 20, 20, "V (internal regulator, vmode 0 / 1 only)"},   // D109: the MT3608 goes to 22 V (VPWR ~21.2 V after the 1N4001): 20 V regulates with margin
+    {"vmode", "VDRV mode", 0, 2, 2, "0 internal regulator 1 quiet 2 external VDRV (30 V build)"},   // D147: 0 -> 2, Frank's boards carry the external 30 V wiring (README 4.4.6); a board WITHOUT it must be set to 0 or it does not ping
     {"jitter", "Ping timing jitter", 0, 20, 8, "ms"},
     {"spike", "Interference filter", 0, 30, 10, "dB (0 off)"},
     {"echolen", "Max fish echo length", 0, 60, 30, "x0.1 ping (0 off)"},
@@ -90,7 +90,7 @@ inline const ParamInfo& paramInfo(uint8_t id) {
     {"drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"},
     {"sharp", "Sharpened echogram", 0, 2, 2, "0 raw (legacy) 1 sharpened 2 + doublet split"},   // D126; D128: default 2 (was 0)
     {"det", "Fish detector", 0, 1, 0, "0 classic 1 adaptive + matched filter (experimental: a still target fades)"},   // D127; D128: stays 0 (a fish holding still under the bait was lost)
-    {"echo", "Echogram sent as", 0, 2, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th 2 show all (raw, 1 dB steps near the floor)"},   // D133; D135: default 1 (was 0)
+    {"echo", "Echogram sent as", 0, 2, 1, "0 raw cells (legacy) 1 echo marks + HD line 2 show all (HD line from the floor)"},   // D133; D135: default 1 (was 0)
   };
   return T[id < P_COUNT ? id : 0];
 }

@@ -472,6 +472,7 @@ void handleWebApiNodeArm();
 void handleWebApiNodeSelfTest();   // D70
 void handleWebApiSelfTest();       // D70
 void handleWebApiNodeTune();       // D141
+void handleWebApiNodeUpdate();     // D148
 void handleWebApiTune();           // D141
 // D74: offline map pack on LittleFS + optional write PIN (mappack.cpp)
 bool mapPackSetup();

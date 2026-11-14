@@ -1202,7 +1202,7 @@ void enterDeepSleep() {
   #endif
 
   armBtnWake();   // D61: the button wakes us too (ext1, beside the Hall ext0)
-  if (SONAR_REAL) tuss::sleep();   // shield stays powered (no enable wire): low-power mode over SPI
+  if (SONAR_REAL) tuss::sleep();   // shield stays powered: low-power mode over SPI; with the enable wire (SONAR_EN_WIRE) the converter is held off too
   esp_deep_sleep_start();
 }
 
@@ -1235,7 +1235,7 @@ void enterDeepSleepFast() {
   #endif
 
   armBtnWake();   // D61
-  if (SONAR_REAL) tuss::sleep();   // shield stays powered (no enable wire): low-power mode over SPI
+  if (SONAR_REAL) tuss::sleep();   // shield stays powered: low-power mode over SPI; with the enable wire (SONAR_EN_WIRE) the converter is held off too
   esp_deep_sleep_start();
 }
 
@@ -1640,11 +1640,11 @@ static void recInfo() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[512];
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d vbat_mv=%u heap=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u heap=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, batteryMv, (unsigned long)ESP.getFreeHeap());
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), batteryMv, (unsigned long)ESP.getFreeHeap());
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf);
 }
@@ -1996,7 +1996,7 @@ void sonarLoop() {
   uint8_t tickBudget = 2;                                                    // review: a ping slower than the tick must not keep loop() here
   while (tickBudget-- && millis() - lastTick >= 250UL) {                     // 4 pings/s
     lastTick += 250UL;
-    icemesh::sonar::Block out[4];   // D93
+    icemesh::sonar::Block out[5];   // D93
     static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0;
     const uint32_t t0 = micros();
     uint8_t n;
@@ -2006,7 +2006,7 @@ void sonarLoop() {
         if (millis() - warned >= 5000UL) { warned = millis(); Serial.println(F("BENCH: TUSS4470 NOT answering -> fake data. Check SPI wiring, SONAR_PIN_*, 3.3 V / 5 V to the shield")); }
       }
       src.echo_on = sonarCtrlPrimary;   // D93
-      n = src.tick(focus == NODE_ID, out, 4);   // fake raw ping -> processing -> blocks
+      n = src.tick(focus == NODE_ID, out, 5);   // fake raw ping -> processing -> blocks
     } else {   // real ping when due (adaptive rate), processing, blocks; recording on serial if asked
       static uint8_t tick_n = 0;
       static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
@@ -2019,7 +2019,7 @@ void sonarLoop() {
         while (bench::active() && millis() - bench::lastServedMs() < 15) yield();   // let the page's reply leave the radio first
         if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
           src.echo_on = sonarCtrlPrimary;   // D93
-          n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 4);
+          n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 5);
           bottommem::tick(src.proc.hasBottom(), (float)src.proc.lockedBottom());   // D116
           nodeTuneOnPing(src.lastProc());   // D141
           static uint32_t recCount = 0; static unsigned long lastRaw = 0;
@@ -2088,6 +2088,7 @@ static void selfTestFill(SelfTestResult& r) {
   if (SONAR_REAL) sonarHwBegin();   // review: the head begins the shield lazily; the check must not probe a bus never opened
   tuss::ShieldTest t; tuss::shieldTest(t);
   if (t.pinged) r.sensor |= ST_SENS_PINGED;
+  if (t.gate_pin) { const uint8_t q = (uint8_t)((t.gate_drop_db + 1) / 2 > 7 ? 7 : (t.gate_drop_db + 1) / 2); r.button |= (uint8_t)(ST_GATE_PIN | (t.gate_drop_db >= 3 ? ST_GATE_OK : 0) | (q << 4)); }   // D171
   if (t.not_built) r.shield = ST_SH_NOT_BUILT;
   else {
     r.shield = (t.spi_ok ? ST_SH_SPI_OK : 0) | (t.swapped ? ST_SH_PINS_SWAPPED : 0) | (t.vdrv_ready ? ST_SH_VDRV_READY : 0) |

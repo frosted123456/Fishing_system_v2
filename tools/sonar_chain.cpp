@@ -15,7 +15,7 @@
 using namespace icemesh::sonar;
 
 int main(int argc, char** argv) {
-  static SonarSource src; static SonarStore<4, 256, 16, 250> store; static Block blk[4];
+  static SonarSource src; static SonarStore<4, 256, 16, 250, 250> store; static Block blk[5];   // D144: + the HD line
   src.begin(1, 0xF15A0001UL, 0); src.echo_on = true; if (getenv("ECHO_EVERY")) src.echo_every = (uint8_t)atoi(getenv("ECHO_EVERY"));   // D107: 1 = the hub on ESP-NOW
   Params over; bool ov[P_COUNT] = {false};
   for (int a = 2; a < argc; a++) { const char* e = strchr(argv[a], '='); if (!e) continue; std::string k(argv[a], e - argv[a]); for (uint8_t i = 0; i < P_COUNT; i++) if (k == paramInfo(i).key) { ov[i] = true; over.v[i] = (uint8_t)atoi(e + 1); } }
@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     std::string hex; int f = 0;
     while (ss >> hex && f < sp::NFREQ) { if (hex.size() < 2 * BINS) break; for (int b = 0; b < BINS; b++) codes[f][b] = (uint8_t)strtoul(hex.substr(2 * b, 2).c_str(), nullptr, 16); f++; }
     if (f == 0) continue;
-    const uint8_t nb = src.process(codes, (uint8_t)f, -1, 1.0f, true, blk, 4);   // ~1 ping/s in these files: dt 1 s
+    const uint8_t nb = src.process(codes, (uint8_t)f, -1, 1.0f, true, blk, 5);   // ~1 ping/s in these files: dt 1 s
     for (uint8_t k = 0; k < nb; k++) store.onSonarBlock(1, blk[k].data, blk[k].len, frame);
     frame++;
     n++;
@@ -57,7 +57,11 @@ int main(int argc, char** argv) {
       printf("],\"r\":["); for (uint8_t k = 0; k < p.n_resid; k++) printf("%s[%u,%u]", k ? "," : "", p.r[k].bin, p.r[k].level); printf("]}%s", i + 1 < m ? "," : ""); } }
   printf("],\"echo\":[");
   { const StoredEcho* out[250]; const uint16_t m = store.echoSince(1, 0, out, 250);
-    for (uint16_t i = 0; i < m; i++) { printf("%s{\"index\":%u,\"nf\":%u,\"c\":\"", i ? "," : "", out[i]->e.index, out[i]->e.nf_neg); for (uint8_t c = 0; c < ECHO_CELLS; c++) putchar("0123456789ABCDEF"[echoCell(out[i]->e, c)]); printf("\",\"k\":%u,\"s\":%u,\"m\":%u}", out[i]->e.scale, out[i]->e.sharp, out[i]->e.marks); }
+    for (uint16_t i = 0; i < m; i++) { printf("%s{\"index\":%u,\"nf\":%u,\"c\":\"", i ? "," : "", out[i]->e.index, out[i]->e.nf_neg); for (uint8_t c = 0; c < ECHO_CELLS; c++) putchar("0123456789ABCDEF"[echoCell(out[i]->e, c)]); printf("\",\"k\":%u,\"s\":%u,\"m\":%u,\"f\":%u}", out[i]->e.scale, out[i]->e.sharp, out[i]->e.marks, out[i]->e.fine); }
+    // D144: HD lines, as the chalet hands them to the page (hex of the block after its 5-byte header)
+    { const StoredHd* ho[250]; const uint16_t hm = store.hdSince(1, 0, ho, 250);
+      for (uint16_t i = 0; i < hm; i++) { printf("%s{\"index\":%u,\"nf\":%u,\"c\":\"", (m || i) ? "," : "", ho[i]->index, ho[i]->data[4] & 0x7F); for (uint8_t q = HD_HDR; q < ho[i]->len; q++) printf("%02X", ho[i]->data[q]); printf("\",\"k\":2,\"s\":0,\"m\":0,\"f\":1,\"h\":1}"); }
+      fprintf(stderr, "HD lines: %u, %u bytes\n", (unsigned)hm, (unsigned)src.hd_bytes); }
     fprintf(stderr, "echo lines: %u bytes sent\n", (unsigned)src.echo_bytes); }
   printf("],\"bg\":\"");
   { const NodeSonar* ns = store.find(1); if (ns) for (int b = 0; b < BINS; b++) putchar('0' + (ns->bg[b] & 3)); }

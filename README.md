@@ -110,8 +110,8 @@ ice, sliding arm with the Hall sensor, magnet clamp on the shaft. Model v3.0.1, 
 |---|---|---|
 | 1 | Open Echo TUSS4470 shield 002 | |
 | 1 | 200 kHz transducer, BBDM-40200K-DA | 14° beam |
-| 1 | MT3608 boost, set to 21.5 V | Into J4 middle pin. Standard build (40 V p-p on the transducer) |
-| (1) | **Optional high-drive (4.4.6):** XL6009 boost module (replaces the MT3608) + DB107 bridge rectifier + 1N4148 + one 47-100 kΩ resistor | ~60 V p-p instead of 40: +3 to +4.6 dB (est.). Not an XL6019 (180 kHz switching sits in the sonar band) |
+| 1 | **30 V build (4.4.6, what the wiring pictures show):** XL6009 boost module set to 31.5 V + DB107 bridge rectifier + 1N4148 + one 47-100 kΩ resistor + 20 cm of 30 AWG wire (converter enable wire) | ~60 V p-p on the transducer, and the converter is switched off while each ping listens: receiver floor −75 → −86 dB (measured on hub 1). Not an XL6019 (180 kHz switching sits in the sonar band) |
+| or 1 | **20 V build:** MT3608 boost, set to 21.5 V | Into J4 middle pin only. 40 V p-p on the transducer, no enable wire. The firmware adapts by itself (4.4.6, mixed fleet) |
 
 ### 3.5 Software
 
@@ -150,7 +150,7 @@ Skip it and the chalet runs on its own hotspot. You can also set the Wi-Fi later
 
 ```
 python tools/flash.py chalet --id 100 --name "Chalet" --port COM7 --monitor
-python tools/flash.py hub --id 1 --name "Pointe" --sonar --port COM8
+python tools/flash.py hub --id 1 --name "Pointe" --sonar --gate --port COM8
 python tools/flash.py tipup_wroom --id 11 --name "Baie" --sonar --port COM9
 ```
 
@@ -159,6 +159,7 @@ python tools/flash.py tipup_wroom --id 11 --name "Baie" --sonar --port COM9
 | `--id N` | 1-100, unique on the network |
 | `--name "..."` | Name shown everywhere (can be changed later on the page) |
 | `--sonar` | Board has the TUSS4470 shield (`tipup_wroom`, `hub`, `sensor_lora`) |
+| `--gate` | 30 V build with the converter enable wire (4.4.6): the converter is switched off while each ping listens. Needs `--sonar`. Stays in `devices.ini` for later re-flashes of that board. Leave it out on a board without the wire |
 | `--bench` | Bucket test build: sonar runs from boot, `BENCH` line every 2 s (`tipup_wroom`, `hub`). Includes `--sonar` |
 | `--build-only` | Build, no upload |
 | `--port` | COM port. Leave out and PlatformIO guesses |
@@ -171,6 +172,21 @@ ID suggestion: chalet 100, hubs 1-9, tip-ups 11, 12 (pocket 1), 21, 22 (pocket 2
 
 > **Flash order after a firmware update: every hub and LoRa tip-up first, the chalet last.**
 
+#### 4.3.1 Update a hub without the cable
+
+For a hub that is closed or already on the ice. The first flash with this function has to be over USB.
+
+| Step | Where | What |
+|---|---|---|
+| 1 | PC | Open `tools/flash.html`, pick the same board, role, node ID and options as the hub runs, tick **Build an update file**, give a folder. Run the command: the file `hub<N>..._date_time.bin` lands in that folder. Copy it to the phone (or do step 3 from the PC) |
+| 2 | Hub | Put it in update mode: chalet page, Settings, Advanced, **Firmware update**; or type `OTA` on its serial port; or hold its arming button 3 s while switching it on. Its screen shows the hotspot name |
+| 3 | Phone | Join the hotspot `IceFish-Hub<N>-UPDATE` (same password as the others), open `http://192.168.4.1`, pick the file, **Send and restart** |
+
+In update mode the hub does nothing else: no sonar, no alerts, no radio. It leaves the mode by itself after 10 minutes
+without an upload. The running firmware is kept in the other slot: a file built for another board (other node ID or
+role) is refused, and a new firmware that does not stay up 90 s in three starts is abandoned for the old one. The
+chalet box has a single firmware slot (map storage took the other) and is still updated over USB; the tip-ups too.
+
 ### 4.4 Wiring
 
 #### 4.4.1 WROOM tip-up + shield 002
@@ -180,7 +196,7 @@ ID suggestion: chalet 100, hubs 1-9, tip-ups 11, 12 (pocket 1), 21, 22 (pocket 2
 | # | ESP32 DevKit V1 | Shield 002 | Signal |
 |---|---|---|---|
 | 1 | **3V3** (TPS63020 3.3 V) | **5V** pin | TUSS4470 VDD. **Never 5 V.** |
-| 2 | GND | GND | Common ground (pack, TPS63020, MT3608, ESP32, shield) |
+| 2 | GND | GND | Common ground (pack, TPS63020, boost module, ESP32, shield) |
 | 3 | D18 | D13 | SCLK |
 | 4 | D19 | D12 | SDO → MISO |
 | 5 | D23 | D11 | MOSI → SDI |
@@ -188,7 +204,8 @@ ID suggestion: chalet 100, hubs 1-9, tip-ups 11, 12 (pocket 1), 21, 22 (pocket 2
 | 7 | D26 | D8 | IO1 |
 | 8 | D25 | D9 | IO2 (burst) |
 | 9 | VP (GPIO36) | A0 | VOUT echo. Twist with its own GND wire |
-| 10 | - | **J4 middle pin**, no jumper on J4 | MT3608 output + (MT3608 GND to shield GND) |
+| 10 | - | **J4 middle pin**, no jumper on J4 | Boost output + (wire A): XL6009 at 31.5 V, or MT3608 at 21.5 V. Boost GND to shield GND |
+| 11 | - | **C6, the pad nearer the TUSS4470** | 30 V build only: wire B from the XL6009 output through DB107 + 1N4148, and the bleed resistor across C6 (4.4.6) |
 | - | not wired | D2, D3, RESET, AREF, 3.3V, VIN | |
 
 Other WROOM connections:
@@ -199,6 +216,7 @@ Other WROOM connections:
 | GPIO33 | Arming button to GND (no resistor) |
 | GPIO34 | 2:1 divider from the pack |
 | GPIO2 | LED (on the DevKit) |
+| D13 (GPIO13) | 30 V build: converter enable wire to the XL6009's chip pin 2 (4.4.6). Flash with `--gate`. Not yet tried on a WROOM |
 
 #### 4.4.2 Heltec V3 + shield 002 (hub, LoRa tip-up)
 
@@ -215,7 +233,8 @@ Other WROOM connections:
 | 7 | GPIO38 | D8 | IO1 |
 | 8 | GPIO39 | D9 | IO2 (burst) |
 | 9 | GPIO6 | A0 | VOUT echo. Twist with its own GND wire |
-| 10 | - | **J4 middle pin**, no jumper on J4 | MT3608 output + at 21.5 V, MT3608 input from the pack |
+| 10 | - | **J4 middle pin**, no jumper on J4 | Boost output + (wire A): XL6009 at 31.5 V, or MT3608 at 21.5 V. Boost input from the pack |
+| 11 | - | **C6, the pad nearer the TUSS4470** | 30 V build only: wire B from the XL6009 output through DB107 + 1N4148, and the bleed resistor across C6 (4.4.6) |
 | - | not wired | D2, D3, RESET, AREF, 3.3V, VIN | |
 
 Other Heltec connections:
@@ -227,6 +246,7 @@ Other Heltec connections:
 | GPIO5 | Arming button to GND |
 | GPIO2 | 2:1 divider from the pack (not the onboard VBAT pin) |
 | GPIO7 | Buzzer (optional on a hub) |
+| GPIO40 | 30 V build: converter enable wire to the XL6009's chip pin 2 (4.4.6). Flash with `--gate` |
 
 Turn the pack off when USB is plugged in.
 
@@ -234,9 +254,9 @@ Turn the pack off when USB is plugged in.
 
 - Frequency jumpers: **JP3 + JP4 only** (200 kHz). JP1, JP2, JP5, JP6 open.
 - Transducer: cable shield → **top** pin, signal → bottom pin.
-- MT3608 into the **J4 middle pin** only. Not VIN, not the XT30.
-- MT3608 at **21.5 V** (max ~22 V).
-- High-drive option: XL6009 instead of the MT3608, see 4.4.6.
+- Boost output into the **J4 middle pin** only. Not VIN, not the XT30.
+- 30 V build: XL6009 at **31.5 V**, wire B, bleed resistor and enable wire, see 4.4.6.
+- 20 V build: MT3608 at **21.5 V** (max ~22 V), nothing else.
 - Optional: remove R3 (power LED).
 
 #### 4.4.4 Chalet box (offshore module)
@@ -276,10 +296,15 @@ A reed switch can replace the Hall latch to detect FISH ON. The code is still ac
 Default polarity: trips when the pin goes HIGH (contact opens). With a reed, the trip follows the switch level, not
 spool turns.
 
-#### 4.4.6 High-drive option (external VDRV, knob `vmode 2`)
+#### 4.4.6 30 V drive and converter enable wire (external VDRV, knob `vmode 2`)
 
-More voltage on the transducer: the TUSS4470's own drive regulator stops at 20 V (40 V p-p). Feeding its VDRV pin
-from outside at ~30 V gives ~60 V p-p, **+3 to +4.6 dB (est.)**. No new board; the firmware already has the mode.
+Two changes that go together. They are the build the wiring pictures of 4.4.1 and 4.4.2 show.
+
+- **30 V drive.** The TUSS4470's own drive regulator stops at 20 V (40 V p-p). Feeding its VDRV pin from outside at
+  ~30 V gives ~60 V p-p on the transducer, **+3 to +4.6 dB (est.)**. No new board; `vmode 2` is the default.
+- **Converter enable wire.** The XL6009 switches at 400 kHz and the receiver hears it at −75 dB. One wire from an ESP32
+  pin to the converter's enable pin lets the firmware switch it off while each ping listens: receiver floor **−86 dB**
+  in water, with no loss of transmit strength (measured on hub 1, 14 Nov 2026, D179).
 
 ![High-drive wiring](images/wiring_high_drive.png)
 
@@ -291,6 +316,7 @@ from outside at ~30 V gives ~60 V p-p, **+3 to +4.6 dB (est.)**. No new board; t
 | 4 | DB107 **+** leg → **1N4148** (stripe toward C6) | Shield **C6, the pad closer to the TUSS4470** (wire B) | VDRV ≈ 29.6 V. The other C6 pad is GND (beeps to ground) |
 | 5 | XL6009 OUT − | Shield GND | Common ground |
 | 6 | Shield **C6, the pad closer to the TUSS4470** | The **other C6 pad** (GND), through a **47-100 kΩ resistor** soldered across C6, pad to pad (bleed) | Drains C6 when the power goes off, see below. Draws 0.3-0.65 mA at 30 V (about 3-7 mA from the pack, est.) |
+| 7 | XL6009 **chip pin 2** (EN), cut free of its pad | Heltec **GPIO40** / WROOM **D13** (enable wire, 30 AWG, no resistor) | See "Converter enable wire" below. Flash with `--gate` |
 
 Rule: **VPWR > VDRV + 0.3 V at all times, power-up included** (datasheet 6.3 note / 7.3.1: otherwise reverse current
 flows from VDRV into VPWR). VPWR draws only 150-340 µA, so the shield's 1N4001 drops just ~0.45-0.5 V; VDRV idles at
@@ -303,12 +329,32 @@ at every switch-off: the reverse-current case of the rule above. With 47-100 kΩ
 boost output falls. The bleed also keeps 0.3-0.65 mA flowing in the DB107 + 1N4148 while idle, so their drop is a real
 ~1.5 V (est.) instead of a microamp-level one: the gap no longer depends on leakage. It has no effect on a ping.
 
-The picture shows the shield photo with the J4 pin, and a zoom drawn from the board file (`referance/shield002_tmp/TUSS4470_shield.kicad_pcb`)
-with the exact pads: C6 lower pad = VDRV, C6 upper pad = GND, R1 lower pad = VPWR (an easier meter point than C7).
+Pads on the shield (from the board file `referance/shield002_tmp/TUSS4470_shield.kicad_pcb`): C6 lower pad = VDRV,
+C6 upper pad = GND, R1 lower pad = VPWR (an easier meter point than C7).
 
-Battery (est., to measure with a meter in series with the XL6009 input): the XL6009 itself draws 2.5-5 mA (datasheet) plus its
-own feedback divider; expect 10-15 mA from the pack with a light divider, 40 mA or more if the module's divider is a few
-hundred ohms, against ~2-3 mA for the MT3608 today. Datasheet minimum input 3.6 V: the end of the pack.
+**Converter enable wire** (D170 to D179). The usual XL6009 module (XL6009E1, 47 µH, 100 µF output, 330 Ω + 10 k trimmer
+feedback) has no enable pad: chip pin 2 (EN) is tied to VIN on the board.
+
+1. Meter check: legs toward you, chip seen from the top, pins are 1 GND, 2 EN, 3 SW, 4 VIN, 5 FB. Pin 2 beeps to pin 4.
+2. Cut pin 2 free of its pad (or unsolder and lift it). It must no longer beep to pin 4.
+3. Solder a thin wire (30 AWG) from the lifted pin to **GPIO40** (Heltec) or **D13** (WROOM). No resistor (a large
+   series resistor may not pull the pin low enough against its internal pull-up).
+4. Flash with `--gate`. EN floating or HIGH = converter on, so the converter still runs while the board boots or is being
+   flashed. LOW = off.
+5. Web page → Settings → Advanced → Wiring check: **Converter enable wire OK, noise floor N dB lower with the converter
+   switched off** (hub 1: 14 dB or more). `NO EFFECT` = the pin is still tied to VIN, or the wire is on another GPIO.
+6. Bench build: the **Converter off 6 s** button holds the converter off: the transmit fades within 1-2 s and comes back
+   (the pack voltage still reaches the driver through the converter's coil and diode, so the strongest echoes stay). The
+   **Noise scan** button records the receiver floor with the converter running and gated, step by step.
+
+What the firmware does with the wire: converter off 0.3 ms before each burst, on again after the last sample of its
+listening window (about 21 ms), so the 100 µF output capacitor has lost nothing when the burst fires; in sleep the
+converter stays off. The rule VDRV below VPWR holds: both follow the same rail. Not yet tried on a WROOM (same driver).
+
+Battery (est., from the module's parts): the feedback divider alone draws 3.8 mA at 30 V and the bleed 0.3-0.65 mA; with
+the chip's 2.5-5 mA that is about 35-40 mA from the pack while the converter runs, against ~2-3 mA for the MT3608. With
+the enable wire the converter is off whenever the board sleeps (about 0.5 mA left through the divider). Datasheet
+minimum input 3.6 V: the end of the pack.
 
 Bring-up:
 
@@ -318,14 +364,18 @@ Bring-up:
    1N4148 end of the DB107 chain, unconnected (worst case: no current). Gap = VPWR − that end. **≥ 0.5 V: connect wire B.** Less: add
    a second 1N4148.
    Then wire B on: C6 pad must read below C7.
-3. Chalet: `KNOB vmode 2`. Every flash resets the knobs: set `vmode 2` again after each flash (the Water presets
-   do not touch it).
+3. `vmode 2` is the default since D147 (nothing to set after a flash; the Water presets do not touch it).
+   Then the enable wire, steps 1 to 5 above.
 4. Bench line: no `BURST FAULT`. `ring=` a bit longer: raise `dead` one step if needed. (No `VDRV LOW` in this mode.)
 5. Gain check: measure echo **minus floor** (bottom, a weight) **before wire B goes on** (20 V drive) and after
    (`vmode 2`): expect +3 to +4.6 dB. With wire B connected, `vmode 0` does NOT go back to 20 V.
 
-**Mixed fleet** (knobs are global: the hub broadcasts the same `vmode` to every pod): `vmode 2` on a pod WITHOUT wire B
-leaves its VDRV unpowered (weak pings). With some pods modded and some not, keep **`vmode 0` everywhere**: modded pods
+**Mixed fleet** (knobs are global: the hub broadcasts the same `vmode` to every pod). The enable wire is per board
+(`--gate`): a board flashed without it simply leaves its converter running. `vmode 2` on a pod WITHOUT wire B
+leaves its VDRV unpowered (weak pings). Since D163 such a board notices it by itself (no transmit seen on 8 pings in a
+row), prints `SONAR: no transmit seen in external-VDRV mode` and runs on the chip's regulator until the next boot
+(written from the datasheet behaviour, **not yet tried on a board without wire B**). If an unmodded pod still pings
+weakly, keep **`vmode 0` everywhere**: modded pods
 still drive at ~30 V (the chip's 20 V regulator only charges and stays off above its target; inferred, confirm once:
 same echo, no `BURST FAULT` with `vmode 0` and `vmode 2` on a modded hub). WROOM pods: same shield, same wiring, knobs
 from the hub; `TUNE` runs on the Heltec only.
@@ -342,7 +392,7 @@ The XL6009 must still make ≥ 29 V on a half-used pack; if not, keep the MT3608
 | 2 | Power a hub | Chalet Home shows the pocket within a few seconds |
 | 3 | Power a tip-up | 2 quick blinks at boot. It starts armed |
 | 4 | Turn the spool a quarter turn | FISH ON on the chalet, buzzer, phone |
-| 5 | Web page → Settings → Advanced → Wiring check → Run | Sensor, button, battery, sonar shield, radio OK. A sleeping tip-up answers within 1 min |
+| 5 | Web page → Settings → Advanced → Wiring check → Run | Sensor, button, battery, sonar shield, radio OK. A sleeping tip-up answers within 1 min. 30 V build with `--gate`: "Converter enable wire OK" |
 | 6 | Sonar holes: flash with `--bench`, transducer in a bucket | `BENCH` line every 2 s on serial, bottom found |
 
 ## 5. Setting up on the ice
@@ -468,7 +518,7 @@ On every tab: status line, **Sound on/off**, **Silence alerts**, and a red FISH 
 | Follow the action | On by default. The live view goes to the hole with the most action. FISH ON wins for 2 min. Up to 2 more holes stream at the same time when the radio has room ("LIVE too") |
 | Hole cards on top | Every sonar hole with its water-column preview. Tap one to watch it live; your pick stays 5 min, then Follow takes over again |
 | Flasher | Live, about 1 s behind. Pause to freeze |
-| Last 60 seconds | Waterfall, 4 pings per second. With **Raw echogram** on (Display, default on), the hole you watch also sends its raw ping once a second (10 cm cells, 4 dB steps over the noise floor) and the waterfall shows it underneath the detector's marks, like a fish finder: an echo the detector did not report is still visible. Water (anything under the **Weak echoes** level: 4 / 8 / 12 / 20 dB over the floor; full colour at 40 dB) stays dark, the blind zone is a flat grey band, below the bottom is dimmed (second bottom echo, barrel walls). A still object (a hanging ball, a stump) is reported as a mark for a few seconds only, then becomes part of the still scene; the raw echogram keeps showing it. Off: only what the detector reported |
+| Last 60 seconds | Waterfall, 4 pings per second. With **Raw echogram** on (Display, default on), the hole you watch also sends its raw ping once a second (the HD line: 2.5 cm cells at any depth, 1 dB steps near the noise floor) with a crisp mark for each echo (up to 12, at its exact depth; in a hole deeper than 6 m the marks cover the bottom 6 m), and the waterfall shows it underneath the detector's marks, like a fish finder: an echo the detector did not report is still visible. Water (anything under the **Weak echoes** level: 4 / 8 / 12 / 20 dB over the floor; full colour at 40 dB) stays dark, the blind zone is a flat grey band, below the bottom is dimmed (second bottom echo, barrel walls). A still object (a hanging ball, a stump) is reported as a mark for a few seconds only, then becomes part of the still scene; the raw echogram keeps showing it. Off: only what the detector reported |
 | ft / m | Depth units on this phone |
 | Display | Depth scale, colour gain, weak echoes |
 | Processing | Noise filter, water type (lake / shallow / bucket), Advanced, Defaults, Send to holes again |
@@ -565,7 +615,7 @@ to their hub, which costs no LoRa time: the hub packs its whole pocket into its 
 | beacon | Chalet → everyone. The plan for this frame, the watched hole, commands |
 | echo | A hub repeats the beacon for the hubs the chalet can't reach |
 | join | Free slot for a hub that just switched on |
-| hub turns | One per hub, sized by the bytes it may send (96 B normal, 180 B per streamed hole, up to a full 255 B packet when there is room) and its speed. A hub streaming several holes can get two turns |
+| hub turns | One per hub, sized by the bytes it may send (96 B normal, 180 B per streamed hole, 159 B behind a hop, up to a full 255 B packet when there is room) and its speed. A hub streaming several holes can get two turns |
 | free | Left over. The chalet uses it to give bigger turns, or shortens the frame later |
 
 Speed: every hub starts at SF9 (slow, long range). When its signal has margin, the chalet steps it up to SF8, SF7,
@@ -573,6 +623,18 @@ SF6, SF5. Each step roughly halves the time of its turn. A hub that misses packe
 behind another hub (one hop) costs twice: its turn, then again inside the relay's turn.
 
 ![LoRa airtime, 3 pockets](images/lora_airtime.png)
+
+What the watched hole puts in its turn (5 m of water, estimates from replays, D144):
+
+| Sent every second | Bytes | On the chalet |
+|---|---|---|
+| Detector blocks (bottom, targets, still scene), sent twice | about 71 | targets, bait line, hole card |
+| Echo marks | about 23 | each echo at its exact depth, up to 12 |
+| HD line | about 38 | the raw ping in 2.5 cm cells under the marks |
+
+A whole pocket with one watched hole needs about 175 B/s; summaries only, about 53 B/s. When a turn is short the HD
+line is left out first, then the marks. Airtime depends on the speed and on the fixed parts of the frame, not on the
+echogram format.
 
 Follow the action streams up to 3 holes at once when the room is there (the extra ones show "LIVE too" on the Sonar
 tab); they are the first thing dropped when the frame gets tight. If the turns still don't fit, the frame stretches.
@@ -594,8 +656,10 @@ Nothing is lost, updates are slower.
 | No distances in the range test | GPS fix, map origin set, hub pinned (step 3) |
 | FISH ON bar missing a hole | Offline holes are not shown in the bar; the chalet still rings |
 | Hub stuck at SF7 | It still runs firmware older than D80. Re-flash it |
-| Wiring check fails on the sonar | Shield 5V pin on 3.3 V? MT3608 at 21.5 V into J4? JP3 + JP4 on? |
-| High-drive: no gain or BURST FAULT | `vmode 2` set (lost after a flash)? C6 pad lower than J4 middle? DB107 − / + the right way? XL6009 still ≥ 29 V? |
+| Wiring check fails on the sonar | Shield 5V pin on 3.3 V? Boost output into J4 (XL6009 31.5 V or MT3608 21.5 V)? JP3 + JP4 on? |
+| 30 V build: no gain or BURST FAULT | `vmode 2` (the default)? C6 pad lower than J4 middle? DB107 − / + the right way? XL6009 still ≥ 29 V? |
+| Wiring check: Converter enable wire NO EFFECT | Chip pin 2 still tied to VIN (beeps to pin 4)? Wire on GPIO40 (Heltec) / D13 (WROOM)? Flashed with `--gate`? |
+| No "Converter enable wire" line in the wiring check | The board was flashed without `--gate` |
 | Forgot the PIN | Serial `PIN CLEAR` |
 | Everything acts weird | Hold PRG 10 s on the chalet (network reset) |
 
@@ -615,6 +679,7 @@ Nothing is lost, updates are slower.
 | `CHANNEL AUTO\|1-8\|SCAN` | LoRa channel |
 | `RELAY <id> ON\|OFF` | ESP-NOW relay on a hub or tip-up. `RELAY ON\|OFF` on any board = that board |
 | `TEST OFF\|ROTATE\|SF9\|SF8\|SF7` | Radio test mode |
+| `OTA` | Restart into the firmware update mode (hub: hotspot + upload page, 10 min) |
 | `ADAPT ON\|OFF` | Adaptive speed |
 | `NETRESET` | Network reset (same as PRG 10 s) |
 | `BUZZ` / `BUZZ ACTIVE\|PASSIVE` | Test the buzzer / set its type |
@@ -624,6 +689,8 @@ Nothing is lost, updates are slower.
 | `SIM ALL ON\|OFF` / `SIM <hole> SONAR\|HALL\|BOTH\|OFF` | Fake sonar and fake fish |
 | `HOLE` / `HOLE ARM\|DISARM\|CLEAR\|TEST` | Hub or LoRa tip-up: own hole state, arm, disarm, clear, wiring check |
 | `HOTSPOT ON\|OFF` | Hub: hotspot |
+| `SWEEP` / `SWEEP RX` / `SWEEP NOISE` / `SWEEP STOP` | Hub bench build: automated runs while recording (settings, receiver, noise scan with the converter running and gated) |
+| `BOOST OFF [s]` / `BOOST ON` | Hub bench build with the enable wire: hold the converter off for a few seconds (default 6) |
 | `MAP` / `MAP CLEAR` | Depth pack size / remove it (saved tiles stay) |
 
 ## 11. Repository layout
@@ -636,7 +703,8 @@ include/            messages shared by both
 lib/IceMesh/        mesh, sonar codec and processing, alarm rules
 lib/SonarTuss/      TUSS4470 driver
 web/suite.html      web page (built into the firmware by tools/gen_web.py)
-tools/              flash.html, flash.py, gen_web.py, lake_prep.py, web_preview.py, sonar_chain.cpp (replay a bench recording on the page)
+tools/              flash.html, flash.py, gen_web.py, lake_prep.py, web_preview.py, sonar_chain.cpp (replay a bench recording on the page),
+                    wiring_diagrams.py (draws the wiring pictures of 4.4)
 images/             pictures for this README
 ```
 

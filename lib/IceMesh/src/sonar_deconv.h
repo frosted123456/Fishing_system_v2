@@ -3,7 +3,7 @@
 //   1. baseline (D126e) = floor + ring-down tail, power F + A exp(-d / tau), fitted through the lowest points (points
 //      above the curve weigh 2 %): one continuous line that never rises (Frank's sketch), never under the noise floor
 //   2. excess over the baseline in linear amplitude (no margin: small bumps stay)
-//   3. Richardson-Lucy, 100 iterations, with the hump of one target measured on the ball (07nov 14:28, 32 cycles)
+//   3. Richardson-Lucy, 100 iterations, with the hump of one target measured on the ball (D156: 14nov 11:15, 8 cycles, after the burst-count fix; was 07nov, 32 cycles)
 //   4. re-blur ~5 cm, split into lobes; neighbours stay ONE echo unless the deconvolved dip is >= 6 dB and the raw ping
 //      itself dips >= 3 dB between them (no false fish out of a plateau); from 6 cm above the bottom on: one echo. Each
 //      echo comes down to the baseline valley to valley, height-matched to the raw excess (narrower, same height);
@@ -13,7 +13,8 @@
 //   like Poisson-weighted spectral unmixing). 2 is kept when the residual drops > 2x and the weaker hump is > 15 % of
 //   the stronger; the lobe is then drawn as two narrow peaks at the fitted depths and heights. Synthetic test: two
 //   echoes 5 cm apart split 88-100 %, one echo never split (docs/SONAR_DECONV.md, test 2).
-// Window: blind zone .. bottom + 0.35 m (floor echo + one more hump), at most MAXW bins; outside: unchanged.
+// Window: blind zone .. bottom + 0.35 m (floor echo + one more hump), at most MAXW bins (D144: the bottom-most MAXW bins
+// of a deeper hole); outside: unchanged.
 // Memory (D126f): NO heap. The caller lends 3 arrays of >= 2 x MAXW floats and one of >= N (the hub lends 4 scratch
 // arrays of the sonar processor that are free between two pings: SonarProc::lendScratch). History: D126 kept a heap
 // block for good (recording dead, < 16 kB free); D126b borrowed it per line, but the bench log showed the heap
@@ -30,7 +31,14 @@ namespace icemesh { namespace deconv {
 static const int MAXW = 240;      // window bins (6.0 m at 2.5 cm; the 5 cm echo line reaches bottom + 0.35 m < 5 m)
 static const int MAXN = 512;      // >= sonar BINS (488)
 static const int HL = 9, HC = 3;  // hump length and reference (peak) index, 2.5 cm bins
-inline const float* hump() { static const float H[HL] = {0.f, 0.58f, 0.86f, 1.0f, 0.88f, 0.56f, 0.28f, 0.10f, 0.04f}; return H; }
+// D160: one hump per burst length, chosen by the caller before sharpen(): 0 = 8 cycles ('Sharp'), 1 = 16 cycles ('Deep'; from 5 + 6 pings
+// of the 14nov sweeps, to refine). Bursts of 12 cycles and more use the 16-cycle hump.
+inline int& humpSel() { static int s = 0; return s; }
+inline void humpForCycles(int cycles) { humpSel() = cycles >= 12 ? 1 : 0; }
+inline const float* hump() {
+  static const float H[2][HL] = {{0.f, 0.40f, 0.95f, 1.0f, 0.60f, 0.22f, 0.03f, 0.f, 0.f}, {0.f, 0.10f, 0.63f, 1.0f, 0.88f, 0.44f, 0.11f, 0.02f, 0.f}};
+  return H[humpSel()];
+}
 
 struct Work { float *B, *e, *x, *t, *s, *w, *out; };   // views into lent memory
 // a0..a2: >= 2 * MAXW floats each, a3: >= N floats (the output line)
@@ -123,12 +131,16 @@ inline int fitDoublet(const float* e, const float* wt, int i0, int i1, float* po
 // db[0..N) -> out[0..N) (dB). Returns false (out untouched) when no work memory or the window is too short.
 inline bool sharpen(const float* db, int N, float bin, float nf, float bottom, float dead, int mode, float* out, Work& W, Marks* mk = nullptr) {
   if (N > MAXN || bin <= 0.f) return false;
-  const int a = std::max(1, static_cast<int>(std::lround(dead / bin)));
+  const int a_top = std::max(1, static_cast<int>(std::lround(dead / bin)));
   const float endm = (bottom > 0.f ? bottom : static_cast<float>(N) * bin) + 0.35f;
-  int b = static_cast<int>(std::lround(endm / bin)); if (b > N) b = N; if (b - a > MAXW) b = a + MAXW;
+  int b = static_cast<int>(std::lround(endm / bin)); if (b > N) b = N;
+  // D144: a hole deeper than the window keeps its BOTTOM 6 m (the jig and the fish are there), not the top; with no
+  // bottom lock the window stays at the top. 12 Nov replay at 7 / 9 / 11 m: jig 100 %, fish 88-97 % marked (was 0-18 %).
+  const int a = (bottom > 0.f && b - a_top > MAXW) ? b - MAXW : a_top;
+  if (b - a > MAXW) b = a + MAXW;
   const int n = b - a; if (n < 8) return false;
   for (int i = 0; i < N; i++) out[i] = db[i];
-  const int k0 = std::min(n, static_cast<int>(std::lround(0.15f / bin)));
+  const int k0 = a > a_top ? 0 : std::min(n, static_cast<int>(std::lround(0.15f / bin)));   // D144: no ring zone in a window that starts in open water
   float* B = W.B; float* e = W.e; float* x = W.x; float* t = W.t; float* s = W.s;
   if (mk) { mk->nm = 0; mk->a = a; mk->n = n; }
   floorDecay(db + a, n, bin, nf, B, W, mk);

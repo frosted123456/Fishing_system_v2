@@ -68,13 +68,48 @@
 #define SONAR_PIN_O4    -1      // comparator OUT_4 (MCPWM capture): not in the 12-core mast cable (one echo
                                 // wire = VOUT). Pod board v0.3: GPIO32 (build flag). Heltec V3: none
 #endif
-#ifndef SONAR_PIN_BOOST
-#define SONAR_PIN_BOOST -1      // MT3608 EN. Shield + modules: none (always on). Pod board v0.3: GPIO33 (build
-                                // flag): HIGH while the sonar runs, LOW in sleep() -> no boost quiescent in sleep.
-                                // Never toggled during a ping (VPWR feeds the TUSS4470 regulator, D53 vmode 0).
-                                // Heltec V3: none
+// D181: the 30 V build's converter enable wire, one build flag (tools/flash.py --gate). SONAR_EN_WIRE=1 = a wire goes
+// from this board's enable GPIO to the XL6009's enable pin (chip pin 2, cut free of its pad: the module ties it to VIN).
+// Heltec V3: GPIO40 (free: not LoRa, OLED, CardKB 41/42, nor a sonar pin). WROOM DevKit V1: GPIO13 (free RTC GPIO; 33 is
+// the arming button there). It selects the pin, the gate on every ping (D173) and the XL6009's settle time after a sleep
+// (D178), each only when no build flag gives it explicitly. Proven on the Heltec hub (D179); WROOM: not yet tried.
+#ifndef SONAR_EN_WIRE
+#define SONAR_EN_WIRE 0
 #endif
-#define SONAR_BOOST_SETTLE_MS 20   // MT3608 soft start + C8/C9 charge to 24 V (est., measure on the bench)
+#if SONAR_EN_WIRE
+#ifndef SONAR_PIN_BOOST
+#if defined(WIFI_LoRa_32_V3) || defined(BOARD_HELTEC_V3)
+#define SONAR_PIN_BOOST 40
+#elif defined(BOARD_ESP32C3)
+#error "SONAR_EN_WIRE: no enable GPIO chosen for the ESP32-C3 head (set SONAR_PIN_BOOST yourself)"
+#else
+#define SONAR_PIN_BOOST 13
+#endif
+#endif
+#ifndef SONAR_BOOST_GATE
+#define SONAR_BOOST_GATE 1
+#endif
+#ifndef SONAR_BOOST_SETTLE_MS
+#define SONAR_BOOST_SETTLE_MS 50
+#endif
+#endif
+#ifndef SONAR_PIN_BOOST
+#define SONAR_PIN_BOOST -1      // converter enable pin. Shield + modules without the wire: none (always on). With
+                                // SONAR_EN_WIRE: see above. Pod board v0.3: GPIO33 = MT3608 EN (build flag): HIGH while
+                                // the sonar runs, LOW in sleep() -> no boost quiescent in sleep; not gated during a ping
+                                // there (SONAR_BOOST_GATE stays 0: VPWR feeds the TUSS4470 regulator, D53 vmode 0)
+#endif
+// D170: converter gated off while a ping listens (its switching noise is what the receiver hears at -79 dB, D168).
+// Needs SONAR_PIN_BOOST wired to the converter's enable pin (XL6009: pin 2, LOW = off, floating / HIGH = on). 0 = never
+// gated (default); 1 = gated on every ping (set by SONAR_EN_WIRE). The noise scan gates it for its gated steps whatever
+// this says (tuss::setBoostGate).
+#ifndef SONAR_BOOST_GATE
+#define SONAR_BOOST_GATE 0
+#endif
+#define SONAR_BOOST_GATE_US 300    // from EN low to the first burst (the converter stops within a switching cycle; est.)
+#ifndef SONAR_BOOST_SETTLE_MS
+#define SONAR_BOOST_SETTLE_MS 20   // MT3608 soft start + C8/C9 charge to 24 V (est., measure on the bench). XL6009 module at
+#endif                             // 30 V with 100 uF: 50 (devices.ini; est.: 45 mJ into the capacitor from a ~4 V pack)
 
 // ---- acquisition constants (est.) ----
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -134,6 +169,8 @@ struct ShieldTest {
   uint16_t raw_max;       // largest raw ADC sample of the test ping (4095 = clipped)
   uint8_t noise_code;     // noise floor, 8-bit log code
   uint8_t ring_bins;      // bins above the floor after time zero (transducer loading the driver: tens; open: a few)
+  bool gate_pin;          // D171: a converter enable pin is configured (SONAR_PIN_BOOST >= 0)
+  uint8_t gate_drop_db;   // D171: how far the no-ping noise floor fell with the converter switched off (dB, 0..14)
 };
 void shieldTest(ShieldTest& t);
 bool pinsSwapped();
@@ -166,6 +203,18 @@ void clearNodeTune();
 void effectiveTune(uint8_t knob_ftrim, uint8_t knob_bpf, uint8_t& ftrim, uint8_t& bpf);   // what ping() uses with these knobs (no override)
 // While a tune runs: ping() uses exactly these, whatever the knobs / the stored tune say. on = false ends it.
 void setTuneOverride(bool on, uint8_t ftrim = 0, uint8_t bpf = 0);
+// D167: listen-only captures (no CMD_TRIGGER, no burst): what the receiver hears by itself. Noise scan only; RAM, off at boot.
+void setListenOnly(bool on);
+// D167 experiment: average the samples of a bin and the bursts of a ping in power instead of dB (noise scan steps only; RAM, off at boot)
+void setPowerMean(bool on);
+// D170: gate the boost converter off during each ping from now on (no effect without SONAR_PIN_BOOST). RAM only.
+void setBoostGate(bool on);
+// D177: noise scan A/B steps. WholePing = one gate for the whole ping (D170) instead of one per burst (D173); LeadUs = time
+// from EN low to the first sample (0 = SONAR_BOOST_GATE_US); Hold = converter off until released (also the BOOST OFF button:
+// the per-burst gate would otherwise switch it back on after every burst, and the D163 fallback is suspended meanwhile).
+void setBoostWholePing(bool on);
+void setBoostLeadUs(uint16_t us);
+void setBoostHold(bool on);
 uint32_t lastBurstHz();                                   // burst frequency of the last ping's 200 kHz row (what was really sent)
 // Calibration: 17-point ADC curve (raw 0, 256, ... 4096 -> corrected), kept in NVS "sonarcal".
 void setCalibration(const uint16_t pts[17]);

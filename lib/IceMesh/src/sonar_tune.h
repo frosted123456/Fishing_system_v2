@@ -21,7 +21,7 @@ namespace sonar {
 enum : uint8_t { TUNE_RESULT_VER = 2 };
 enum : uint8_t { TUNE_OK = 0, TUNE_KEPT = 1, TUNE_NO_BOTTOM = 2, TUNE_NO_SONAR = 3, TUNE_CLEARED = 4, TUNE_TIMEOUT = 5 };
 // DEVCMD_SELFTEST / CMD_SELFTEST value: 0 = wiring check (D70), 1 = run the tune, 2 = forget this hole's tune
-enum : uint8_t { TUNE_CMD_RUN = 1, TUNE_CMD_CLEAR = 2 };
+enum : uint8_t { TUNE_CMD_RUN = 1, TUNE_CMD_CLEAR = 2, TUNE_CMD_OTA = 3 };   // D148: 3 rides the same command: "restart into the firmware update mode" (hubs only)
 struct TuneResult {
   uint8_t ver;         // TUNE_RESULT_VER
   uint8_t status;      // TUNE_*

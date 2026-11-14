@@ -140,6 +140,7 @@ class SonarScene {
 
   void jig() { jig_ = t_; }                       // "Jig the bait" button of the prototype
   void advance(sreal s) { t_ += s; }   // skip time without a ping (slower ping rate)
+  sreal tgt_rise = R(0.03), tgt_tail = R(0.07);   // D156: target echo shape (m): Gaussian rise, exponential tail. Defaults = the 32-cycle echo (prototype parity); SonarSource::setPulse narrows it with the burst length
   sreal ring_tau = R(0.045);   // ring-down decay (m); larger = slush / frazil ice on the face (test of the ring monitor)
   void setBait(sreal m) {      // per-hole bait depth (fake lure follows it)
     const sreal lo = R(0.3), hi = cfg_.bottom_m - R(0.2);
@@ -202,14 +203,14 @@ class SonarScene {
     return n;
   }
 
-  static void addEcho(sreal* P, sreal depth, sreal pw) {
+  void addEcho(sreal* P, sreal depth, sreal pw) const {
     using namespace sp;
     const sreal c = depth / BIN_M();
     const int i0 = static_cast<int>(std::floor(c));
     for (int k = -3; k <= 14; k++) {
       const int i = i0 + k; if (i < 0 || i >= N) continue;
       const sreal x = (static_cast<sreal>(i) - c) * BIN_M();
-      P[i] += pw * (x < R(0) ? std::exp(-(x * x) / (R(2) * R(0.03) * R(0.03))) : std::exp(-x / R(0.07)));
+      P[i] += pw * (x < R(0) ? std::exp(-(x * x) / (R(2) * tgt_rise * tgt_rise)) : std::exp(-x / tgt_tail));
     }
   }
   void addBottom(sreal* P, sreal bd, sreal Pb, sreal tail, sreal spk) {

@@ -257,7 +257,11 @@ typedef struct __attribute__((packed)) {
 enum : uint8_t {   // SelfTestResult.sensor
   ST_SENS_LEVEL = 0x01, ST_SENS_FLIPS = 0x02, ST_SENS_HALL = 0x04, ST_SENS_PINGED = 0x08 };   // PINGED: the shield test ping ran (the shield byte is full)
 enum : uint8_t {   // SelfTestResult.button
-  ST_BTN_RELEASED = 0x01, ST_BTN_PRESSED_SINCE_BOOT = 0x02, ST_BTN_NONE = 0x80 };
+  ST_BTN_RELEASED = 0x01, ST_BTN_PRESSED_SINCE_BOOT = 0x02, ST_BTN_NONE = 0x80,
+  // D171: the spare bits of this byte carry the converter enable wire check (the shield byte is full): a pin is
+  // configured (SONAR_PIN_BOOST), the noise floor fell >= 3 dB with the converter switched off, and by how much
+  // (bits 6:4, 2 dB steps, 7 = 14 dB or more). All 0 from firmware before D171.
+  ST_GATE_PIN = 0x04, ST_GATE_OK = 0x08, ST_GATE_DROP_MASK = 0x70 };
 enum : uint8_t {   // SelfTestResult.shield
   ST_SH_SPI_OK = 0x01, ST_SH_PINS_SWAPPED = 0x02, ST_SH_VDRV_READY = 0x04, ST_SH_PULSE_FLT = 0x08,
   ST_SH_DRV_FLT = 0x10, ST_SH_EE_FLT = 0x20, ST_SH_LEAKAGE = 0x40, ST_SH_NOT_BUILT = 0x80 };

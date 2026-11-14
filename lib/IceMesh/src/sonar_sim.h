@@ -4,6 +4,7 @@
 // On a real sonar node only the first stage changes (TUSS4470 instead of SonarScene).
 #ifndef ICEMESH_SONAR_SIM_H
 #define ICEMESH_SONAR_SIM_H
+#include <new>
 #include <stdint.h>
 #include <string.h>
 #include "sonar_codec.h"
@@ -70,6 +71,9 @@ class SonarSource {
   void setPulse(bool focus) {
     const sreal cyc = R(focus ? proc.prm[P_CYCLES_FOCUS] : proc.prm[P_PULSE_CYCLES]);
     proc.pulse_m = cyc / R(200000) * (R(1350) + R(proc.prm[P_SOUND])) / R(2);
+    // D156: the simulated echo follows the burst length: 8 cycles = 10 cm at -6 dB as measured on the ball (14nov), 32 = the old shape
+    const sreal u = cyc <= R(8) ? R(0) : (cyc >= R(32) ? R(1) : (cyc - R(8)) / R(24));
+    scene.tgt_rise = R(0.02) + R(0.01) * u; scene.tgt_tail = R(0.03) + R(0.04) * u;
   }
   // Real sonar (driver): one processed ping from captured codes (nfreq 3 = one burst per frequency,
   // 1 = single frequency; rotate = this ping's frequency index when rotating). Same output as tick().
@@ -136,9 +140,25 @@ class SonarSource {
         static_assert(BINS >= 2 * deconv::MAXW && deconv::MAXN >= BINS, "lent scratch arrays too short for the sharpening");
         // D133: echo marks (knob echo 1): the baseline + one entry per echo instead of 122 cells, a raw line every 10th
         const bool fineMode = proc.prm[P_ECHO_MODE] == 2;   // D142 "show all": raw cells with fine levels near the floor, never sharpened
-        const bool marksMode = proc.prm[P_ECHO_MODE] == 1 && echo_scale_ > 0;
-        const bool marksTurn = marksMode && marks_n_ != MARKS_RAW_EVERY - 1;
-        if (marksMode) marks_n_ = static_cast<uint8_t>((marks_n_ + 1) % MARKS_RAW_EVERY);   // D133b: no 256 wrap
+        // D144: marks at ANY depth (was: only with 5 cm cells, bottom under ~4.2 m: at 5 m the chalet got the 10 cm line),
+        // every line; the texture under them is the HD line below (was: a raw 10 cm / 5 cm line every 10th)
+        const bool marksMode = proc.prm[P_ECHO_MODE] == 1;
+        const bool marksTurn = marksMode;
+        // D144 HD line (sonar_codec.h): 2.5 cm cells, 16 fine levels, surface to bottom + 0.6 m. Knob echo 1: the texture
+        // under the marks (cells under 3 dB over the floor left empty); echo 2 "show all": from the floor up, instead of
+        // the 122-cell fine line. 5 cm cells when a very noisy line does not fit a block; echo 0 (legacy) sends none.
+        hd_len_ = 0;
+        if (marksMode || fineMode) {
+          // no new memory: the 488 levels live in a lent processor scratch array (free until the marks' sharpening
+          // below takes it; the encoded block is already in hdBlk() by then), the block in one shared buffer
+          static_assert(sizeof(HdLine) <= BINS * sizeof(float), "HdLine does not fit a lent scratch array");
+          HdLine& hd = *new (static_cast<void*>(SonarProc::lendScratch(0))) HdLine;
+          for (uint8_t fold = 1; fold <= 2 && hd_len_ == 0; fold++) {
+            hdFromBins(hd, node_, last_.index, src, static_cast<float>(out_.nf), out_.bottom > 0.f ? static_cast<float>(out_.bottom) : 0.f, fold, fineMode ? 0.f : hdCutDb());
+            hd_len_ = static_cast<uint8_t>(encodeHd(hd, hdBlk(), MAX_BLOCK));
+          }
+        }
+        deconv::humpForCycles(proc.prm[focus ? P_CYCLES_FOCUS : P_PULSE_CYCLES]);   // D160: sharpening hump of this burst length
         EchoLine e; bool built = false;
         if (marksTurn) {
           static deconv::Marks mk;
@@ -153,7 +173,10 @@ class SonarSource {
                               proc.prm[P_DEADZONE_DM] * 0.1f, proc.prm[P_SHARP], w.out, w)) { src = w.out; sharp = true; }
         }
         if (!built) { echoFromBins(e, node_, last_.index, src, static_cast<float>(out_.nf), echo_scale_, fineMode); e.sharp = sharp ? 1 : 0; }
-        const size_t len = encodeEcho(e, out[n_out].data, MAX_BLOCK);
+        // D144: with an HD line built, "show all" sends only that; marks mode sends the marks, or (no marks: window too
+        // short) only the HD line. The legacy cells go out when no HD line could be built, and always with echo 0.
+        const bool sendEcho = hd_len_ == 0 || (marksMode && built);
+        const size_t len = sendEcho ? encodeEcho(e, out[n_out].data, MAX_BLOCK) : 0;
         if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; echo_bytes += static_cast<uint32_t>(len); }
         since_echo_ = 0; holdReset();
       }
@@ -173,6 +196,9 @@ class SonarSource {
       if (len > 0) { out[n_out].len = static_cast<uint8_t>(len); n_out++; blocks_out++; base_quiet += quiet ? 1 : 0; }
       since_base_ = 0; last_base_status_ = status_; last_base_bottom_ = last_.bottom_cm;
     }
+    // D144: the HD line goes last (a caller with room for 4 blocks loses it, never the summary or the marks)
+    if (hd_len_ > 0 && n_out < max_out) { memcpy(out[n_out].data, hdBlk(), hd_len_); out[n_out].len = hd_len_; n_out++; blocks_out++; echo_bytes += hd_len_; hd_bytes += hd_len_; }
+    hd_len_ = 0;
     last_fish_ = fish;
     last_status_ = status_;
     return n_out;
@@ -346,12 +372,15 @@ class SonarSource {
   uint8_t n_pend_ = 0;
   uint16_t since_base_ = 0, since_bg_ = 0, since_echo_ = 0;
   uint8_t echo_scale_ = 0;   // D112
-  uint8_t marks_n_ = 0;      // D133: lines since the last raw one in echo-marks mode
-  enum { MARKS_RAW_EVERY = 10, MARKS_PER_LINE = 8, HOLD_BINS = 244, HOLD_MAX = 16 };
+  uint8_t marks_n_ = 0;      // D133: lines since the last raw one in echo-marks mode (D144: unused, the HD line is the texture)
+  uint8_t hd_len_ = 0;       // D144: length of the HD line of this ping (in hdBlk()), appended after the summary
+  static uint8_t* hdBlk() { static uint8_t b[MAX_BLOCK]; return b; }   // shared: one source runs at a time (like the hold)
+  enum { MARKS_PER_LINE = 12, HOLD_BINS = BINS, HOLD_MAX = 16 };   // D144: 12 marks (was 8; the block format carries 18), the hold over the whole range (was 244 bins = 6.1 m)
+  static float hdCutDb() { return 3.f; }   // D144: texture under the marks: cells under this level over the floor are left empty
   // D133 hold (Frank: average the background, keep the signal): the pings between two lines (4 on LoRa, 1 on ESP-NOW)
   // are combined per bin: the larger of the mean level (dB, the background) and the strongest ping - 3 dB (D133b; an echo
-  // seen on 1 ping of 4 loses 3 dB instead of being divided by 4; noise: max of 4 is ~3-4 dB over the mean, so ~+0-1 dB). 0.5 dB codes, 244 bins (the 2.5 / 5 cm
-  // lines; 10 cm lines: the last ping past bin 244). Shared static (one focus source at a time; 732 B).
+  // seen on 1 ping of 4 loses 3 dB instead of being divided by 4; noise: max of 4 is ~3-4 dB over the mean, so ~+0-1 dB). 0.5 dB codes, all 488 bins
+  // (D144; was 244: past 6.1 m the line was the last ping alone). Shared static (one focus source at a time; 1.5 kB).
   struct Hold { uint16_t sum[HOLD_BINS]; uint8_t mx[HOLD_BINS]; uint8_t n; uint8_t owner; };
   static Hold& hold() { static Hold h; return h; }
   static uint8_t dbCode(float db) { const float c = (db + 128.f) * 2.f; return static_cast<uint8_t>(c < 0.f ? 0.f : (c > 255.f ? 255.f : c + 0.5f)); }
@@ -398,7 +427,8 @@ class SonarSource {
     }
   }
  public:
-  uint32_t echo_bytes = 0;   // D133: bytes of echogram lines sent (airtime check)
+  uint32_t echo_bytes = 0;   // D133: bytes of echogram lines sent (airtime check; D144: HD lines included)
+  uint32_t hd_bytes = 0;     // D144: of which HD lines
  private:
   uint8_t last_base_status_ = 0xFF; uint16_t last_base_bottom_ = 0xFFFF;   // D79: what the last summary said
   uint8_t bg_seg_ = 0, bg_ver_ = 0;

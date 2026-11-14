@@ -19,6 +19,7 @@
 #endif
 #include <arm_button.h>   // v2 (D61): arming button + armed / disarmed state (lib/IceMesh, host-tested)
 #include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
+#include "ota_update.h"   // D148
 #include <esp_system.h>   // D65: esp_reset_reason()
 #include <bottom_memory.h>   // D116
 #include <sonar_tune.h>      // D141: per-hole transducer tune (lib/IceMesh, host-tested)
@@ -195,6 +196,7 @@ void setup() {
                   r == ESP_RST_BROWNOUT ? "  <- supply sagged: battery flat / weak, or a load spike" : "");
   }
   Serial.println();
+  otaBootCheck();   // D148: a new firmware on trial is counted here; the update mode (when asked) starts here and never returns
 
   // BUG FIX #8: Enable hardware watchdog timer (30 second timeout)
   esp_task_wdt_init(30, true);  // 30 second timeout, panic on timeout
@@ -358,6 +360,7 @@ void loop() {
   PerfScope perfLoop(PF_LOOP);
   // BUG FIX #8: Feed hardware watchdog to prevent reset
   esp_task_wdt_reset();
+  otaLoop();   // D148: a new firmware is confirmed after 90 s of running
   if (g_crashRun && millis() > 120000UL) g_crashRun = 0;   // D126c: 2 min without a crash: not a crash loop
 
   // BUG FIX #14: Refresh self-node status every 5 seconds
@@ -2689,7 +2692,8 @@ void meshLoop() {
         armApply(dev, val != 0);    // D61: own hole here, tip-ups after their next message
       } else if (cmd == MESH_CMD_SELFTEST) {   // D70
         if (val != 0) {   // D141: 1 = tune this hole's transducer, 2 = forget its tune
-          if (dev == NODE_ID) nodeTuneCmd(val);
+          if (val == icemesh::sonar::TUNE_CMD_OTA) { if (dev == NODE_ID) otaRequest(); }   // D148: the chalet asks this hub to restart into the update mode (never passed on to a tip-up)
+          else if (dev == NODE_ID) nodeTuneCmd(val);
           else if (!isMyVirtualHole(dev)) devCmdQueue(dev, DEVCMD_SELFTEST, val);
         }
         else if (dev == NODE_ID) { SelfTestResult r; holeSelfTest(r, true); meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r); }
@@ -3054,7 +3058,8 @@ static String sonarWebCommand(const String& c);
 // D87b SWEEP: an automated preset run for the drum / dock. Each step sets one knob, takes SWEEP_PINGS pings into the
 // recording (SONAR + PINGX each, one RAW after the 3rd), with a NOTE per step; the knobs are put back at the end.
 // Serial "SWEEP" or the page's Sweep button; "SWEEP STOP" ends it early. Recording must be on (serial or phone).
-struct SweepStep { const char* label; int8_t knob; uint8_t val; uint8_t reg; uint8_t rval; };   // D123: reg != 0 = also write that TUSS4470 register (restored after the step)
+struct SweepStep { const char* label; int8_t knob; uint8_t val; uint8_t reg; uint8_t rval; uint8_t listen; };   // D167: listen = 1: no ping in this step (tuss::setListenOnly), 2 = ping with power averaging (tuss::setPowerMean), 3 = listen with the converter gated off, 4 = ping with it gated off (D170; no effect without SONAR_PIN_BOOST)
+//   // D123: reg != 0 = also write that TUSS4470 register (restored after the step)
 static const SweepStep SWEEP[] = {
   {"base (knobs as set)", -1, 0},
   {"gain 0 (10 V/V)", icemesh::sonar::P_GAIN, 0}, {"gain 1 (12.5 V/V)", icemesh::sonar::P_GAIN, 1},
@@ -3085,6 +3090,54 @@ static const SweepStep SWEEP_RX[] = {
   {"rx base again (drift check)", -1, 0, 0, 0},
 };
 static const uint8_t SWEEP_RX_N = sizeof(SWEEP_RX) / sizeof(SWEEP_RX[0]);
+// D167 "SWEEP NOISE": what the receiver hears with NO ping (listen-only captures), to find where the steady ~-80 dB
+// level of the 30 V build comes from. Band-pass centre stepped across the table (code 0x00 = 40.6 kHz .. 0x2F = 500 kHz,
+// 0x1D = 196.8 kHz): a peak = a tone at that frequency, flat = broadband. Q, gain, and the output stage grounded (knob
+// drive 1 = PRE_DRIVER_MODE: OUTA and OUTB at GND while idle, datasheet table 8-3; nothing is sent in a listen step):
+// if the level falls with the transducer node grounded it comes in through the transducer / output pins, if not it
+// comes in elsewhere (supply, ground). Works in air or water. One ping step at each end for reference.
+static const SweepStep SWEEP_NOISE[] = {
+  {"ping, knobs as set (reference)", -1, 0, 0, 0, 0},
+  {"listen, knobs as set", -1, 0, 0, 0, 1},
+  {"listen, bpf 18", icemesh::sonar::P_BPF, 18, 0, 0, 1},
+  {"listen, bpf 20", icemesh::sonar::P_BPF, 20, 0, 0, 1},
+  {"listen, bpf 22", icemesh::sonar::P_BPF, 22, 0, 0, 1},
+  {"listen, bpf 24", icemesh::sonar::P_BPF, 24, 0, 0, 1},
+  {"listen, bpf 25", icemesh::sonar::P_BPF, 25, 0, 0, 1},
+  {"listen, bpf 26", icemesh::sonar::P_BPF, 26, 0, 0, 1},
+  {"listen, bpf 27", icemesh::sonar::P_BPF, 27, 0, 0, 1},
+  {"listen, bpf 28", icemesh::sonar::P_BPF, 28, 0, 0, 1},
+  {"listen, bpf 29", icemesh::sonar::P_BPF, 29, 0, 0, 1},
+  {"listen, bpf 30", icemesh::sonar::P_BPF, 30, 0, 0, 1},
+  {"listen, bpf 31", icemesh::sonar::P_BPF, 31, 0, 0, 1},
+  {"listen, bpf 32", icemesh::sonar::P_BPF, 32, 0, 0, 1},
+  {"listen, bpf 33", icemesh::sonar::P_BPF, 33, 0, 0, 1},
+  {"listen, bpf 34", icemesh::sonar::P_BPF, 34, 0, 0, 1},
+  {"listen, bpf 36", icemesh::sonar::P_BPF, 36, 0, 0, 1},
+  {"listen, bpf 38", icemesh::sonar::P_BPF, 38, 0, 0, 1},
+  {"listen, bpf 40", icemesh::sonar::P_BPF, 40, 0, 0, 1},
+  {"listen, bpf 44", icemesh::sonar::P_BPF, 44, 0, 0, 1},
+  {"listen, Q 5", -1, 0, 0x11, 0x10, 1},
+  {"listen, Q 2", -1, 0, 0x11, 0x20, 1},
+  {"listen, gain 3", icemesh::sonar::P_GAIN, 3, 0, 0, 1},
+  {"listen, gain 0", icemesh::sonar::P_GAIN, 0, 0, 0, 1},
+  {"listen, outputs grounded (drive 1)", icemesh::sonar::P_DRIVE, 1, 0, 0, 1},
+  {"listen, converter gated off (needs the EN wire)", -1, 0, 0, 0, 3},
+  {"listen again (drift check)", -1, 0, 0, 0, 1},
+  {"ping again (dB mean, as shipped)", -1, 0, 0, 0, 0},
+  {"ping, power mean (weak echo test)", -1, 0, 0, 0, 2},
+  {"ping, dB mean again", -1, 0, 0, 0, 0},
+  {"ping, converter gated off (needs the EN wire)", -1, 0, 0, 0, 4},
+  // D177: is what is left after gating tied to how the converter is gated? Same scan, same minute, four ways
+  {"listen, gate per burst (as shipped)", -1, 0, 0, 0, 3},
+  {"listen, converter left running (no gate)", -1, 0, 0, 0, 8},   // D178: the before / after in every scan, gate-on builds included
+  {"listen, gate held for the whole ping (D170 scheme)", -1, 0, 0, 0, 5},
+  {"listen, gate per burst, 3 ms before listening", -1, 0, 0, 0, 6},
+  {"listen, converter held off for the whole step", -1, 0, 0, 0, 7},
+  {"listen, gate per burst again", -1, 0, 0, 0, 3},
+  {"ping, as shipped (recovery check)", -1, 0, 0, 0, 0},
+};
+static const uint8_t SWEEP_NOISE_N = sizeof(SWEEP_NOISE) / sizeof(SWEEP_NOISE[0]);
 static const SweepStep* g_sw = SWEEP; static uint8_t g_swN = SWEEP_N, g_swPings = SWEEP_PINGS;
 static uint8_t g_sweepReg11 = 0; static bool g_sweepRegTouched = false;
 static int8_t g_sweepStep = -1; static uint8_t g_sweepPings = 0; static uint8_t g_sweepSaved[icemesh::sonar::P_COUNT];
@@ -3167,12 +3220,12 @@ static void sonarInfoLines() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[640];   // D96: longer INFO line
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d vbat_mv=%u heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u heap=%lu heap_min=%lu reset=%s boot=%lu psram=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, localBatteryMv, (unsigned long)ESP.getFreeHeap(),
-                   (unsigned long)ESP.getMinFreeHeap(), resetReasonName(esp_reset_reason()), (unsigned long)g_bootCount);   // D96: brown-outs and heap floor on record
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), localBatteryMv, (unsigned long)ESP.getFreeHeap(),
+                   (unsigned long)ESP.getMinFreeHeap(), resetReasonName(esp_reset_reason()), (unsigned long)g_bootCount, (unsigned long)ESP.getPsramSize());   // D152: psram = bytes of external RAM the core found (0 = none)   // D96: brown-outs and heap floor on record
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf, !sonarRecAny());
   k = snprintf(buf, sizeof(buf), "KNOBS %lu", millis());
@@ -3241,11 +3294,23 @@ static void sweepApply(int8_t step) {   // one step's knob (restoring the previo
   // on 2026-11-04) as the saved default. The sweep's own steps never touch the saved set now.
   for (uint8_t i = 0; i < icemesh::sonar::P_COUNT; i++) if (sonarPrm[i] != g_sweepSaved[i]) sonarPrm.set(i, g_sweepSaved[i]);
   if (g_sweepRegTouched) { tuss::writeReg(0x11, g_sweepReg11); g_sweepRegTouched = false; }   // D123: register back first
-  if (step >= 0 && step < (int8_t)g_swN && g_sw[step].knob >= 0) {
+  // D150: a board on the external drive supply (vmode 2) never has its regulator switched on by a sweep step (the
+  // "vmode 1" step of SWEEP RX would put the chip's 20 V regulator against the 30 V rail; "vdrv" does nothing there)
+  const bool extDrive = g_sweepSaved[icemesh::sonar::P_VMODE] == 2;
+  if (step >= 0 && step < (int8_t)g_swN && g_sw[step].knob >= 0 && !(extDrive && (g_sw[step].knob == icemesh::sonar::P_VMODE || g_sw[step].knob == icemesh::sonar::P_VDRV))) {
     sonarPrm.set((uint8_t)g_sw[step].knob, g_sw[step].val);
     if (g_sw[step].knob == icemesh::sonar::P_PULSE_CYCLES) sonarPrm.set(icemesh::sonar::P_CYCLES_FOCUS, g_sw[step].val);   // D106: focus mode too
   }
   if (step >= 0 && step < (int8_t)g_swN && g_sw[step].reg) { tuss::writeReg(g_sw[step].reg, g_sw[step].rval); g_sweepRegTouched = true; }
+  tuss::setListenOnly(step >= 0 && step < (int8_t)g_swN && (g_sw[step].listen == 1 || g_sw[step].listen == 3 || g_sw[step].listen >= 5));   // D167: off again at the end of the sweep (step -1)
+  tuss::setPowerMean(step >= 0 && step < (int8_t)g_swN && g_sw[step].listen == 2);
+  {
+    const uint8_t lm = (step >= 0 && step < (int8_t)g_swN) ? g_sw[step].listen : 0;
+    tuss::setBoostGate((SONAR_BOOST_GATE != 0 || lm >= 3) && lm != 8);   // D170; D178: 8 = this step with the converter running
+  }
+  tuss::setBoostWholePing(step >= 0 && step < (int8_t)g_swN && g_sw[step].listen == 5);   // D177
+  tuss::setBoostLeadUs(step >= 0 && step < (int8_t)g_swN && g_sw[step].listen == 6 ? 3000 : 0);
+  tuss::setBoostHold(step >= 0 && step < (int8_t)g_swN && g_sw[step].listen == 7);
   sonarPrmGen++;
   if (sonarReal) sonarReal->proc.prm = sonarPrm;
   g_sweepStep = step; g_sweepPings = 0;
@@ -3261,11 +3326,12 @@ static String sweepCommand(const String& rest) {
   if (!sonarRecAny()) return "SWEEP: start a recording first (REC ON or the page's Start recording), then SWEEP";
   if (g_sweepStep >= 0) return "SWEEP already running (SWEEP STOP to end it)";
   const bool rx = (a == "RX");   // D123
-  g_sw = rx ? SWEEP_RX : SWEEP; g_swN = rx ? SWEEP_RX_N : SWEEP_N; g_swPings = rx ? 10 : SWEEP_PINGS;
+  const bool nz = (a == "NOISE");   // D167
+  g_sw = nz ? SWEEP_NOISE : (rx ? SWEEP_RX : SWEEP); g_swN = nz ? SWEEP_NOISE_N : (rx ? SWEEP_RX_N : SWEEP_N); g_swPings = rx ? 10 : SWEEP_PINGS;
   g_sweepReg11 = tuss::readReg(0x11); g_sweepRegTouched = false;
   memcpy(g_sweepSaved, sonarPrm.v, icemesh::sonar::P_COUNT);
   sweepApply(0);
-  return String(rx ? "SWEEP RX" : "SWEEP") + " started: " + String(g_swN) + " steps x " + String(g_swPings) + " pings, one RAW each (~" + String(g_swN * g_swPings * 2) + " s at 1 ping/s)";
+  return String(nz ? "SWEEP NOISE" : (rx ? "SWEEP RX" : "SWEEP")) + " started: " + String(g_swN) + " steps x " + String(g_swPings) + " pings, one RAW each (~" + String(g_swN * g_swPings * 2) + " s at 1 ping/s)";
 }
 // D111 TUNE: finds the burst frequency (ftrim) and the receive band-pass code (bpf) that give the strongest bottom echo
 // for THIS transducer: 190..210 kHz in 2 kHz steps, then bpf 28 / 29 / 30 at the best frequency, 8 pings a step (the
@@ -3346,6 +3412,30 @@ bool sonarSerialCommand(const String& in) {
 }
 // D87: the page's command handler: every sonar word plus KNOB (the hub's own, wifi.cpp: sets the saved set)
 #if SONAR_REAL
+// D172 "BOOST OFF [seconds]" / "BOOST ON" (bench page button, serial): holds the converter's enable pin LOW for a few
+// seconds (default 6, max 30) while the sonar keeps pinging, with a NOTE at each end. Seen from outside: the output voltage
+// falls on a meter and the ring-down shrinks on the page = the pin really switches the converter; the noise floor during
+// those seconds = the receiver without the converter running.
+static unsigned long g_boostOffUntil = 0;
+static void boostHoldTick() {
+  if (!g_boostOffUntil || (long)(millis() - g_boostOffUntil) < 0) return;
+  g_boostOffUntil = 0;
+  tuss::setBoostHold(false);   // D177: through the driver, so the per-burst gate leaves the pin alone meanwhile
+  char t[80]; snprintf(t, sizeof(t), "NOTE %lu BOOST on again (enable pin HIGH)", millis()); recLine(t, true);
+}
+static String boostCommand(const String& rest) {
+  String a = rest; a.trim(); a.toUpperCase();
+  if (SONAR_PIN_BOOST < 0) return "BOOST: this build has no converter enable pin (SONAR_PIN_BOOST)";
+  if (a.startsWith("OFF")) {
+    long s = a.substring(3).toInt(); if (s < 1) s = 6; if (s > 30) s = 30;
+    tuss::setBoostHold(true);
+    g_boostOffUntil = millis() + (unsigned long)s * 1000UL; if (!g_boostOffUntil) g_boostOffUntil = 1;
+    char t[80]; snprintf(t, sizeof(t), "NOTE %lu BOOST off for %ld s (enable pin LOW)", millis(), s); recLine(t, true);
+    return String("Converter enable pin LOW for ") + String(s) + " s: the 30 V output should fall and the ring-down shrink";
+  }
+  g_boostOffUntil = 0; tuss::setBoostHold(false);
+  return "Converter enable pin HIGH (converter on)";
+}
 static String sonarWebCommand(const String& c) {
   bool handled = false;
   String r = sonarCommandReply(c, true, handled);
@@ -3416,6 +3506,9 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
     return "Noted";
   } else if (w == "RAW") {
     sonarRawAsk = true; r = "RAW capture after the next ping";
+  } else if (w == "OTA") {   // D148: restart into the firmware update mode (hotspot + upload page)
+    if (!otaSupported()) r = "OTA: this board has a single firmware slot: update over USB";
+    else { Serial.println(F("OTA: update mode asked on serial")); otaRequest(); }
   } else if (w == "NODETUNE") {   // D141: the own hole's transducer tune, as the chalet asks it (NODETUNE CLEAR forgets it)
     String a = rest; a.trim(); a.toUpperCase();
     nodeTuneCmd(a == "CLEAR" ? icemesh::sonar::TUNE_CMD_CLEAR : icemesh::sonar::TUNE_CMD_RUN);
@@ -3423,6 +3516,12 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
   } else if (w == "TUNE") {   // D111
     #if SONAR_REAL
     r = tuneCommand(rest);
+    #else
+    r = "no sonar in this build";
+    #endif
+  } else if (w == "BOOST") {   // D172
+    #if SONAR_REAL
+    r = boostCommand(rest);
     #else
     r = "no sonar in this build";
     #endif
@@ -3558,15 +3657,16 @@ static void sonarRealTick(bool focus) {
   const uint32_t t0 = micros();
   tuss::PingInfo pi;
   if (tuss::ping(sonarPrm, focus, codes, pi)) {
-    icemesh::sonar::Block out[4];   // D93: DATA + BG + BASE + ECHO can coincide on one ping
+    icemesh::sonar::Block out[5];   // D93: DATA + BG + BASE + ECHO can coincide on one ping
     sonarReal->echo_every = meshFastEcho() ? 1 : icemesh::sonar::SonarSource::ECHO_EVERY;   // D107: every ping on ESP-NOW, 1/s on LoRa
     sonarReal->echo_on = meshFocusNode() == NODE_ID;   // D93: raw lines for THE focus hole only, not the 'live too' extras (66 B/s each)
-    const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 4);
+    const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 5);
     for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     static uint32_t recCount = 0; static unsigned long lastRaw = 0;   // D87 recorder
     if (sonarRecAny() && (recCount++ % sonarRecEvery) == 0) { sonarRecordLine(codes, pi); recPingX(pi, sonarReal->lastProc()); sweepOnPing(); }
     else if (g_sweepStep >= 0 && !sonarRecAny()) sweepApply(-1);   // recording stopped mid-sweep: put the knobs back
     tuneOnPing(sonarReal->lastProc());   // D111: runs with or without a recording
+    boostHoldTick();   // D172
     nodeTuneOnPing(sonarReal->lastProc());   // D141
     bottommem::tick(sonarReal->proc.hasBottom(), (float)sonarReal->proc.lockedBottom());   // D116
     if (sonarRawAsk || (sonarRecAny() && sonarRawEverySec && millis() - lastRaw >= sonarRawEverySec * 1000UL)) {
@@ -3631,9 +3731,9 @@ void sonarHubLoop() {
     if (millis() - ownTick > 1000UL) ownTick = millis() - 250UL;
     while (millis() - ownTick >= 250UL) {
       ownTick += 250UL;
-      icemesh::sonar::Block out[4];
+      icemesh::sonar::Block out[5];
       ownSonar->echo_on = focus == NODE_ID;   // D93
-      const uint8_t n = ownSonar->tick(ownFocus, out, 4);
+      const uint8_t n = ownSonar->tick(ownFocus, out, 5);
       for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
     }
   }
@@ -3717,11 +3817,11 @@ void sonarHubLoop() {
   while (budget-- && millis() - lastTick >= 250UL) {               // 4 pings/s per virtual node
     lastTick += 250UL;
     for (uint8_t k = 0; k < activeVirt; k++) {
-      icemesh::sonar::Block out[4];
+      icemesh::sonar::Block out[5];
       const uint32_t t0 = micros();
       if (!(hubHoleSim(sonarVirt[k].node()) & MESH_SIM_SONAR)) continue;
       sonarVirt[k].echo_on = focus == sonarVirt[k].node();   // D93: the demo's focus hole too
-      const uint8_t n = sonarVirt[k].tick(meshIsFocus(sonarVirt[k].node()), out, 4);
+      const uint8_t n = sonarVirt[k].tick(meshIsFocus(sonarVirt[k].node()), out, 5);
       const uint32_t dt = micros() - t0;
       if (dt > sonarTickUsMax) sonarTickUsMax = dt;
       sonarTickUsSum += dt; sonarTickCount++;
@@ -3756,6 +3856,7 @@ void holeSelfTest(SelfTestResult& r, bool toSerial) {
   if (SONAR_REAL && !g_sonarHwOk) setupSonarReal();   // review: a shield wired since boot gets its begin() now
   tuss::ShieldTest t; tuss::shieldTest(t);
   if (t.pinged) r.sensor |= ST_SENS_PINGED;
+  if (t.gate_pin) { const uint8_t q = (uint8_t)((t.gate_drop_db + 1) / 2 > 7 ? 7 : (t.gate_drop_db + 1) / 2); r.button |= (uint8_t)(ST_GATE_PIN | (t.gate_drop_db >= 3 ? ST_GATE_OK : 0) | (q << 4)); }   // D171
   if (t.not_built) r.shield = ST_SH_NOT_BUILT;
   else {
     r.shield = (t.spi_ok ? ST_SH_SPI_OK : 0) | (t.swapped ? ST_SH_PINS_SWAPPED : 0) | (t.vdrv_ready ? ST_SH_VDRV_READY : 0) |
@@ -3764,6 +3865,6 @@ void holeSelfTest(SelfTestResult& r, bool toSerial) {
   }
   { MeshHubView v; meshHubView(v); r.rssi_abs = v.synced && v.beacon_rssi < 0 ? (uint8_t)(-v.beacon_rssi) : 0; }
   if (toSerial)
-    Serial.printf("SELFTEST own hole: sensor=0x%02X (level %u, %u edges) button=0x%02X (%u presses) batt=%u mV shield=0x%02X raw_max=%u ring=%u bins noise=%u beacon -%u dBm\n",
-                  r.sensor, r.sensor & 1, r.flips, r.button, r.presses, r.battery_mv, r.shield, r.raw_max_16 * 16, r.ring_bins, r.noise_code, r.rssi_abs);
+    Serial.printf("SELFTEST own hole: sensor=0x%02X (level %u, %u edges) button=0x%02X (%u presses) batt=%u mV shield=0x%02X raw_max=%u ring=%u bins noise=%u beacon -%u dBm converter-gate=%s (floor -%u dB)\n",
+                  r.sensor, r.sensor & 1, r.flips, r.button, r.presses, r.battery_mv, r.shield, r.raw_max_16 * 16, r.ring_bins, r.noise_code, r.rssi_abs, !(r.button & ST_GATE_PIN) ? "no pin" : ((r.button & ST_GATE_OK) ? "OK" : "NO EFFECT"), ((r.button & ST_GATE_DROP_MASK) >> 4) * 2);
 }

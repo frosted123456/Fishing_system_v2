@@ -22,7 +22,7 @@
 #endif
 
 #ifndef SONAR_BURST_COUNT_ADJ
-#define SONAR_BURST_COUNT_ADJ 0      // D139, see ping()
+#define SONAR_BURST_COUNT_ADJ 1      // D139, see ping(). D146: 1 since the 14 Nov log showed bst=1 on 68 / 68 pings (the chip stayed in BURST while listening); -D SONAR_BURST_COUNT_ADJ=0 = the old count
 #endif
 
 using namespace icemesh::sonar;
@@ -200,6 +200,31 @@ void saveNodeTune(uint8_t ftrim, uint8_t bpf, uint8_t knob_ftrim, uint8_t knob_b
 void effectiveTune(uint8_t kf, uint8_t kb, uint8_t& f, uint8_t& b) { const bool t = g_ntValid && kf == g_ntKf && kb == g_ntKb; f = t ? g_ntF : kf; b = t ? g_ntB : kb; }
 void clearNodeTune() { g_ntValid = false; Preferences p; p.begin("sonartune", false); p.remove("t"); p.end(); }
 void setTuneOverride(bool on, uint8_t ftrim, uint8_t bpf) { g_ovrOn = on; g_ovrF = ftrim; g_ovrB = bpf; }
+static bool g_listenOnly = false;   // D167: capture without CMD_TRIGGER / burst (noise scan): the receiver alone
+void setListenOnly(bool on) { g_listenOnly = on; }
+static bool g_powMean = false;      // D167 experiment: samples of a bin and bursts of a ping averaged in power, not in dB
+void setPowerMean(bool on) { g_powMean = on; }
+static bool g_boostGate = SONAR_BOOST_GATE != 0;   // D170
+void setBoostGate(bool on) { g_boostGate = on; }
+// D177 (noise scan A/B steps and the "Converter off" button; RAM only, all off at boot):
+static bool g_boostWhole = false;                    // one gate for the whole ping (D170) instead of one per burst (D173)
+void setBoostWholePing(bool on) { g_boostWhole = on; }
+static uint16_t g_boostLeadUs = SONAR_BOOST_GATE_US; // EN low -> first sample
+void setBoostLeadUs(uint16_t us) { g_boostLeadUs = us ? us : SONAR_BOOST_GATE_US; }
+static bool g_boostHold = false;                     // converter held off across pings: the per-burst gate must not switch it back on
+void setBoostHold(bool on) {
+  if (on == g_boostHold) return;
+  g_boostHold = on;
+  if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, on ? LOW : HIGH); }
+}
+// D170 / D173: converter off while this object lives, on again when it goes. One per burst (D173; D170 held it for the
+// whole ping): Frank's module has a 100 uF output capacitor and its feedback divider alone draws 3.8 mA (330 ohm), so a
+// 110 ms hold would sag ~5 V; one 21 ms capture sags ~1 V (est.) and the converter refills in the gap before the next burst.
+struct BoostGate {
+  bool held;
+  explicit BoostGate(bool want = true) : held(want && g_boostGate && !g_boostHold && SONAR_PIN_BOOST >= 0) { if (held) { digitalWrite(SONAR_PIN_BOOST, LOW); delayMicroseconds(g_boostLeadUs); } }
+  ~BoostGate() { if (held) digitalWrite(SONAR_PIN_BOOST, HIGH); }
+};
 uint32_t lastBurstHz() { return g_lastHz; }
 
 static void loadCal() {
@@ -235,6 +260,11 @@ bool begin() {
     if (!g_ok) { g_spi.end(); g_spi_up = false; g_swapped = false; spiUp(); }   // back to the documented pins
   }
   writeReg(0x10, 0x1D);   // 196.8 kHz band-pass until the first ping sets the knob
+  // D167: the three receive registers ping() never writes, back to their reset values at every start: the chip keeps its
+  // registers through an ESP32 reset (it is not power-cycled), so a sweep that crashed mid-step left its band-pass Q behind
+  writeReg(0x11, 0x00);   // BPF_CONFIG_2: Q 4, factory centre trim
+  writeReg(0x12, 0x00);   // DEV_CTRL_1: factory log-amp slope / intercept
+  writeReg(0x18, 0x14);   // ZC_CONFIG: zero-cross comparator off (reset value)
   writeReg(0x14, 0x1C);   // DEV_CTRL_3: IO_MODE 0 = clock on IO2, burst enabled by CMD_TRIGGER (datasheet 7.3.2);
                           // DRV_PLS_FLT_DT = 7 (check disabled, D72): with the deglitch at its 64 us default the
                           // DRV_PULSE_FLT bit is set on EVERY ping, because CMD_TRIGGER stays on for the ~20 ms capture
@@ -341,6 +371,7 @@ static void burst(uint32_t hz, uint8_t cycles) {
 
 // one capture at one frequency -> dB per bin, summed into `acc` (D140: dB sum, ping() divides by the burst count)
 static uint8_t g_vmode = 0;   // knob vmode: 0 = VDRV regulator always on (reference firmware), 1 = quiet listen (datasheet)
+static uint8_t g_extMiss = 0; static bool g_extFallback = false;   // D163: external-VDRV mode without the supply -> internal regulator
 
 static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], PingInfo& info) {
 #if SONAR_ADC_DIGI
@@ -362,8 +393,10 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   i2s_adc_enable(I2S_NUM_0);
   info.nolimit = g_nolimit ? 1 : 0;
   if (g_nolimit) clearConvLimit();                                // D58: continuous sampling
+  if (!g_listenOnly) {                                            // D167: listen-only captures send nothing
   writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER, as the reference firmware (vmode 1: VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
   burst(hz, cycles);
+  }
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
   // rate check (D58): time from the end of the first full DMA buffer to the end of the last read, for the samples in
@@ -403,8 +436,10 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   adcDrain();
   if (adc_digi_start() != ESP_OK) return false;
   info.nolimit = 1;
+  if (!g_listenOnly) {                                            // D167: listen-only captures send nothing
   writeReg(0x1B, TOF_TRIGGER);                                    // CMD_TRIGGER, as the reference firmware (vmode 1: VDRV_TRIGGER back to 0 "just before the burst", datasheet 7.3.1)
   burst(hz, cycles);
+  }
   size_t got = 0, words = 0, wordsA = 0; uint32_t tA = 0, tB = 0; bool fail = false;
   while (got < want) {
     size_t w = 0;
@@ -455,6 +490,11 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
     // raw -> dB: log-amp slope (datasheet typ.) over the ADC full scale; -100 dB at code 0 (relative scale,
     // the processing works on differences to its noise floor). Clipped above code 255 (-5 dB) later.
     const float db = k ? -100.0f + (float)sum / (float)k * (SONAR_ADC_FS_MV / 4096.0f / SONAR_MV_PER_DB) : -100.0f;
+    if (g_powMean) {   // D167 experiment: power mean of the bin's samples; ping() takes the log of the bursts' power mean
+      float pw = 0.f; size_t kk = 0;
+      for (size_t s = s0; s < s1 && s < n; s++, kk++) pw += powf(10.0f, (-100.0f + (float)g_raw[s] * (SONAR_ADC_FS_MV / 4096.0f / SONAR_MV_PER_DB)) * 0.1f);
+      acc[b] += kk ? pw / (float)kk : 1e-10f;
+    } else
     acc[b] += db;   // D140: the bursts of one ping are averaged in dB (was power: one spike in one burst lifted the bin)
   }
   return true;
@@ -478,6 +518,12 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   // the reference firmware writes (0x0F at 20 V) and what has fish on screen. vmode 1 = bit 6 DIS_VDRV_REG_LSTN (no
   // charging while listening) + bit 4 20 mA charge, re-armed by VDRV_TRIGGER in capture(): datasheet 7.3.1, unproven.
   g_vmode = p[P_VMODE];
+  // D163: vmode 2 (external VDRV) is the default and the knob is shared by every hole, but a board WITHOUT the external
+  // supply (plain shield / WROOM dev board on its MT3608) cannot ping in it: VDRV floats and sags. Such a board is
+  // recognised by the missing transmit leakage (t0_ok = 0 on 8 pings in a row; 1 on all ~1200 pings of 14nov with the
+  // supply) and then runs on the internal regulator (as vmode 0) until the knob leaves 2 or the next boot.
+  if (p[P_VMODE] != 2) { g_extMiss = 0; g_extFallback = false; }
+  else if (g_extFallback) g_vmode = 0;
   // D108: vmode 2 = EXTERNAL VDRV (bit 5 VDRV_HI_Z: the internal 5-20 V regulator off, the H-bridge runs from whatever
   // is wired to the VDRV pin, 5-36 V, datasheet 6.3 / 7.3.1 / 9.2). Only with the external supply fitted: VDRV <= VPWR + 0.3 V
   // at all times (abs. max), VPWR > VDRV + 0.3 V recommended, caps on both rails rated for it. Without it VDRV just sags.
@@ -517,6 +563,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   else if (mode == 1) { fset[0] = rot; nf = 1; info.rot_f = (int8_t)rot; rot = (uint8_t)((rot + 1) % 3); }
   else { fset[0] = 1; nf = 1; info.rot_f = -1; }
   static float acc[BINS];
+  BoostGate wholeGate(g_boostWhole);   // D177: noise scan step only (the D170 scheme, for a same-scan comparison with D173)
   for (uint8_t f = 0; f < nf; f++) {
     for (int b = 0; b < BINS; b++) acc[b] = 0;
     // BPF_CONFIG_1 (0x10) centre frequency, datasheet table: 0x1C 185.8, 0x1D 196.8, 0x1E 206.1, 0x1F 218.3 kHz:
@@ -529,16 +576,21 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
       // D57: random 0..jitter ms before every shot, so 8 tip-ups on one lake never stay in step: another tip-up's
       // ping then lands at a different depth on each of our pings and the cross-ping spike filter removes it
       if (p[P_JITTER_MS]) delay(esp_random() % ((uint32_t)p[P_JITTER_MS] + 1));
-      if (capture(HZ[fset[f]], cycles, sound, acc, info)) good++;
+      { BoostGate boostGate(!g_boostWhole);   // D173: converter off for this one burst and its listening window (~21 ms), on again in the gap
+        if (capture(HZ[fset[f]], cycles, sound, acc, info)) good++; }
     }
     if (!good) return false;
     for (int b = 0; b < BINS; b++) {   // dB mean of the bursts (D140) -> code (95 dB / 255)
-      const float db = acc[b] / (float)good;
+      const float db = g_powMean ? 10.0f * log10f(acc[b] / (float)good > 1e-10f ? acc[b] / (float)good : 1e-10f) : acc[b] / (float)good;   // D167
       const float c = (db + 100.0f) * 255.0f / 95.0f;
       codes[f][b] = (uint8_t)(c < 0 ? 0 : (c > 255 ? 255 : c + 0.5f));
     }
   }
   info.nfreq = nf;
+  if (p[P_VMODE] == 2 && !g_extFallback && !g_listenOnly && !g_boostHold) {   // D163 (a listen-only capture has no transmit to see)
+    if (info.t0_ok) g_extMiss = 0;
+    else if (++g_extMiss >= 8) { g_extFallback = true; Serial.println(F("SONAR: no transmit seen in external-VDRV mode (vmode 2): using the internal regulator on this board")); }
+  }
   info.fault = (uint8_t)(readReg(0x1C) & 0x06);   // DEV_STAT: PULSE_NUM_FLT (bit 2) / DRV_PULSE_FLT (bit 1) of the last burst
   info.vdrv_ready = (g_vmode == 2 || (lastStatus() & 0x20)) ? 1 : 0;   // D108: no regulation to report in external mode   // D88: status bits of that same frame (bit 5 VDRV_READY)
   info.edge_um = g_edge_seen ? (int32_t)((float)(g_cap_edge - g_cap_burst) / 80e6f * sound / 2.0f * 1e6f) : -1;
@@ -580,6 +632,25 @@ void shieldTest(ShieldTest& t) {
   uint16_t ring = 0;
   for (uint16_t i = 0; i < icemesh::sonar::BINS; i++) { if (c[i] > (uint16_t)t.noise_code + 20) ring = i + 1; else if (i > ring + 4) break; }
   t.ring_bins = ring > 255 ? 255 : (uint8_t)ring;
+  // D171: converter enable wire. Two listen-only pings with the converter running, two with it held off (D170 gate): the
+  // level heard without pinging is the converter's noise (D168), so a clear drop proves the wire switches the converter
+  // AND that the converter was the source. No drop = wire / pin not doing it, or the noise comes from elsewhere.
+  t.gate_pin = SONAR_PIN_BOOST >= 0;
+  if (t.gate_pin) {
+    const bool lo = g_listenOnly, bg = g_boostGate;
+    float lvl[2] = {0.f, 0.f};
+    g_listenOnly = true;
+    for (int k = 0; k < 2; k++) {
+      g_boostGate = (k == 1);
+      uint32_t s = 0; uint32_t m = 0;
+      for (int rep = 0; rep < 2; rep++)
+        if (ping(p, false, codes, pi)) for (uint16_t i = 40; i < icemesh::sonar::BINS; i++) { s += codes[0][i]; m++; }
+      lvl[k] = m ? (float)s / (float)m : 0.f;
+    }
+    g_listenOnly = lo; g_boostGate = bg;
+    const float drop = (lvl[0] - lvl[1]) * 95.0f / 255.0f;
+    t.gate_drop_db = drop <= 0.f ? 0 : (drop > 14.f ? 14 : (uint8_t)(drop + 0.5f));
+  }
   if (was_asleep) sleep();
 }
 
@@ -605,6 +676,12 @@ void saveNodeTune(uint8_t, uint8_t, uint8_t, uint8_t) {}
 void clearNodeTune() {}
 void effectiveTune(uint8_t kf, uint8_t kb, uint8_t& f, uint8_t& b) { f = kf; b = kb; }
 void setTuneOverride(bool, uint8_t, uint8_t) {}
+void setListenOnly(bool) {}
+void setPowerMean(bool) {}
+void setBoostGate(bool) {}
+void setBoostWholePing(bool) {}
+void setBoostLeadUs(uint16_t) {}
+void setBoostHold(bool) {}
 uint32_t lastBurstHz() { return 0; }
 void getCalibration(uint16_t pts[17]) { for (int i = 0; i < 17; i++) pts[i] = (uint16_t)(i * 256); }
 }

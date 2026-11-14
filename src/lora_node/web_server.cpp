@@ -1,4 +1,6 @@
 // Chalet / hub web server: routes, JSON API, remote config (split out of main.cpp, D49).
+#include <sonar_tune.h>
+#include "ota_update.h"   // D148
 #include "chalet.h"
 #include <ESPmDNS.h>
 static String statusJson();
@@ -36,6 +38,7 @@ void setupWebServer() {
   POST_PIN("/api/node/arm", handleWebApiNodeArm);      // v2 (D61): arm / disarm a hole
   POST_PIN("/api/node/selftest", handleWebApiNodeSelfTest);   // D70: ask a hole for its wiring check
   server.on("/api/selftest", HTTP_GET, handleWebApiSelfTest);               // D70: last result of ?id=
+  POST_PIN("/api/node/update", handleWebApiNodeUpdate);       // D148: ask a hub to restart into its firmware update mode ({"nodeId":n})
   POST_PIN("/api/node/tune", handleWebApiNodeTune);           // D141: ask a hole to tune its transducer ({"nodeId":n,"clear":true} forgets it)
   server.on("/api/tune", HTTP_GET, handleWebApiTune);                       // D141: last tune result of ?id=
   POST_PIN("/api/node/pos", handleWebApiNodePos);      // v2 (D51): position on the pocket map
@@ -344,12 +347,13 @@ void handleWebApiSelfTest() {
   else if (id == NODE_ID && g_ownSelfTestAt) { memcpy(b, &g_ownSelfTest, 12); age = millis() - g_ownSelfTestAt; have = true; }   // hub hotspot page
   if (!have) { server.send(200, "application/json", "{\"have\":false}"); return; }
   const SelfTestResult* r = (const SelfTestResult*)b;
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<640> doc;
   doc["have"] = true; doc["id"] = id; doc["age_s"] = age / 1000; doc["ver"] = r->ver;
   doc["sensor_level"] = (r->sensor & ST_SENS_LEVEL) != 0; doc["sensor_flips"] = (r->sensor & ST_SENS_FLIPS) != 0; doc["sensor_hall"] = (r->sensor & ST_SENS_HALL) != 0; doc["flips"] = r->flips;
   doc["pinged"] = (r->sensor & ST_SENS_PINGED) != 0;
   doc["btn_none"] = (r->button & ST_BTN_NONE) != 0; doc["btn_released"] = (r->button & ST_BTN_RELEASED) != 0; doc["btn_pressed"] = (r->button & ST_BTN_PRESSED_SINCE_BOOT) != 0; doc["presses"] = r->presses;
   doc["battery_mv"] = r->battery_mv;
+  doc["gate_pin"] = (r->button & ST_GATE_PIN) != 0; doc["gate_ok"] = (r->button & ST_GATE_OK) != 0; doc["gate_drop_db"] = ((r->button & ST_GATE_DROP_MASK) >> 4) * 2;   // D171
   doc["shield_built"] = (r->shield & ST_SH_NOT_BUILT) == 0; doc["spi_ok"] = (r->shield & ST_SH_SPI_OK) != 0; doc["pins_swapped"] = (r->shield & ST_SH_PINS_SWAPPED) != 0;
   doc["vdrv_ready"] = (r->shield & ST_SH_VDRV_READY) != 0; doc["pulse_fault"] = (r->shield & ST_SH_PULSE_FLT) != 0; doc["drv_fault"] = (r->shield & ST_SH_DRV_FLT) != 0;
   doc["ee_fault"] = (r->shield & ST_SH_EE_FLT) != 0; doc["leakage"] = (r->shield & ST_SH_LEAKAGE) != 0;
@@ -360,6 +364,22 @@ void handleWebApiSelfTest() {
 
 // D141 POST {"nodeId":n[,"clear":true]}: the chalet beacons CMD_SELFTEST with value 1 (run) / 2 (forget); the hub runs it
 // on its own hole or hands it to the tip-up; the result comes back in SEC_SELFTEST as a 12-byte TuneResult (version 2).
+// D148 POST {"nodeId":n}: the chalet beacons CMD_SELFTEST value 3 to hub n, which restarts into its update mode (its own
+// hotspot + upload page, 10 min). Asked of this board itself: it restarts at once (refused with a single firmware slot).
+void handleWebApiNodeUpdate() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hub\"}"); return; }
+  if (id == NODE_ID) {
+    if (!otaSupported()) { server.send(400, "application/json", "{\"error\":\"this box has a single firmware slot: update it over USB\"}"); return; }
+    server.send(200, "application/json", "{\"ok\":true}"); delay(300); otaRequest(); return;
+  }
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) { server.send(400, "application/json", "{\"error\":\"only the chalet can ask another board\"}"); return; }
+  meshSetTune((uint8_t)id, icemesh::sonar::TUNE_CMD_OTA);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 void handleWebApiNodeTune() {
   StaticJsonDocument<96> doc;
   if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }

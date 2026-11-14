@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ice Fishing</title>
+<script>try{document.documentElement.dataset.level=localStorage.getItem('uiLevel')||'simple'}catch(e){document.documentElement.dataset.level='simple'}</script>
 <style>
 :root{
   --bg:#EEF3F4; --surface:#FFFFFF; --ink:#13262D; --muted:#55707A; --line:#D2DEE2; --chip:#E1EAEC;
@@ -220,6 +221,34 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
   .actions .btn{min-height:34px;padding:4px 9px;font-size:.92rem}
   .simb{font-size:.74rem;padding:2px 6px}
 }
+/* D145: three option levels (Simple / Advanced / Expert, per phone): an element marked data-lv shows from its level up */
+html[data-level="simple"] [data-lv="adv"],html[data-level="simple"] [data-lv="exp"],html[data-level="advanced"] [data-lv="exp"],html[data-level="ice"] [data-lv="adv"],html[data-level="ice"] [data-lv="exp"],html:not([data-level="ice"]) [data-lv="ice"]{display:none !important}
+
+.lvpick{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}.lvpick .hint{flex:1 1 220px;margin:0}
+.viewpick{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;margin:8px 0 10px}
+.viewpick .seg{background:var(--water-2);box-shadow:inset 0 0 0 1px var(--water-line)}
+.viewpick .seg button{color:var(--water-muted);min-height:44px;padding:8px 14px}
+.viewpick .seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);box-shadow:none}
+.viewpick p{margin:0;color:var(--water-muted);font-size:.9rem;flex:1 1 200px}
+.chips{grid-area:chips;display:flex;gap:8px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
+.chip{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:44px;padding:6px 14px;border-radius:22px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font-weight:600;cursor:pointer;white-space:nowrap}
+.chip i{width:9px;height:9px;border-radius:50%;background:var(--line)}.chip.has i{background:var(--accent)}
+.chip[aria-pressed="true"]{background:var(--water);color:var(--water-ink);border-color:var(--water)}
+.chip.fish{background:var(--alert);color:var(--alert-ink);border-color:var(--alert)}.chip.fish i{background:var(--alert-ink)}
+@media (max-width:919px){.grid{grid-template-areas:"chips" "fall" "tgt" "inst" "holes" "echo" "ctrl" "note"}}
+@media (min-width:920px){.chips{display:none}}
+.grid.nofocus .chips{display:flex}
+.toggles .desc{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;cursor:pointer}
+.toggles .desc.open{display:block}
+.icetune{margin:12px 0}.icetune h3{margin:0 0 4px}
+.icetune .toggles li{grid-template-columns:minmax(0,1fr);gap:6px;padding:12px 0}.icetune .toggles .seg{justify-self:start;flex-wrap:wrap}
+.icetune .toggles .desc{display:block;overflow:visible;cursor:auto;max-width:62ch}.icetune .toggles .desc b{color:var(--ink)}
+select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:6px 10px;min-height:44px}
+@media (pointer:coarse){.btn.small,.quick .btn{min-height:44px}.seg button{min-height:44px}}
+@media (max-width:430px){.tabs button{padding:10px 11px}}
+.panel{overflow-x:clip}
+body:has(#alert:not([hidden])) .panel{padding-bottom:96px}   /* the FISH ON bar never covers the last control of a tab */
+
 </style>
 </head>
 <body>
@@ -238,7 +267,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button type="button" role="tab" data-tab="holes" aria-selected="true">Holes<span class="dot" id="holesDot" hidden></span></button>
     <button type="button" role="tab" data-tab="sonar" aria-selected="false">Sonar</button>
-    <button type="button" role="tab" data-tab="radio" aria-selected="false">Radio</button>
+    <button type="button" role="tab" data-tab="radio" aria-selected="false" data-lv="adv">Radio</button>
     <button type="button" role="tab" data-tab="settings" aria-selected="false">Settings</button>
     <button type="button" role="tab" data-tab="wifi" aria-selected="false">Wi-Fi</button>
   </nav>
@@ -276,7 +305,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     </div>
     </div>
     <details id="holeCards" class="hcards"><summary>Hole cards <span class="hint" id="hcSum"></span></summary>
-    <label class="hint" style="display:flex;gap:8px;align-items:center;margin:8px 0">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
+    <label class="hint" style="display:flex;gap:8px;align-items:center;margin:8px 0" data-lv="adv">Sonar scale <select id="glScale" aria-label="Sonar depth scale of the hole cards"></select></label>
     <div class="ngrid" id="ngrid"></div>
     </details>
     <p class="hint" id="tripsInfo" style="margin:0"></p>
@@ -292,22 +321,23 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
   </div>
   <div class="playback">
     <button class="btn" id="play" type="button" aria-pressed="true">Pause</button>
-    <button class="btn" id="bold" type="button" aria-pressed="false" title="D137: echoes seen again at the same depth (within 10 cm) in 2 of the last 4 lines are drawn thicker. Display only.">Bold</button>
+    <button class="btn" id="bold" type="button" aria-pressed="false" data-lv="adv" title="echoes seen again at the same depth (within 10 cm) in 2 of the last 4 lines are drawn thicker. Display only.">Bold</button>
     <span class="seg" role="group" aria-label="Units"><button type="button" data-units="ft" aria-pressed="true">ft</button><button type="button" data-units="m" aria-pressed="false">m</button></span>
   </div>
   <div class="modebar">
     <span class="simb" id="simb" hidden>FAKE DATA</span>
-    <span class="tog"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
-    <span class="hint" id="st"></span>
+    <span class="tog" data-lv="exp"><span id="lblSim">Sonar test mode</span><button type="button" class="switch" role="switch" id="sim" aria-labelledby="lblSim" aria-checked="false"></button></span>
+    <span class="hint" id="st" data-lv="exp"></span>
   </div>
-  <div class="quick" role="group" aria-label="Quick colour controls">
-    <label title="D137: lifts faint echoes into brighter colours (0 = linear, as before). Faint noise lifts too: pair it with Weak echoes = Hide faint. This screen only.">Weak-echo boost <input type="range" id="vBoost" min="0" max="100" step="10"> <b id="vBoostV">0 %</b></label>
-    <label title="D137: dB over the noise floor painted as the brightest colour (default 40). Lower: weak echoes brighter, the bottom saturates sooner. This screen only.">Full colour at <input type="range" id="vRange" min="24" max="60" step="4"> <b id="vRangeV">40 dB</b></label>
+  <div class="quick" role="group" aria-label="Quick colour controls" data-lv="adv">
+    <label title="Lifts faint echoes into brighter colours (0 = linear, as before). Faint noise lifts too: pair it with Weak echoes = Hide faint. This screen only.">Weak-echo boost <input type="range" id="vBoost" min="0" max="100" step="10"> <b id="vBoostV">0 %</b></label>
+    <label title="DB over the noise floor painted as the brightest colour (default 40; 60 and more for a barrel or bin test). Lower: weak echoes brighter, strong echoes saturate sooner and look thicker. This screen only.">Full colour at <input type="range" id="vRange" min="24" max="80" step="4"> <b id="vRangeV">40 dB</b></label>
     <button class="btn" id="vReset" type="button" title="Boost 0 %, full colour at 40 dB">Reset</button>
   </div>
 </div>
 
 <main class="grid nofocus" id="main">
+  <div class="chips" id="hchips" role="group" aria-label="Hole to watch"></div>
   <section class="card holes" aria-label="Holes">
     <h2>Holes</h2>
     <div class="follow"><button class="btn small" id="follow" type="button" aria-pressed="true" title="The streamed hole follows the fish: the busiest hole, at least 20 s each; FISH ON wins for 2 min; your own pick holds 5 min">Follow the action</button><span class="hint" id="followWhy"></span></div>
@@ -327,6 +357,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
 
   <section class="water fall" aria-label="Waterfall">
     <div class="fall-head"><h2>Last 60 seconds</h2><p>4 pings per second, newest on the right</p></div>
+    <div class="viewpick"><div class="seg" id="viewSeg" role="group" aria-label="View"><button type="button" data-view="marks" aria-pressed="true">Marks</button><button type="button" data-view="texture" aria-pressed="false">Marks + texture</button><button type="button" data-view="all" aria-pressed="false">Show all</button></div><p id="viewDesc"></p></div>
     <div class="stack"><canvas id="fall" aria-label="Waterfall of the last 240 pings"></canvas><canvas id="fallOv" aria-hidden="true"></canvas></div>
     <div class="zoom-head"><strong>Bottom lock</strong><span id="zoomSpan">last 5 ft above bottom, stretched</span></div>
     <div class="zstack"><canvas id="zoom" aria-label="Zoomed view just above the bottom"></canvas><canvas id="zoomOv" aria-hidden="true"></canvas></div>
@@ -342,7 +373,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <div class="tlist" id="tlist"></div>
   </section>
 
-  <section class="card echo" aria-label="Echo character">
+  <section class="card echo" aria-label="Echo character" data-lv="adv">
     <h2>Echo character</h2>
     <div class="who"><strong id="echoWho">–</strong><span class="muted" id="echoDepth"></span></div>
     <dl class="metrics">
@@ -357,19 +388,33 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
 
   <section class="card ctrl" aria-label="Display">
     <h2>Display</h2>
+    <div class="lvpick"><div class="seg" role="group" aria-label="Options shown"><button type="button" data-level="simple">Simple</button><button type="button" data-level="advanced">Advanced</button><button type="button" data-level="expert">Expert</button><button type="button" data-level="ice">On the ice</button></div><p class="hint">How many options the pages show on this phone. "On the ice" = the simple pages plus the few adjustments to make at the hole. The view is chosen above the echogram.</p></div>
+    <div class="icetune" data-lv="ice">
+      <h3>Tune on the ice</h3>
+      <p class="hint">Five adjustments worth knowing at the hole, and when to touch each. Except Contrast, they apply to every sonar hole and are saved there. Change one at a time and watch a minute before the next.</p>
+      <ul class="toggles">
+        <li><span class="name">Ping</span><div class="seg" role="group" aria-label="Ping length"><button type="button" data-kset="cycles:8,fcycles:8">Sharp</button><button type="button" data-kset="cycles:16,fcycles:16">Deep</button></div><span class="desc"><b>Change when</b> fish you expect do not show in deep water (past about 15 ft): try Deep, roughly 3 dB stronger echoes. Go back to Sharp when the jig and a fish next to it blur into one.</span></li>
+        <li><span class="name">Contrast</span><div class="seg" role="group" aria-label="Colour contrast"><button type="button" data-vrange="32">Faint fish</button><button type="button" data-vrange="40">Lake</button><button type="button" data-vrange="60">Strong echoes</button></div><span class="desc"><b>Change when</b> fish or the jig are dim and hard to see: Faint fish. Everything is bright and echoes look thick (shallow hard bottom, barrel test): Strong echoes. This one is for this screen only, not saved on the holes.</span></li>
+        <li><span class="name">Blind zone under the ice</span><div class="seg" role="group" aria-label="Blind zone"><button type="button" data-kset="dead:3">0.3 m (1 ft)</button><button type="button" data-kset="dead:5">0.5 m (1.6 ft)</button><button type="button" data-kset="dead:8">0.8 m (2.6 ft)</button></div><span class="desc"><b>Change when</b> marks or clutter sit right under the ice and are not fish: larger. Fish near the surface are missing: smaller.</span></li>
+        <li><span class="name">Long echoes</span><div class="seg" role="group" aria-label="Longest echo counted as a fish"><button type="button" data-kset="echolen:30">Normal</button><button type="button" data-kset="echolen:45">Longer</button><button type="button" data-kset="echolen:0">Off</button></div><span class="desc"><b>Change when</b> a big fish shows on the echogram but gets no fish mark: Longer, then Off. Weeds or a soft layer marked as fish: back to Normal.</span></li>
+        <li><span class="name">Noise filter</span><div class="seg" role="group" aria-label="Noise filter"><button type="button" data-preset="0">Low</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High</button></div><span class="desc"><b>Change when</b> fish marks flicker where there is nothing: High. Fish you can see on the echogram get no mark: Low.</span></li>
+      </ul>
+      <p class="desc">Leave the receiver gain at 0: more gain lifts the noise as much as the echoes. Do not run Tune over a bottom closer than about 2 m: the bottom echo is too strong there to compare frequencies.</p>
+      <div class="scene"><button class="btn" id="kDefaults2" type="button">Back to defaults</button></div>
+    </div>
     <ul class="toggles" id="toggles"></ul>
     <ul class="toggles" id="vknobs">
-      <li><span class="name">Depth scale</span><select id="vDepth" aria-label="Depth scale"></select><span class="desc">Auto follows the bottom; a fixed scale zooms on the top of the water.</span></li>
-      <li><span class="name">Colour gain</span><input type="range" id="vGain" min="-6" max="6" step="1" aria-label="Colour gain"><span class="desc">Brighter or darker echoes on this screen only.</span></li>
-      <li><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only. Raw echogram: water is anything under 4 / 8 / 12 / 20 dB over the noise floor; full colour at 40 dB.</span></li>
-    <li><span class="name">Bold (button above the echogram)</span><span class="desc">D137: an echo seen again at the same depth (within 10 cm) in at least 2 of the last 4 lines received is drawn thicker; one-off noise stays thin. Above the bottom only. The bottom and the ring-down repeat too, so they are left as they are.</span></li>
+      <li data-lv="adv"><span class="name">Depth scale</span><select id="vDepth" aria-label="Depth scale"></select><span class="desc">Auto follows the bottom; a fixed scale zooms on the top of the water.</span></li>
+      <li data-lv="adv"><span class="name">Colour gain</span><input type="range" id="vGain" min="-6" max="6" step="1" aria-label="Colour gain"><span class="desc">Brighter or darker echoes on this screen only.</span></li>
+      <li data-lv="adv"><span class="name">Weak echoes</span><select id="vWeak" aria-label="Weak echoes"><option value="0">Show all</option><option value="1">Hide faint</option><option value="2">Hide weak</option><option value="3">Strong only</option></select><span class="desc">Display filter on this screen only. Raw echogram: water is anything under 4 / 8 / 12 / 20 dB over the noise floor; full colour at 40 dB.</span></li>
+    <li data-lv="adv"><span class="name">Bold (button above the echogram)</span><span class="desc">An echo seen again at the same depth (within 10 cm) in at least 2 of the last 4 lines received is drawn thicker; one-off noise stays thin. Above the bottom only. The bottom and the ring-down repeat too, so they are left as they are.</span></li>
       </ul>
-    <details class="knobs"><summary>Processing on the holes (every sonar hole)</summary>
+    <details class="knobs" data-lv="adv"><summary>Processing on the holes (every sonar hole)</summary>
       <ul class="toggles">
         <li><span class="name">Noise filter</span><div class="seg" role="group" aria-label="Noise filter" id="kPreset"><button type="button" data-preset="0">Low</button><button type="button" data-preset="1">Normal</button><button type="button" data-preset="2">High</button></div><span class="desc">Low shows more (and more junk), High shows only clear echoes. Start Normal.</span></li>
         <li><span class="name">Water</span><div class="seg" role="group" aria-label="Water depth" id="kWater"><button type="button" data-water="lake">Lake</button><button type="button" data-water="shallow">Shallow (under 2 m)</button><button type="button" data-water="bucket">Barrel test (under 1.2 m)</button></div><span class="desc">Where the bottom is looked for and how close to the transducer echoes count.</span></li>
       </ul>
-      <label class="tog" style="margin:8px 0"><input type="checkbox" id="kAdv"> Advanced (all 22 settings)</label>
+      <label class="tog" style="margin:8px 0" data-lv="exp"><input type="checkbox" id="kAdv"> Every sonar knob</label>
       <ul class="toggles" id="knobs" hidden></ul>
       <div class="scene"><button class="btn" id="kDefaults" type="button">Defaults</button> <button class="btn" id="kResend" type="button">Send to holes again</button></div>
       <p class="desc" id="kNote">Values tuned on simulated echoes so far; the first real recordings will move them. Saved on every hole.</p>
@@ -377,7 +422,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <div class="scene"><button class="btn" id="stop" type="button">Stop streaming this hole</button></div>
   </section>
 
-  <p class="note" id="note">Processing runs on each hole (bottom lock, noise floor, targets, static scene); the radio carries targets, changed cells and a 4-level static scene, so the picture is coarser than raw sonar.</p>
+  <p class="note" id="note" data-lv="adv">Processing runs on each hole (bottom lock, noise floor, targets, static scene); the radio carries targets, changed cells and a 4-level static scene, so the picture is coarser than raw sonar.</p>
 </main>
 </div>
 
@@ -389,7 +434,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div class="tablewrap"><table class="rt" id="lkTable"></table></div>
       <p class="hint" style="margin:10px 0 0">When the chalet last heard each hub directly on LoRa, and on ESP-NOW (with the relays passed). Backbone = the hub also sends over ESP-NOW right now (Auto fallback or ESP-NOW mode). Transport and channel are set in Settings → Network.</p>
     </section>
-    <section class="card" id="rtCard">
+    <section class="card" id="rtCard" data-lv="exp">
       <h2>Range test — walk with the chalet box</h2>
       <p class="sm" style="margin:0 0 8px">One hub stays at its hole; its turn cycles through every LoRa speed (SF9 → SF5, one per second) while you carry the chalet box around. Every result is logged with the box's GPS position and its distance to the hub. Trips and alerts keep working; only that hub's sonar is thin while a speed fails.</p>
       <div class="form">
@@ -403,7 +448,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <div id="rtRuns"></div>
       <p class="hint" style="margin:8px 0 0">Download a run (CSV: time, GPS, distance, speed, received, RSSI, SNR, and how the hub heard the chalet) and send it over: the speed limits get measured instead of estimated. Stops by itself after 2 h, when storage runs low, or when the hub is gone for 5 min.</p>
     </section>
-    <section class="card">
+    <section class="card" data-lv="exp">
       <h2>Radio test modes</h2>
       <div class="form">
         <label class="f">Test mode
@@ -417,7 +462,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
     <section class="card">
       <h2>Hubs</h2>
       <div class="tablewrap"><table class="rt" id="rTable"></table></div>
-      <p class="hint" style="margin:10px 0 0">Per hub and per LoRa mode: packets received / slots scheduled at the chalet, RSSI/SNR at the chalet. Beacon columns: the chalet beacon as heard by the hub, beacons lost in the last 64, timing error. Sensitivity (theory, not measured): SF9/500 −123.5, SF8/500 −121, SF7/500 −118.5 dBm.</p>
+      <p class="hint" style="margin:10px 0 0">Per hub and per LoRa mode: packets received / slots scheduled at the chalet, RSSI/SNR at the chalet. Beacon columns: the chalet beacon as heard by the hub, beacons lost in the last 64, timing error. Sensitivity (SX1262 datasheet, not measured on this board): SF9 −121, SF8 −118, SF7 −116, SF6 −113, SF5 −111 dBm.</p>
     </section>
   </div>
 </div>
@@ -448,6 +493,11 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
 <div class="panel" id="tab-settings" role="tabpanel" hidden>
   <div class="wrap sgrid">
     <section class="card">
+      <h2>Options shown</h2>
+      <div class="lvpick"><div class="seg" role="group" aria-label="Options shown"><button type="button" data-level="simple">Simple</button><button type="button" data-level="advanced">Advanced</button><button type="button" data-level="expert">Expert</button><button type="button" data-level="ice">On the ice</button></div></div>
+      <p class="hint" style="margin:8px 0 0">Simple: what you need while fishing. Advanced adds set-up on the ice (tune, channels, relays, display fine-tuning, the Radio tab). Expert adds every sonar knob, the range test and the simulations. Saved on this phone.</p>
+    </section>
+    <section class="card">
       <h2>Alerts</h2>
       <form class="form" id="setForm">
         <span class="tog"><span id="lblBz">Buzzer on the chalet</span><button type="button" class="switch" role="switch" id="fBuzzer" aria-labelledby="lblBz" aria-checked="false"></button></span>
@@ -477,7 +527,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
         <div><button class="btn" id="testSound" type="button">Test the sound</button></div>
       </div>
     </section>
-    <section class="card">
+    <section class="card" data-lv="adv">
       <details class="adv" id="setAdv"><summary>Advanced (normally nothing to change)</summary>
       <h3>Measurements</h3>
       <div class="form">
@@ -493,6 +543,10 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
       <p class="sm" style="margin:0 0 6px">Each hole finds the burst frequency its own transducer answers best at (they differ by a few kHz, and cold water moves them). Run it once per outing, when every transducer has been in the water about 10 minutes and sees the bottom. About 35 s per hole (a sleeping tip-up starts at its next heartbeat); the hole pings faster and may show false marks meanwhile. The result is kept in the hole until the next tune.</p>
       <div class="acts" style="margin:0 0 6px"><button class="btn small primary" type="button" id="tnAll">Tune all holes</button> <button class="btn small" type="button" id="tnRead">Read results</button> <button class="btn small" type="button" id="tnClear">Forget all tunes</button> <span class="msg" id="tnMsg"></span></div>
       <div id="tnOut"></div>
+      <h3>Firmware update</h3>
+      <p class="sm" style="margin:0 0 6px">Without the cable. The hub restarts into an update mode for 10 minutes: its sonar and its alerts stop, and it opens its own hotspot <b>IceFish-Hub<i>N</i>-UPDATE</b> (same password as this one). Join it with the phone, open <b>192.168.4.1</b> and send the file built for that hub on the PC (<code>tools/flash.html</code>). A file built for another board is refused; a new firmware that does not stay up goes back to the old one by itself.</p>
+      <div class="acts" style="margin:0 0 6px"><select id="fwHub" aria-label="Hub to update"></select> <button class="btn small" type="button" id="fwGo">Put this hub in update mode</button></div>
+      <p class="hint" id="fwMsg" style="margin:0 0 10px"></p>
       <h3>Map storage</h3>
       <p class="sm" style="margin:0 0 6px">Map tiles come from the internet through the phone; every tile seen stays on this phone, and <b>Save area</b> on the Holes tab keeps the tiles of an area on the chalet for any phone on the ice. Depth contours (optional, where CHS has data): a pack made on the PC with <code>tools/lake_prep.py</code>.</p>
       <p class="hint" id="tlInfo" style="margin:0 0 6px"></p>
@@ -507,8 +561,8 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
         <div><span class="hint">ESP-NOW relays (rebroadcast between hubs and the chalet, max 2 in a row)</span><div id="nRelays"></div></div>
         <p class="hint" style="margin:0">Hubs follow these settings through the beacon: nothing to reprogram on the ice. A channel change is announced 6 beacons ahead.</p>
       </div>
-      <h3>Test &amp; simulation</h3>
-      <div class="form">
+      <h3 data-lv="exp">Test &amp; simulation</h3>
+      <div class="form" data-lv="exp">
         <div class="btnrow"><button class="btn" type="button" id="simAllOn">Everything ON</button><button class="btn" type="button" id="simAllOff">Everything OFF</button></div>
         <label class="f">Demo network on this box (no other hardware)<select id="simDemo"><option value="0">Off</option><option value="1x3">1 hub x 3 holes</option><option value="2x3">2 hubs x 3 holes</option><option value="3x3">3 hubs x 3 holes</option><option value="4x3">4 hubs x 3 holes</option><option value="3x4">3 hubs x 4 holes</option><option value="4x4">4 hubs x 4 holes</option></select><small>Fake hubs and holes inside the chalet, marked DEMO / SIM. Off after a reboot.</small></label>
         <label class="f">Fake fish (flag up) per hole<select id="simRate"><option value="2">about 2 per hour</option><option value="6">about 6 per hour</option><option value="12">about 12 per hour</option><option value="30">about 30 per hour</option><option value="60">about 1 per minute</option></select><small>Applies to the next switch you turn on</small></label>
@@ -530,7 +584,7 @@ dl.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:0}dl.kv dt
 'use strict';
 const BIN = 0.025, N = 488, MAXD = 12.2, HIST = 240, ZR = 60;
 // v2 (D42) display knobs of this phone/PC: depth scale (auto or fixed, metres), colour gain, hide weak echoes
-const vopt = { depth: 'auto', gain: 0, weak: 0, boost: 0, range: 40, bold: false };
+const vopt = { depth: 'auto', gain: 0, weak: 0, boost: 0, range: 40, bold: false };   // D165: default stays 40 (lake: a fish ~20 dB over the floor must not be dim); 60 only suited the bin's reverberation (D164)
 try { Object.assign(vopt, JSON.parse(localStorage.getItem('sonarView') || '{}')); } catch (e) { /* private mode */ }
 const saveV = () => { try { localStorage.setItem('sonarView', JSON.stringify(vopt)); } catch (e) { /* ignore */ } };
 const NICE = [2, 3, 4, 5, 6, 8, 10, MAXD];
@@ -557,7 +611,7 @@ let knobDeadM = 0.3;   // blind zone (dead knob, 0.1 m steps): the echogram is b
 const GAIN = () => Math.pow(1.15, vopt.gain || 0);
 // D137: adjustable colour scale (this screen only). Range = dB over the floor at full colour (default 40 = ETOP);
 // boost s lifts faint echoes: shade(v) = f + (1 - f) v^(1 - 0.6 s), f = 0.35 s; s = 0 is exactly the old drawing
-const RANGE_DB = () => Math.min(60, Math.max(24, +vopt.range || 40));
+const RANGE_DB = () => Math.min(80, Math.max(24, +vopt.range || 40));
 const ETOPU = th => Math.max(RANGE_DB() / 4, th + 1);          // full colour level (4 dB steps), never at or under the start
 const BRTOP = () => 18 * RANGE_DB() / 40;                         // background removed: span over 2 dB (default 18)
 const BOOST = () => Math.min(1, Math.max(0, (+vopt.boost || 0) / 100));
@@ -597,7 +651,7 @@ const opts = { overlays: true, bgsep: true, cone: true, dz: true, echogram: true
 // D125 experimental sharpened echogram (docs/SONAR_DECONV.md). Input: dB per bin (array), noise floor dB, bottom m,
 // bin size m. Output: {out: sharpened dB, area: area-equivalent dB} (same length; outside the window = input).
 // Steps: baseline = floor + ring-down decay through the lowest points (D126e) >= nf; linear
-// excess; Richardson-Lucy with the hump measured on the ball (07nov, 32 cycles); 5 cm re-blur; each lobe height-matched
+// excess; Richardson-Lucy with the hump measured on the ball (D156: 14nov, 8 cycles); 5 cm re-blur; each lobe height-matched
 // to the raw excess at its peak (keeps peak height and small bumps, only narrows); area = lobe flux / hump area.
 // o.noDeconv (D126): skip the deconvolution (line already sharpened on the hub): baseline, lobes and area only.
 // Returns { out, area, base } (base = the baseline in dB inside the window, the input elsewhere).
@@ -608,7 +662,7 @@ function sharpenEcho(db, nf, bottom, bin, o) {
   const out = db.slice(), area = db.slice(), base = db.slice();
   const n = b - a; if (n < 8) return { out, area, base };
   // hump (2.5 cm bins, ref = index 3), resampled to this bin size
-  const H0 = [0, 0.58, 0.86, 1.0, 0.88, 0.56, 0.28, 0.10, 0.04], h0 = i => (i < 0 || i > 8) ? 0 : (H0[Math.floor(i)] * (1 - (i % 1)) + (H0[Math.min(8, Math.floor(i) + 1)] * (i % 1)));
+  const H0 = dzK.cycles >= 12 ? [0, 0.10, 0.63, 1.0, 0.88, 0.44, 0.11, 0.02, 0] : [0, 0.40, 0.95, 1.0, 0.60, 0.22, 0.03, 0, 0], h0 = i => (i < 0 || i > 8) ? 0 : (H0[Math.floor(i)] * (1 - (i % 1)) + (H0[Math.min(8, Math.floor(i) + 1)] * (i % 1)));
   const r = bin / 0.025, L0 = Math.floor(3 / r), H = []; for (let k = -L0; k * r <= 5; k++) H.push(h0(3 + k * r));
   const C = L0, L = H.length, HS = H.reduce((s, v) => s + v, 0), HN = H.map(v => v / HS);
   const y = db.slice(a, b);
@@ -676,8 +730,43 @@ window.suiteEchoCount = () => echoes.length;   // (preview / tests)
 // drawn from the mean of this line and the two before it at the same depth: the floor's flicker shrinks, an echo that
 // stays (a fish, the lure) keeps its level; stronger cells stay per line (no smear).
 const FINE_DB = [0, 1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20, 25, 31, 38, 46];
+// D144: HD line (sonar_codec.h hdParse): hex of the block after its 5-byte header -> dB over the floor per 2.5 cm bin.
+// Bits MSB first: cells n (9) | fold - 1 (1) | all (1) | kr (3) | kv (2), then [zero run Rice(kr)] [steps Rice(kv) until 0].
+function decodeHd(hex) {
+  try {
+    const by = new Uint8Array(hex.length >> 1); for (let i = 0; i < by.length; i++) by[i] = parseInt(hex.substr(2 * i, 2), 16);
+    let p = 0; const nb = by.length * 8;
+    const bit = () => { if (p >= nb) throw 0; const b = (by[p >> 3] >> (7 - (p & 7))) & 1; p++; return b; };
+    const get = n => { let v = 0; for (let i = 0; i < n; i++) v = v * 2 + bit(); return v; };
+    const rice = (k, mq) => { let q = 0; while (bit()) { if (++q > mq) throw 0; } return q * (1 << k) + get(k); };
+    const n = get(9), fold = get(1) + 1, all = get(1), kr = get(3), kv = get(2);
+    if (!n || n * fold > 488) return null;
+    const db = new Float32Array(n * fold); let i = 0;
+    while (i < n) {
+      const run = rice(kr, 488); if (run > n - i) return null; i += run;
+      let prev = 0;
+      while (i < n) { const z = rice(kv, 32), v = prev + ((z & 1) ? -((z + 1) >> 1) : (z >> 1)); if (v < 0 || v > 15) return null;
+        for (let k = 0; k < fold; k++) db[i * fold + k] = FINE_DB[v]; i++; prev = v; if (!v) break; }
+    }
+    if (nb - p >= 8) return null;
+    return { db, all };
+  } catch (err) { return null; }
+}
+const cellsOf = e => e.h ? e.n : 122;   // D144: an HD line has one cell per bin, as many as the hub sent
 function fineCells(e) {
   if (e.fd) return e.fd;
+  if (e.h) {   // D144: a show-all HD line gets the same 3-line mean under 8 dB; the texture under the marks is drawn as sent
+    if (!e.all) return (e.fd = e.hd);
+    const a = new Float32Array(e.n), at = echoes.indexOf(e), prev = [];
+    for (let j = at - 1; j >= 0 && prev.length < 2; j--) { const q = echoes[j]; if (q.m) continue; if (!q.h || !q.all || e.i - q.i > 24 || e.i < q.i) break; prev.push(q); }
+    for (let c = 0; c < e.n; c++) {
+      const d = e.hd[c];
+      if (d >= 8 || !prev.length) { a[c] = d; continue; }
+      let sum = d, n = 1; for (const q of prev) { const x = c < q.n ? q.hd[c] : 0; if (x < 8) { sum += x; n++; } }
+      a[c] = sum / n;
+    }
+    return (e.fd = a);
+  }
   const a = new Float32Array(122), at = echoes.indexOf(e), prev = [];
   for (let j = at - 1; j >= 0 && prev.length < 2; j--) { const q = echoes[j]; if (!q.f || q.m || q.k !== e.k || e.i - q.i > 24 || e.i < q.i) break; prev.push(q); }
   for (let c = 0; c < 122; c++) {
@@ -715,6 +804,7 @@ function lineHits(e, th) {   // peak positions (bins) of one line, past the blin
   if (e.hit && e.hit.th === th && e.hit.dz === knobDeadM) return e.hit.a;
   const a = [];
   if (e.m) { for (const m of decodeMarks(e).marks) if (m.l / 4 > th && m.p * BIN >= knobDeadM) a.push(m.p); }
+  else if (e.h) { for (let c = Math.max(1, Math.ceil(knobDeadM / BIN)); c < e.n - 1; c++) { const l = e.hd[c] / 4; if (l > th && l >= e.hd[c - 1] / 4 && l > e.hd[c + 1] / 4) a.push(c); } }   // D144
   else { const F = 4 >> (e.k || 0), L = c => parseInt(e.c[c], 16) || 0;
     for (let c = Math.ceil(knobDeadM / (BIN * F)); c < 122; c++) { const l = L(c); if (l > th && l >= L(c - 1) && l > L(c + 1)) a.push(c * F + (F - 1) / 2); } }
   e.hit = { th, dz: knobDeadM, a }; return a;
@@ -729,7 +819,7 @@ let beamDeg = 14;   // transducer beam angle (full cone, -3 dB), chalet setting 
 const coneWidth = dm => 2 * dm * Math.tan(beamDeg * Math.PI / 360);   // disc covered at that depth, metres
 // D57 bottom dead zone: a fish closer to the bottom than this is inside the bottom echo and cannot be seen.
 // A fish at the beam edge returns as late as the bottom under the hole (slant range) + half the ping length (Ona & Mitson).
-const dzK = { cycles: 16, sound: 53 };   // knob values, updated when the hole knobs load
+const dzK = { cycles: 8, sound: 53 };   // knob values, updated when the hole knobs load
 const deadZone = b => b * (1 - Math.cos(beamDeg * Math.PI / 360)) + dzK.cycles / 200000 * (1350 + dzK.sound) / 2;
 let L = { nodes: [] }, names = {}, lines = {}, focus = 0, since = 0, queue = [], bg = null, bgKey = '', recs = [], info = {};
 let selSlot = null, userPicked = false, playing = true;
@@ -763,8 +853,10 @@ function loadPings() {
     if (d.elast != null && d.elast < echoSince) { echoSince = 0; echoes = []; }
     const ne = d.echo || [];
     if (ne.length) {   // D93: new raw lines: the last columns are drawn again with them underneath
-      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); echoes.push({ i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0, s: +l[5] || 0, m: +l[6] || 0, f: +l[7] || 0 }); });   // D142: f = fine levels (show all)   // D112: k = cell size 10 / 5 / 2.5 cm; D126: s = sharpened on the hub; D133: m = echo marks line
-      if (echoes.length > 260) echoes.splice(0, echoes.length - 260);   // D107: a line per ping on ESP-NOW: keep the whole 60 s waterfall
+      ne.forEach(l => { echoSince = Math.max(echoSince, l[0]); const o = { i: l[1], nf: -l[2], c: String(l[3] || ''), k: +l[4] || 0, s: +l[5] || 0, m: +l[6] || 0, f: +l[7] || 0 };
+        if (+l[8]) { const d = decodeHd(o.c); if (!d) return; o.h = 1; o.hd = d.db; o.n = d.db.length; o.all = d.all; o.c = ''; }   // D144: HD line
+        echoes.push(o); });   // D142: f = fine levels (show all)   // D112: k = cell size 10 / 5 / 2.5 cm; D126: s = sharpened on the hub; D133: m = echo marks line
+      if (echoes.length > 520) echoes.splice(0, echoes.length - 520);   // D144: marks + HD line per second (was 260)   // D107: a line per ping on ESP-NOW: keep the whole 60 s waterfall
       for (let k = Math.max(0, recs.length - 24); k < recs.length; k++) recs[k].px = recs[k].pxh = null;
     }
   }).catch(() => {}).then(() => { pingBusy = false; });
@@ -791,6 +883,8 @@ function renderHoles() {
   if (window.suiteTab === 'sonar' && window.suiteGlance) setTimeout(() => window.suiteGlance(), 0);   // D82: the Sonar tab cards carry the preview (the Holes tab has its own 2 s poll)
   if (!nodes.length) h = '<p class="empty">No sonar hole heard yet.' + (L.sim ? ' Test mode is on: hubs start sending within a few seconds.' : ' Turn on the test mode to get fake data.') + '</p>';
   $('holes').innerHTML = h;
+  // D145: on a phone the echogram comes first: the holes are a row of chips above it (the cards stay further down)
+  $('hchips').innerHTML = nodes.map(n => { const ln = lines[n.node] || {}; return `<button type="button" class="chip${ln.fish ? ' fish' : ''}${n.fish ? ' has' : ''}" data-n="${n.node}" aria-pressed="${n.node === L.focus}"><i></i>${nameOf(n.node)}${n.fish ? ' · ' + n.fish : ''}</button>`; }).join('');
   if ((L.focus || 0) !== focus) setFocus(L.focus || 0);
   { const fo = L.follow !== false; $('follow').setAttribute('aria-pressed', String(fo));   // D80
     $('followWhy').textContent = !fo ? 'off: you pick the hole' : L.trip_s ? `FISH ON — back to following in ${Math.ceil(L.trip_s / 10) * 10} s` :
@@ -802,6 +896,7 @@ function renderHoles() {
   if (f) { const k = f.bgver + '/' + f.bgmask; if (k !== bgKey) { bgKey = k; loadBg(); } }
 }
 $('holes').addEventListener('click', e => { const b = e.target.closest('.hole'); if (b) post({ focus: +b.dataset.n }); });
+$('hchips').addEventListener('click', e => { const b = e.target.closest('.chip'); if (b) post({ focus: +b.dataset.n }); });
 $('sim').addEventListener('click', () => post({ sim: !L.sim }));
 // D80 / D85: a tap while a hand pick is holding the watched hole hands it back to Follow at once, instead of turning Follow off
 const followTap = () => post({ follow: (L.follow !== false && L.pin_s > 0) ? true : !(L.follow !== false) });
@@ -926,8 +1021,19 @@ function pixels(rec, hd) {   // D134: hd = the main waterfall: echo marks are dr
     const ET = ETOPU(th), lv = (l, i, f) => { if (l <= th) return; putM(i, SV(((l - th) / (ET - th)) * G * f, i >= cb)); };   // D137: range, boost
     if (!opts.bgRemove) {
       const rw = rawFor(rec.i);
-      if (rw) { const F = 4 >> (rw.k || 0); for (let c = Math.round(knobDeadM / (BIN * F)); c < 122; c++) { const l = parseInt(rw.c[c], 16) || 0; for (let k = 0; k < F; k++) lv(l, c * F + k, 0.5); } }
+      if (rw && rw.h) { for (let i = dz; i < Math.min(N, rw.n); i++) lv(rw.hd[i] / 4, i, 0.5); }   // D144: HD texture, 2.5 cm
+      else if (rw) { const F = 4 >> (rw.k || 0); for (let c = Math.round(knobDeadM / (BIN * F)); c < 122; c++) { const l = parseInt(rw.c[c], 16) || 0; for (let k = 0; k < F; k++) lv(l, c * F + k, 0.5); } }
       else for (let i = dz; i < N; i++) lv((M.base(i) - e.nf) / 4, i, 0.5);
+    } else {
+      // D144: a hole deeper than the marks' 6 m window: above the window the HD line is all there is. Drawn as what
+      // stands out of its surroundings (over the higher of the lowest cells within 25 cm either side: a slope such as
+      // the ring-down tail gives nothing), dimmer than a mark.
+      const rw = rawFor(rec.i);
+      if (rw && rw.h && M.a > dz) for (let i = dz; i < Math.min(N, rw.n, M.a); i++) {
+        let lo = 1e9, hi = 1e9; for (let k = 1; k <= 10; k++) { if (i - k >= 0) lo = Math.min(lo, rw.hd[i - k]); if (i + k < rw.n) hi = Math.min(hi, rw.hd[i + k]); }
+        const o = rw.hd[i] - Math.max(lo === 1e9 ? 0 : lo, hi === 1e9 ? 0 : hi);
+        if (o > 2) putM(i, SV(((o - 2) / BRTOP()) * G * 0.7, i >= cb));
+      }
     }
     rec.mk = { ms: M.marks, base: M.base, nf: e.nf, th, G, et: ET, bold: vopt.bold ? new Set(boldHits(e, th)) : null };   // D134: for the high-definition overlay
     if (!hd) for (const m of M.marks) {   // a gaussian bell of the mark's width at -6 dB, drawn per 2.5 cm bin
@@ -943,13 +1049,13 @@ function pixels(rec, hd) {   // D134: hd = the main waterfall: echo marks are dr
     // rest stretched over the palette; the blind zone (ring-down) a flat grey band; below the bottom echo dimmed so
     // the second bottom echo (and a barrel's wall reverb) does not look like a fish.
     const F = 4 >> (e.k || 0), CM = 0.025 * F;   // D112: bins per cell (4 / 2 / 1) and the cell size in m
-    const th = ETH[vopt.weak] || ETH[0], c0 = Math.round(knobDeadM / CM), cb = rec.b != null ? Math.ceil((rec.b + 0.1) / CM) : 122;
+    const NC = cellsOf(e), th = ETH[vopt.weak] || ETH[0], c0 = Math.round(knobDeadM / CM), cb = rec.b != null ? Math.ceil((rec.b + 0.1) / CM) : NC;
     for (let i = 0; i < Math.min(N, Math.round(knobDeadM / BIN)); i++) { px[i * 4] = 36; px[i * 4 + 1] = 48; px[i * 4 + 2] = 54; }
     let SH = null;   // D125 / D126 experimental: sharpened cells (browser, or already on the hub: e.s), colour by area,
     // background removed (baseline = lower envelope); levels as floats; 10 cm cells too coarse: raw
     const jsSharp = opts.sharp && !e.s;
     const FD = e.f ? fineCells(e) : null;   // D142: show-all line, dB over the floor per cell
-    if (F < 4 && (jsSharp || opts.sharpArea || opts.bgRemove)) { const dbs = []; for (let c = 0; c < 122; c++) dbs.push(FD ? FD[c] : (parseInt(e.c[c], 16) || 0) * 4);
+    if (F < 4 && (jsSharp || opts.sharpArea || opts.bgRemove)) { const dbs = []; for (let c = 0; c < NC; c++) dbs.push(FD ? FD[c] : (parseInt(e.c[c], 16) || 0) * 4);
       try { const r = sharpenEcho(dbs, 0, rec.b || 0, CM, { dead: knobDeadM, noDeconv: !jsSharp }); let v = opts.sharpArea ? r.area : r.out;
         if (opts.bgRemove) v = v.map((x, c) => Math.max(0, x - r.base[c])); SH = v.map(x => x / 4); } catch (err) { SH = null; } }
     // D126: background removed = levels over the baseline, not over the noise floor: an echo sits ~10 dB over a ring
@@ -957,8 +1063,8 @@ function pixels(rec, hd) {   // D134: hd = the main waterfall: echo marks are dr
     const thU = opts.bgRemove && SH ? Math.max(0.5, th / 2) : th, topU = opts.bgRemove && SH ? Math.max(5 * RANGE_DB() / 40, thU + 1) : ETOPU(th);   // D137: range
     // D142: a show-all line with "Weak echoes" on Show all is painted from the floor up (the noise is a dim texture the eye
     // integrates: a weak echo that repeats stands out of it), on a curve that gives the first 10 dB a third of the palette
-    const allV = FD && !SH && !vopt.weak;
-    for (let c = c0; c < 122; c++) { const l = SH ? Math.min(15, SH[c]) : FD ? FD[c] / 4 : (parseInt(e.c[c], 16) || 0); const t0 = allV ? 0 : thU; if (l <= t0) continue;
+    const allV = FD && (!e.h || e.all) && !SH && !vopt.weak;   // D144: an HD texture line (cut at 3 dB) stays on the normal scale
+    for (let c = c0; c < NC; c++) { const l = SH ? Math.min(15, SH[c]) : FD ? FD[c] / 4 : (parseInt(e.c[c], 16) || 0); const t0 = allV ? 0 : thU; if (l <= t0) continue;
       let x = (l - t0) / (topU - t0); if (allV) x = Math.pow(clamp(x, 0, 1), 0.6);
       const v = SV(x * G, c >= cb); for (let k = 0; k < F; k++) put(c * F + k, PAL, v); }
   }
@@ -1225,21 +1331,36 @@ $('tlist').addEventListener('click', pickRow);
 
 /* ---------- Controls ---------- */
 const TOGGLES = [
-  ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second on LoRa, every ping on ESP-NOW (cells of 2.5 cm in a barrel, 5 cm to 6 m, 10 cm deeper, 4 dB per step over the noise floor): the waterfall shows it underneath the marks, like a fish finder. Water (under the "Weak echoes" level) stays dark, the blind zone is a grey band, below the bottom is dimmed. Off: only what the detector reported.'],
-  ['showAll', 'Show all (weak echoes)', 'D142: the watched hole sends its raw ping on every line with 1 dB steps near the noise floor (knob "Echogram sent as" = 2, set for every hole from here), and the echogram is painted from the floor up: the noise shows as a dim texture and a weak echo that repeats (a fish at 4-5 m, the lure) stands out of it. No echo marks, no sharpening in this mode. Off: back to echo marks.'],
-  ['sharp', 'Sharpened echogram (experimental)', 'D125: the raw echogram with each echo narrowed in this browser (deconvolved with the hump of one target, measured on the ball): two echoes 7-10 cm apart show as two, peak heights kept. Better: knob "Sharpened echogram" (Settings, sonar knobs) does it on the hub before the line is sent (finer, 1 = sharpened, 2 = + doublet split, two echoes ~5 cm apart); this switch is then ignored. Cells of 2.5 or 5 cm only (deeper than 6 m the 10 cm cells stay raw).'],
-  ['bgRemove', 'Background removed (experimental)', 'D126: paints only what rises over the lower envelope of the ping (ring-down tail, noise floor and slow swells removed, like a baseline-restored cytometry plot): water goes dark, echoes stand out. With "Colour by echo area": strength by area.'],
-  ['sharpArea', 'Colour by echo area (experimental)', 'D125: with the sharpened echogram, each echo is coloured by its area (total echo) instead of its peak: a single fish keeps its colour, a school, weeds or the bottom (wider) look stronger, a one-cell noise spike weaker.'],
-  ['hdMarks', 'High-definition echo marks', 'D134: with echo marks from the hub (knob "Echogram sent as" = 1), each echo is drawn at its exact depth (3 mm) with its measured thickness, in screen pixels, instead of in 2.5 cm rows; the bottom is drawn from the bottom line down. Off: the marks are painted in the echogram grid as before. No effect on raw lines.'],
+  ['echogram', 'Raw echogram', 'The focus hole sends its raw ping once a second on LoRa, every ping on ESP-NOW (the HD line: cells of 2.5 cm at any depth, 1 dB steps near the noise floor; legacy line: 10 cm cells past 6 m, 4 dB steps): the waterfall shows it underneath the marks, like a fish finder. Water (under the "Weak echoes" level) stays dark, the blind zone is a grey band, below the bottom is dimmed. Off: only what the detector reported.'],
+  ['showAll', 'Show all (weak echoes)', 'The watched hole sends its raw ping on every line in 2.5 cm cells with 1 dB steps near the noise floor (knob "Echogram sent as" = 2, set for every hole from here), and the echogram is painted from the floor up: the noise shows as a dim texture and a weak echo that repeats (a fish at 4-5 m, the lure) stands out of it. No echo marks, no sharpening in this mode. Off: back to echo marks.'],
+  ['sharp', 'Sharpen in the browser (legacy lines)', 'Only for lines the hub did not sharpen itself (its knob "Sharpened echogram" is on by default, so this switch normally changes nothing). The raw echogram with each echo narrowed in this browser (deconvolved with the hump of one target, measured on the ball): two echoes 7-10 cm apart show as two, peak heights kept. Better: knob "Sharpened echogram" (Settings, sonar knobs) does it on the hub before the line is sent (finer, 1 = sharpened, 2 = + doublet split, two echoes ~5 cm apart); this switch is then ignored. HD lines and 2.5 / 5 cm cells only (the legacy 10 cm line stays raw).'],
+  ['bgRemove', 'Background removed', 'Paints only what rises over the lower envelope of the ping (ring-down tail, noise floor and slow swells removed, like a baseline-restored cytometry plot): water goes dark, echoes stand out. With "Colour by echo area": strength by area.'],
+  ['sharpArea', 'Colour by echo area', 'With the sharpened echogram, each echo is coloured by its area (total echo) instead of its peak: a single fish keeps its colour, a school, weeds or the bottom (wider) look stronger, a one-cell noise spike weaker.'],
+  ['hdMarks', 'High-definition echo marks', 'With echo marks from the hub (knob "Echogram sent as" = 1), each echo is drawn at its exact depth (3 mm) with its measured thickness, in screen pixels, instead of in 2.5 cm rows; the bottom is drawn from the bottom line down. Off: the marks are painted in the echogram grid as before. No effect on raw lines.'],
   ['overlays', 'Overlays', 'Bottom line coloured by hardness, bait line, and tracked targets.'],
   ['bgsep', 'Still scene muted', 'Lake bed in sand colour, weeds and structure in green, both faded. Anything that moves stays in warm colours.'],
   ['cone', 'Beam width per depth', 'Right edge: the width of the disc the sonar sees at each depth (beam angle in Settings → Sonar). A fish "at 10 ft" is somewhere in that disc, not necessarily under the hole.'],
   ['dz', 'Bottom blind band', 'Light band just above the bottom line: a fish that close to the bottom returns at the same time as the bottom itself and cannot be told apart (any sonar). Thicker in deep water and with a long ping.']
 ];
 const tUl = $('toggles');
-tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('')
-  + '<li><span class="name">Experimental views now</span><span class="desc" id="expSt">–</span></li>';   // D126b
+const TLV = { echogram: 'exp', showAll: 'exp', sharp: 'exp', bgRemove: 'exp', sharpArea: 'exp', hdMarks: 'exp', overlays: 'adv', bgsep: 'adv', cone: 'adv', dz: 'adv' };   // D145: the View choice replaces the first six
+tUl.innerHTML = TOGGLES.map(([k, n, d]) => `<li${TLV[k] ? ' data-lv="' + TLV[k] + '"' : ''}><span class="name" id="tn-${k}">${n}</span><span class="desc">${d}</span><button type="button" class="switch" role="switch" data-key="${k}" aria-labelledby="tn-${k}" aria-checked="true"></button></li>`).join('')
+  + '<li data-lv="exp"><span class="name">Experimental views now</span><span class="desc" id="expSt">–</span></li>';   // D126b
+// D145: one View choice instead of five switches. Marks = each echo a crisp mark, background removed (Frank's default);
+// Marks + texture = the marks over the raw ping; Show all = the raw ping from the noise floor up (hub knob echo 2).
+const VIEWS = { marks: 'Each echo is a crisp mark at its exact depth. The ring-down and the noise floor are left out.', texture: 'The marks over the raw ping, like a fish finder.', all: 'The raw ping from the noise floor up, no marks. Use it to look for weak echoes.' };
+const viewNow = () => opts.showAll ? 'all' : opts.bgRemove ? 'marks' : 'texture';
+function setView(v, fromUser) {
+  const wasAll = opts.showAll;
+  opts.echogram = true; opts.hdMarks = true; opts.showAll = v === 'all'; opts.bgRemove = v === 'marks';
+  if (fromUser) { try { localStorage.setItem('sonarViewMode', v); } catch (e) { /* private mode */ } if (wasAll !== opts.showAll) postKnobs({ key: 'echo', v: opts.showAll ? 2 : 1 }); }
+  recs.forEach(r => r.px = r.pxh = null);
+}
+{ let v0 = 'marks'; try { v0 = localStorage.getItem('sonarViewMode') || 'marks'; } catch (e) { /* private mode */ } if (v0 !== 'all') setView(VIEWS[v0] ? v0 : 'marks', false); }   // "show all" follows the hub knob, read below
+$('viewSeg').addEventListener('click', e => { const b = e.target.closest('[data-view]'); if (!b) return; setView(b.dataset.view, true); render(); syncControls(); });
+document.addEventListener('click', e => { const d = e.target.closest('.toggles .desc'); if (d) d.classList.toggle('open'); });
 function syncControls() {
+  { const v = viewNow(); $('viewSeg').querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === v))); $('viewDesc').textContent = VIEWS[v]; }
   tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key])));
   document.querySelectorAll('[data-units]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.units === units)));
   $('play').textContent = playing ? 'Pause' : 'Play'; $('play').setAttribute('aria-pressed', String(playing));
@@ -1264,7 +1385,7 @@ const vChanged = () => { saveV(); recs.forEach(r => r.px = r.pxh = null); render
 $('vDepth').addEventListener('change', e => { vopt.depth = e.target.value; vChanged(); });
 $('vGain').addEventListener('input', e => { vopt.gain = +e.target.value; vChanged(); });
 $('vWeak').addEventListener('change', e => { vopt.weak = +e.target.value; vChanged(); });
-function vLabels() { $('vBoostV').textContent = `${vopt.boost || 0} %`; $('vRangeV').textContent = `${RANGE_DB()} dB`; }   // D137
+function vLabels() { $('vBoostV').textContent = `${vopt.boost || 0} %`; $('vRangeV').textContent = `${RANGE_DB()} dB`; document.querySelectorAll('[data-vrange]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.vrange === RANGE_DB()))); }   // D137
 $('vBoost').addEventListener('input', e => { vopt.boost = +e.target.value; vLabels(); vChanged(); });
 $('vRange').addEventListener('input', e => { vopt.range = +e.target.value; vLabels(); vChanged(); });
 $('vReset').addEventListener('click', () => { vopt.boost = 0; vopt.range = 40; $('vBoost').value = '0'; $('vRange').value = '40'; vLabels(); vChanged(); });   // D137b
@@ -1282,37 +1403,38 @@ const KHELP = {
   dead: ['Blind zone', 'Nothing is reported closer than this to the transducer (ringing, ice, bubbles). Lake: 0.5 m (ring-down measured 0.33 m, D88). Barrel test: 0.3 m.'],
   bsmooth: ['Bottom line smoothing', 'Lower = steadier bottom line, slower to follow a real change.'],
   learn: ['Still-scene fading speed', 'How fast things that do not move (bed, weeds) fade to the muted colours.'],
-  range: ['Colour range', 'Loudness span mapped to the colours. Smaller = more contrast.'],
+  range: ['Colour range (legacy cells)', 'Span under the bottom echo used for the legacy echogram cells and the still scene. The echogram colours on this page are set by "Full colour at" above the echogram instead.'],
   tvg: ['Deep echo boost', 'Boosts deeper echoes to make up for spreading. On for normal use.'],
-  cycles: ['Ping length, overview', 'Longer ping = more energy, longer ringing. Base mode.'],
-  fcycles: ['Ping length, watching', 'Longer ping = stronger echoes (07nov sweep: 8 -> 32 cycles = +11 dB), shorter = sharper detail. Default 32.'],
-  gain: ['Receiver gain', '0-3 = 10 / 12.5 / 15 / 20x. Lower if the bench line says CLIPPED.'],
+  cycles: ['Ping length, overview', 'Shorter = sharper: at 8 (default) a small target is one clean echo about 10 cm long. 16 = about 3 dB stronger for deep or faint fish, but close echoes blur together. Above 16 nothing more is gained.'],
+  fcycles: ['Ping length, watching', 'Same as the overview ping length, used while you watch the hole. Default 8.'],
+  gain: ['Receiver gain', '0-3 = 10 / 12.5 / 15 / 20x. Leave at 0: more gain lifts the noise by the same amount and brings strong echoes closer to clipping.'],
   pinghz: ['Ping rate when busy', 'Pings per second (x0.25) while fish are around or you watch the hole.'],
   idlehz: ['Ping rate when quiet', 'Pings per second (x0.25) when nothing is in the water. Lower saves battery.'],
-  avg: ['Bursts averaged', 'Bursts fired and averaged for each ping, also while you watch the hole (D134). Averaging does not make an echo louder: it narrows the noise flicker so a weaker echo stands clear of it (2 bursts ~ +2 dB, 4 ~ +3.5 dB detection, measured on the 04nov sweep). Each burst costs drive energy (battery) and ~30 ms. 1 = one burst per ping in focus (before D134).'],
-  freq: ['Frequencies', '2 = 200 kHz only (default since D94: the transducer is 14-16 dB down at 190 and 210 kHz, so mixing them cost 4.4 dB of echo and tripled the ping time). 0 = 190/200/210 kHz every ping, 1 = one at a time.'],
+  avg: ['Bursts averaged', 'Bursts fired and averaged for each ping, also while you watch the hole. Averaging does not make an echo louder: it narrows the noise flicker so a weaker echo stands clear of it (2 bursts ~ +2 dB, 4 ~ +3.5 dB detection, measured on the 04nov sweep). Each burst costs drive energy (battery) and ~30 ms. 1 = one burst per ping in focus (before D134).'],
+  freq: ['Frequencies', '2 = 200 kHz only (default: the transducer is 14-16 dB down at 190 and 210 kHz, so mixing them cost 4.4 dB of echo and tripled the ping time). 0 = 190/200/210 kHz every ping, 1 = one at a time.'],
   sound: ['Speed of sound', '1350 + value m/s. 53 = 1403 m/s, fresh water near 0 C.'],
   bpf: ['Filter centre code', 'TUSS4470 band-pass code for 200 kHz (0x1D = 196.8 kHz). Driver setting.'],
   thresh: ['Edge threshold', 'Comparator level for the edge-timing output (only with OUT_4 wired).'],
   det: ['Fish detector (experimental)', '0 = classic (prototype): a peak 10 dB (snr knob) over the noise floor and over its surroundings, searched after the ring-down. 1 = adaptive: an echo that stands out from the learned scene at its depth, summed under the shape of one echo (matched filter) and compared with that depth\'s own fluctuation (radar-style constant false alarm rate); threshold = snr / 2 dB; also searches inside the ring-down tail. The first 24 pings learn the scene. Barrel test 08nov: the ball still found at 50 % when 15 dB weaker (classic: 3 dB), no more false targets. D127.'],
-  sharp: ['Sharpened echogram', '2 = default (D128): the hub sharpens each line before sending it (deconvolution with the hump of one target, peak heights kept, each echo down to the baseline, a flat echo is not broken into fish) + doublet split: an echo that is really two (about 5 cm apart or more) is drawn as two. 1 = sharpened without the doublet split. 0 = legacy raw echogram line. Echogram only: bottom, fish marks and alarms stay on the raw data. No extra memory (D126f). D126.'],
-  echo: ['Echogram sent as', '1 = echo marks (default since D135): the hub sends the fitted baseline (3 numbers) and one entry per echo (depth to 3 mm, height to 0.5 dB, width), 14-35 bytes instead of 66, with a raw line every 10th for the texture: about 60 % less echogram airtime, crisp marks at any depth (switch "High-definition echo marks"). On LoRa each line holds the strongest of the 4 pings since the last one. 0 = legacy raw line: 122 cells of 4 dB. D133.'],
+  sharp: ['Sharpened echogram', '2 = default: the hub sharpens each line before sending it (deconvolution with the hump of one target, peak heights kept, each echo down to the baseline, a flat echo is not broken into fish) + doublet split: an echo that is really two (about 5 cm apart or more) is drawn as two. 1 = sharpened without the doublet split. 0 = legacy raw echogram line. Echogram only: bottom, fish marks and alarms stay on the raw data. No extra memory (D126f). D126.'],
+  echo: ['Echogram sent as', '1 = echo marks (default): the hub sends the fitted baseline (3 numbers) and one entry per echo (depth to 3 mm, height to 0.5 dB, width), 14-47 bytes, up to 12 echoes, at any bottom depth (a hole deeper than 6 m: the marks cover its bottom 6 m), plus the HD line for the texture: one cell per 2.5 cm, 1 dB steps near the floor, surface to just under the bottom, about 25-40 bytes in quiet water. On LoRa each line holds the strongest of the 4 pings since the last one. 2 = show all: the HD line alone, from the noise floor up. 0 = legacy raw line: 122 cells of 4 dB. '],
   drive: ['Drive stage', '0 = the TUSS4470 drives the transducer itself (shield, pod as ordered). 1 = transformer: only with the transformer parts fitted on the pod v0.8 (docs: TRANSFORMER_200K.md); a direct-drive board pings nothing in this mode.'],
   ftrim: ['Burst frequency', 'Ping frequency, 180 + this value in kHz (20 = 200 kHz). The bench page Tune button measures the best one for your transducer.'],
   bmax: ['Look for the bottom above', 'The bottom is searched shallower than this (x0.1 m, 0 = everywhere). Only for the barrel test: there the floor\'s second echo can be stronger than the floor itself (a lake never does that).'],
   bmin: ['Look for the bottom below', 'The bottom is searched deeper than this (x0.1 m). Lake 0.6 m; barrel test: 0.2 m (the ring-down end found on each ping moves it deeper anyway).'],
-  vdrv: ['Drive voltage', 'Transducer drive, volts (max 20). Must stay 1.5 V below the MT3608 setting (21.5 V for 20; the shield diode drops ~0.8 V).'],
+  vdrv: ['Drive voltage', 'Transducer drive from the chip\'s own regulator, volts (max 20). Ignored when the drive regulator is set to 2 (external supply, the default): the voltage is then whatever the supply gives.'],
   jitter: ['Ping timing jitter', 'Random wait (0 to this many ms) before each ping so neighbouring tip-ups never ping in step. Needed for the interference filter. 0 = off.'],
   spike: ['Interference filter', 'Removes a blip that appears on one ping only, at a depth where the two pings before were this much quieter (another tip-up\'s ping). Lower = removes more, may thin a fast fish. 0 = off.'],
   echolen: ['Max fish echo length', 'An echo longer than this many ping lengths (x0.1) is weeds, a thermocline or a school, not one fish, and is not tracked. 0 = off.'],
-  vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench). 2 = external drive supply on the VDRV pin (up to 36 V, only once that supply is wired: see SONAR_DRIVER.md, D108).'],
+  vmode: ['Drive regulator', '0 = always on, as the shield reference firmware (proven). 1 = off while listening, quieter receive (test on the bench). 2 = external drive supply on the VDRV pin (the 30 V build, README 4.4.6; the default). A board without that wiring notices it and uses its own regulator until the next boot.'],
 };
-const WATER = { lake: { dead: 5, bmin: 6, bmax: 0, gain: 3 }, shallow: { dead: 3, bmin: 2, bmax: 0, gain: 2 }, bucket: { dead: 3, bmin: 2, bmax: 12, gain: 2 } };   // D117: Lake = receiver gain 20 V/V (+2.2 dB SNR on the 07nov sweep; in the barrel it stretched the ring-down tail)   // D104: bucket = the barrel test, bottom under 1.2 m
+const WATER = { lake: { dead: 5, bmin: 6, bmax: 0, gain: 0 }, shallow: { dead: 3, bmin: 2, bmax: 0, gain: 0 }, bucket: { dead: 3, bmin: 2, bmax: 12, gain: 0 } };   // D158: gain 0 in every preset (D152: the floor follows the gain, 14nov sweeps). Before:   // D117: Lake = receiver gain 20 V/V (+2.2 dB SNR on the 07nov sweep; in the barrel it stretched the ring-down tail)   // D104: bucket = the barrel test, bottom under 1.2 m
 function renderKnobs() {
   if (!K) return;
-  document.querySelectorAll('#kPreset [data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
+  document.querySelectorAll('[data-preset]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.preset === K.preset)));
   const kv = {}; K.knobs.forEach(k => { kv[k.key] = k.v; });
-  if (opts.showAll !== (kv.echo === 2)) { opts.showAll = kv.echo === 2; tUl.querySelectorAll('.switch').forEach(b => b.setAttribute('aria-checked', String(opts[b.dataset.key]))); }   // D142: the switch follows the knob
+  if (opts.showAll !== (kv.echo === 2)) { let v = 'marks'; try { v = localStorage.getItem('sonarViewMode') || 'marks'; } catch (e) { /* private mode */ } setView(kv.echo === 2 ? 'all' : (v === 'texture' ? 'texture' : 'marks'), false); syncControls(); }   // D142 / D145: the view follows the hub knob
+  document.querySelectorAll('[data-kset]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.kset.split(',').every(p => { const q = p.split(':'); return kv[q[0]] === +q[1]; }))));   // D160
   if (kv.cycles) dzK.cycles = kv.cycles; if (kv.sound != null) dzK.sound = kv.sound;
   if (kv.dead != null && kv.dead * 0.1 !== knobDeadM) { knobDeadM = kv.dead * 0.1; recs.forEach(r => { r.px = r.pxh = null; }); }   // D101: blind band
   const water = Object.keys(WATER).find(w => WATER[w].dead === kv.dead && WATER[w].bmin === kv.bmin && WATER[w].bmax === (kv.bmax || 0) && WATER[w].gain === kv.gain) || null;
@@ -1322,6 +1444,14 @@ function renderKnobs() {
   $('knobs').innerHTML = K.knobs.map(k => { const h = KHELP[k.key] || [k.name, '']; return `<li><span class="name">${h[0]}</span><input type="number" data-knob="${k.key}" min="${k.lo}" max="${k.hi}" value="${k.v}" style="width:5.5em" aria-label="${h[0]}"><span class="desc">${h[1]} <i>${k.unit}${k.v !== k.def ? ' · default ' + k.def : ''}</i></span></li>`; }).join('');
 }
 $('kAdv').addEventListener('change', renderKnobs);
+// D160: on-the-ice adjustments: each button sets one or two hub knobs
+document.querySelector('.icetune').addEventListener('click', e => {
+  const p = e.target.closest('[data-preset]'); if (p) { postKnobs({ preset: +p.dataset.preset }); return; }
+  const vr = e.target.closest('[data-vrange]'); if (vr) { vopt.range = +vr.dataset.vrange; $('vRange').value = String(RANGE_DB()); vLabels(); vChanged(); return; }
+  const b = e.target.closest('[data-kset]'); if (!b) return;
+  b.dataset.kset.split(',').reduce((ch, s) => { const q = s.split(':'); return ch.then(() => postKnobs({ key: q[0], v: +q[1] })); }, Promise.resolve());
+});
+$('kDefaults2').addEventListener('click', () => $('kDefaults').click());
 $('kWater').addEventListener('click', e => { const b = e.target.closest('[data-water]'); if (!b) return; const w = WATER[b.dataset.water]; postKnobs({ key: 'dead', v: w.dead }).then(() => postKnobs({ key: 'bmin', v: w.bmin })).then(() => postKnobs({ key: 'bmax', v: w.bmax })).then(() => postKnobs({ key: 'gain', v: w.gain })); });
 function loadKnobs() { sfetch('/api/sonar/knobs').then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
 function postKnobs(o) { return sfetch('/api/sonar/knobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o) }).then(r => r.json()).then(d => { K = d; renderKnobs(); }).catch(() => {}); }
@@ -1399,8 +1529,19 @@ function showTab(t) {
   if (t === 'wifi') loadWifi();
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
+// D145: option level of this phone (Simple / Advanced / Expert); the Radio tab starts at Advanced
+function setLevel(l) {
+  if (['simple', 'advanced', 'expert', 'ice'].indexOf(l) < 0) l = 'simple';   // D160: 'ice' = simple + the on-the-ice adjustments
+  document.documentElement.dataset.level = l;
+  try { localStorage.setItem('uiLevel', l); } catch (e) { /* private mode */ }
+  document.querySelectorAll('[data-level]').forEach(b => { if (b.tagName === 'BUTTON') b.setAttribute('aria-pressed', String(b.dataset.level === l)); });
+  if ((l === 'simple' || l === 'ice') && tab === 'radio') showTab('holes');
+}
+document.addEventListener('click', e => { const b = e.target.closest('button[data-level]'); if (b) setLevel(b.dataset.level); });
+setLevel(document.documentElement.dataset.level);
 function initialTab() {
   const h = (location.hash || '').slice(1), p = location.pathname.replace(/^\/+/, '');
+  if ((h === 'radio' || p === 'radio') && document.documentElement.dataset.level === 'simple') setLevel('advanced');   // a link straight to the Radio tab shows it
   for (const k of ['holes', 'sonar', 'radio', 'settings', 'wifi']) if (h === k || p === k) return k;
   return 'holes';
 }
@@ -1448,7 +1589,7 @@ function armButton(n) {
     const txt = (q.want ? 'Arm' : 'Disarm') + (beaconing ? ': sending…' : ': sent, waiting for the hole…');
     return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" disabled title="the hole reports the new state with its next message (tip-up asleep: up to 1 min)">${txt}</button>`;
   }
-  return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="D61: same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>`;
+  return `<button class="btn small" type="button" data-arm="${n.id}" data-armed="${n.disarmed ? 0 : 1}" title="Same as the button on the hole">${n.disarmed ? 'Arm' : 'Disarm'}</button>`;
 }
 function applyStatus(d) { st = d; onStatus(); if (tab === 'settings') { renderNetwork(); stFillHoles(); } }
 function loadStatus() {
@@ -2059,7 +2200,7 @@ $('ngrid').addEventListener('click', nodeActions);
 /* ---------- Radio tab ---------- */
 const TM = { off: 0, rotate: 1, 'SF9/500': 2, 'SF8/500': 3, 'SF7/500': 4 };
 const f1 = (x, d) => x === undefined || x === null ? '–' : (+x).toFixed(d || 0);
-function loadRadio() { return api('/api/radio').then(d => { radio = d; renderRadio(); }).catch(() => {}); }
+function loadRadio() { return api('/api/radio').then(d => { radio = d; fwFill((d && d.hubs) || []); renderRadio(); }).catch(() => {}); }
 function postRadio(o) { api('/api/radio', o).then(d => { radio = d; renderRadio(); }).catch(() => {}); }
 function renderRadio() {
   const d = radio; if (!d) return;
@@ -2236,7 +2377,7 @@ function stRender(d) {
     h += ok(d.spi_ok, 'Shield answers on SPI', 'NO ANSWER: 3.3 V, GND, SCLK/MISO/MOSI/NCS');
     if (d.pins_swapped) h += info('MISO / MOSI', '<span class="badge warn">CROSSED</span> works for now, swap the two wires');
     if (d.spi_ok) {
-      h += ok(d.vdrv_ready, 'VDRV (21.5 V side)', 'NOT READY: MT3608 / J4 / 1N4001');
+      h += ok(d.vdrv_ready, 'VDRV (drive supply)', 'NOT READY: boost module / J4 / 1N4001 (30 V build: also wire B, DB107, 1N4148)');
       h += ok(!d.ee_fault, 'Chip EEPROM', 'CRC FAULT');
       if (!d.pinged) h += info('Test ping', '<span class="badge warn">DID NOT RUN</span> (driver not started: shield found after boot? reboot the hole and run again)');
       else {
@@ -2244,6 +2385,8 @@ function stRender(d) {
         h += ok(d.leakage, 'Burst reaches the receiver (time zero)', 'NO LEAKAGE SEEN');
         h += info('Transducer (heuristic)', d.ring_bins >= 8 ? `likely connected: ring-down ${d.ring_bins} bins` : `likely NOT connected: ring-down ${d.ring_bins} bins (open header measured 5)`);
         h += info('ADC', `raw max ${d.raw_max}${d.raw_max >= 4080 ? ' (CLIPPED)' : ''}, noise floor code ${d.noise_code}`);
+        if (d.gate_pin) h += d.gate_ok ? ok(true, 'Converter enable wire') + info('', `noise floor ${d.gate_drop_db >= 14 ? '14 dB or more' : d.gate_drop_db + ' dB'} lower with the converter switched off`)
+          : info('Converter enable wire', `<span class="badge warn">NO EFFECT</span> noise floor ${d.gate_drop_db} dB lower with the converter switched off: the wire is not switching it (enable pin, GPIO), or the converter is not the noise source`);   // D171
       }
     }
   }
@@ -2303,6 +2446,21 @@ function tnPoll(id, run, wait) {
     setTimeout(() => tnPoll(id, run, true), 3000);
   }).catch(() => { if (run === tnRun) setTimeout(() => tnPoll(id, run, wait), 4000); });
 }
+// D148: ask a hub to restart into its firmware update mode (two taps: the hub stops working for up to 10 min)
+function fwFill(all) {
+  const sel = $('fwHub'), key = all.map(x => x.id).join(',');
+  if (sel.dataset.key === key) return;
+  sel.dataset.key = key; const cur = sel.value;
+  sel.innerHTML = all.length ? all.map(x => `<option value="${x.id}">Hub ${x.id}${x.via ? ' (through hub ' + x.via + ')' : ''}</option>`).join('') : '<option value="">no hub heard yet</option>';
+  if (cur) sel.value = cur;
+}
+let fwArm = 0;
+$('fwGo').addEventListener('click', () => {
+  const hub = +$('fwHub').value; if (!hub) { $('fwMsg').textContent = 'No hub to ask yet.'; return; }
+  if (Date.now() - fwArm > 6000) { fwArm = Date.now(); $('fwGo').textContent = 'Tap again to confirm'; $('fwMsg').textContent = `Hub ${hub} will stop its sonar and alerts until it is updated or 10 minutes pass.`; setTimeout(() => { if (Date.now() - fwArm >= 6000) $('fwGo').textContent = 'Put this hub in update mode'; }, 6100); return; }
+  fwArm = 0; $('fwGo').textContent = 'Put this hub in update mode';
+  api('/api/node/update', { nodeId: hub }).then(j => { $('fwMsg').textContent = j && j.error ? j.error : `Asked hub ${hub}. Within a few seconds its hotspot "IceFish-Hub${hub}-UPDATE" appears: join it and open 192.168.4.1.`; });
+});
 function tnGo(mode) {   // 'run' | 'read' | 'clear'
   const holes = tnHoles(), run = ++tnRun;
   for (const k of Object.keys(tnState)) delete tnState[k];

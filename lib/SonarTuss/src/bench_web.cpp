@@ -14,7 +14,11 @@ static bool g_on = false;
 
 // recording ring: whole lines with a sequence number, oldest dropped past RING_BYTES / RING_LINES
 #ifndef BENCH_RING_BYTES
-#define BENCH_RING_BYTES (32 * 1024)   // WROOM tip-up (no mesh server, heap to spare); the hub builds set 12 kB (D88)
+#ifdef NODE_ROLE                       // D152: a LoRa board (hub / LoRa tip-up: mesh + web server share the heap): 10 kB, whatever env built it.
+#define BENCH_RING_BYTES (10 * 1024)   // The envs written by tools/flash.py never passed the flag, so every hub flashed with the tool carried the
+#else                                  // 32 kB ring: 22 kB of RAM, the cause of the 1-2 kB heap minimum and the 14 Nov watchdog reset.
+#define BENCH_RING_BYTES (32 * 1024)   // WROOM tip-up (no mesh server, heap to spare)
+#endif
 #endif
 // D92: a static byte ring, no heap at all (the deque of Strings made two copies of every 5 kB RAW line and its node
 // allocation aborted the hub on OOM during a sweep). Records: [seq 4 B][len 2 B][text], oldest overwritten; a record
@@ -60,11 +64,11 @@ table{width:100%;border-collapse:collapse}td{padding:3px 2px;font-size:14px}td i
 </style></head><body>
 <h1>Sonar bench <span id="node" class="k"></span></h1>
 <div class="card"><div class="g" id="vals"></div></div>
-<div class="card"><canvas id="cv" width="600" height="180"></canvas><div class="k">Last ping, 200 kHz: depth left to right (m), echo strength up. Red line = bottom. Orange = deconvolved (experimental). Purple dashed = baseline (lower envelope): each peak is measured over it.</div></div>
-<div class="card"><div class="row" style="gap:8px;align-items:flex-start"><div style="flex:1;min-width:0"><div class="k">Echogram, raw</div><canvas id="e0" width="240" height="220" style="height:220px"></canvas></div><div style="flex:1;min-width:0"><div class="k">Deconvolved (experimental, D125)</div><canvas id="e1" width="240" height="220" style="height:220px"></canvas></div></div>
-<label class="k"><input type="checkbox" id="ear"> colour the deconvolved view by echo area instead of height</label> <label class="k"><input type="checkbox" id="ebg"> background removed (D126)</label><div class="k">Time left to right (one column per page update), depth down to the bottom + 0.5 m. Raw and deconvolved: dark = noise floor, full colour 40 dB over it; background removed: from 2 dB over the baseline, full colour at 20 dB. Experimental: peaks narrowed with the hump measured on the ball (docs/SONAR_DECONV.md), heights kept.</div></div>
+<div class="card"><canvas id="cv" width="600" height="180"></canvas><div class="k">Last ping, 200 kHz: depth left to right (m), echo strength up. Red line = bottom. Orange = sharpened. Purple dashed = baseline (lower envelope): each peak is measured over it.</div></div>
+<div class="card"><div class="row" style="gap:8px;align-items:flex-start"><div style="flex:1;min-width:0"><div class="k">Echogram, raw</div><canvas id="e0" width="240" height="220" style="height:220px"></canvas></div><div style="flex:1;min-width:0"><div class="k">Sharpened</div><canvas id="e1" width="240" height="220" style="height:220px"></canvas></div></div>
+<label class="k"><input type="checkbox" id="ear"> colour the deconvolved view by echo area instead of height</label> <label class="k"><input type="checkbox" id="ebg"> background removed (D126)</label><div class="k">Time left to right (one column per page update), depth down to the bottom + 0.5 m. Raw and deconvolved: dark = noise floor, full colour 60 dB over it; background removed: from 2 dB over the baseline, full colour at 20 dB. Experimental: peaks narrowed with the hump measured on the ball (docs/SONAR_DECONV.md), heights kept.</div></div>
 <div class="card">
- <div class="row"><button id="rec">Start recording</button><button id="dl">Download</button><button id="raw">RAW now</button><button id="sw" title="automated preset run: gain, cycles, frequency, threshold, averaging, drive (recording must be on)">Sweep</button><button id="swr" title="D123: receiver sweep: band-pass Q 2/3/4/5, quiet listening (vmode 1), gain 3 (~3 min, recording on, transducer still)">RX sweep</button><button id="tn" title="D111: finds the best burst frequency and band-pass code for this transducer (~1 min, bottom in view, keep still)">Tune</button></div>
+ <div class="row"><button id="rec">Start recording</button><button id="dl">Download</button><button id="raw">RAW now</button><button id="sw" title="automated preset run: gain, cycles, frequency, threshold, averaging, drive (recording must be on)">Sweep</button><button id="swr" title="D123: receiver sweep: band-pass Q 2/3/4/5, quiet listening (vmode 1), gain 3 (~3 min, recording on, transducer still)">RX sweep</button><button id="swn" title="D167: listens WITHOUT pinging while the band-pass centre, Q and gain are stepped: shows where the steady background of the 30 V build sits (31 steps, about 1-3 min, recording on). Works in air or in water.">Noise scan</button><button id="bo" title="D172: holds the converter enable pin LOW for 6 s while the sonar keeps pinging. The 30 V output should fall and the ring-down shrink; the noise floor during those seconds is the receiver without the converter. Needs the enable wire.">Converter off 6 s</button><button id="tn" title="D111: finds the best burst frequency and band-pass code for this transducer (~1 min, bottom in view, keep still)">Tune</button></div>
  <p id="rinfo" class="k">Not recording.</p>
  <div class="row"><input id="note" placeholder="Note: ruler depth, target, temp..." style="flex:1"><button id="nb">Note</button></div>
  <div class="row" style="margin-top:8px"><span class="k">Record every</span><input id="every" type="number" min="1" max="20" value="1" style="width:56px"><span class="k">ping(s), RAW every</span><input id="rawe" type="number" min="0" max="600" value="30" style="width:64px"><span class="k">s</span><button id="ap">Apply</button></div>
@@ -85,7 +89,7 @@ function draw(){const c=$('cv'),x=c.getContext('2d'),w=c.width,h=c.height,hex=st
 // D125 experimental sharpened echogram (docs/SONAR_DECONV.md). Input: dB per bin (array), noise floor dB, bottom m,
 // bin size m. Output: {out: sharpened dB, area: area-equivalent dB} (same length; outside the window = input).
 // Steps: baseline = floor + ring-down decay through the lowest points (D126e) >= nf; linear
-// excess; Richardson-Lucy with the hump measured on the ball (07nov, 32 cycles); 5 cm re-blur; each lobe height-matched
+// excess; Richardson-Lucy with the hump measured on the ball (14nov: 8 cycles; o.cycles >= 12: the 16-cycle one, D160 / D181); 5 cm re-blur; each lobe height-matched
 // to the raw excess at its peak (keeps peak height and small bumps, only narrows); area = lobe flux / hump area.
 // o.noDeconv (D126): skip the deconvolution (line already sharpened on the hub): baseline, lobes and area only.
 // Returns { out, area, base } (base = the baseline in dB inside the window, the input elsewhere).
@@ -96,7 +100,7 @@ function sharpenEcho(db, nf, bottom, bin, o) {
   const out = db.slice(), area = db.slice(), base = db.slice();
   const n = b - a; if (n < 8) return { out, area, base };
   // hump (2.5 cm bins, ref = index 3), resampled to this bin size
-  const H0 = [0, 0.58, 0.86, 1.0, 0.88, 0.56, 0.28, 0.10, 0.04], h0 = i => (i < 0 || i > 8) ? 0 : (H0[Math.floor(i)] * (1 - (i % 1)) + (H0[Math.min(8, Math.floor(i) + 1)] * (i % 1)));
+  const H0 = (o && o.cycles >= 12) ? [0, 0.10, 0.63, 1.0, 0.88, 0.44, 0.11, 0.02, 0] : [0, 0.40, 0.95, 1.0, 0.60, 0.22, 0.03, 0, 0], h0 = i => (i < 0 || i > 8) ? 0 : (H0[Math.floor(i)] * (1 - (i % 1)) + (H0[Math.min(8, Math.floor(i) + 1)] * (i % 1)));
   const r = bin / 0.025, L0 = Math.floor(3 / r), H = []; for (let k = -L0; k * r <= 5; k++) H.push(h0(3 + k * r));
   const C = L0, L = H.length, HS = H.reduce((s, v) => s + v, 0), HN = H.map(v => v / HS);
   const y = db.slice(a, b);
@@ -156,14 +160,14 @@ function sharpenEcho(db, nf, bottom, bin, o) {
   return { out, area, base };
 }
 
-let EH=[],lastHex='';const PALS=[[0,10,30,38],[.16,17,65,76],[.32,27,119,120],[.48,88,174,124],[.62,211,192,74],[.76,238,139,47],[.9,216,67,47],[1,255,230,210]];
+let EH=[],lastHex='',KCYC=8;const PALS=[[0,10,30,38],[.16,17,65,76],[.32,27,119,120],[.48,88,174,124],[.62,211,192,74],[.76,238,139,47],[.9,216,67,47],[1,255,230,210]];
 function palc(v){v=Math.max(0,Math.min(1,v));for(let i=1;i<PALS.length;i++)if(v<=PALS[i][0]){const a=PALS[i-1],b=PALS[i],t=(v-a[0])/(b[0]-a[0]);return[0,1,2].map(k=>a[k+1]+(b[k+1]-a[k+1])*t)}return PALS[7].slice(1)}
 function addEcho(){const hex=st.codes||'';if(!hex||hex===lastHex||!st.bin_m)return;lastHex=hex;const n=hex.length/2,d=[];for(let i=0;i<n;i++)d.push(-100+parseInt(hex.substr(2*i,2),16)*95/255);
  const f={};(st.line||'').replace(/(\w+)=([^\s|]+)/g,(a,k,v)=>{f[k]=v});let nf=parseFloat(f.noise);if(!(nf<0)){const t=d.slice(n>>1).sort((p,q)=>p-q);nf=t[t.length>>1]}
- const bt=+st.bottom||0;let r;try{r=sharpenEcho(d,nf,bt,st.bin_m,{dead:0.3})}catch(e){r={out:d,area:d}}EH.push({d,o:r.out,a:r.area,b:r.base,nf,bt});if(EH.length>240)EH.shift();drawE()}
+ const bt=+st.bottom||0;let r;try{r=sharpenEcho(d,nf,bt,st.bin_m,{dead:0.3,cycles:KCYC})}catch(e){r={out:d,area:d}}EH.push({d,o:r.out,a:r.area,b:r.base,nf,bt});if(EH.length>240)EH.shift();drawE()}
 function drawE(){if(!EH.length)return;const bin=st.bin_m,n=EH[EH.length-1].d.length;let mb=0;EH.forEach(e=>{if(e.bt>mb)mb=e.bt});const D=Math.min(n*bin,mb>0?mb+0.5:n*bin);
  [['e0','d'],['e1',$('ear').checked?'a':'o']].forEach(([id,key])=>{const c=$(id),x=c.getContext('2d'),W=c.width,Hh=c.height,img=x.createImageData(W,Hh),c0=W-EH.length;
-  for(let col=0;col<W;col++){const e=EH[col-c0];for(let row=0;row<Hh;row++){const p=(row*W+col)*4;let rgb=[10,30,38];if(e){const i=Math.min(n-1,Math.floor(row/Hh*D/bin));rgb=($('ebg').checked&&key!=='d')?palc((e[key][i]-e.b[i]-2)/18):palc((e[key][i]-e.nf-4)/36)}img.data[p]=rgb[0];img.data[p+1]=rgb[1];img.data[p+2]=rgb[2];img.data[p+3]=255}}
+  for(let col=0;col<W;col++){const e=EH[col-c0];for(let row=0;row<Hh;row++){const p=(row*W+col)*4;let rgb=[10,30,38];if(e){const i=Math.min(n-1,Math.floor(row/Hh*D/bin));rgb=($('ebg').checked&&key!=='d')?palc((e[key][i]-e.b[i]-2)/18):palc((e[key][i]-e.nf-4)/56)}img.data[p]=rgb[0];img.data[p+1]=rgb[1];img.data[p+2]=rgb[2];img.data[p+3]=255}}
   x.putImageData(img,0,0);x.fillStyle='#fff';x.font='10px system-ui';x.fillText(D.toFixed(1)+' m',2,Hh-3)})}
 function show(){const L=st.line||'';const f={};L.replace(/(\w+)=([^\s|]+)/g,(a,k,v)=>{f[k]=v});
  const items=[['Bottom',f.bottom],['Bottom SNR',f.bot_snr],['Noise floor',f.noise],['Ring-down',f.ring],['ADC rate',(f.adc||'').replace('(want','')],['Time zero',f.t0],['Raw max',f.raw_max],['Ping time',f.ping]];
@@ -184,10 +188,10 @@ $('rec').onclick=async()=>{busy=true;if(!recOn){if(lines.length&&!confirm('Start
 $('dl').onclick=()=>{if(!lines.length){msg('Nothing recorded yet.');return}const b=new Blob([lines.join('\n')+'\n'],{type:'text/plain'});
  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='sonar_'+(st.node||'')+'_'+stamp().replace(/[:T]/g,'-')+'.txt';document.body.appendChild(a);a.click();a.remove()};
 $('raw').onclick=()=>cmd('RAW');
-$('tn').onclick=async()=>{if(confirm('Tune the burst frequency and band-pass? About 1 minute. Keep the transducer still with the bottom in view.')){const r=await cmd('TUNE');msg(r)}};$('swr').onclick=async()=>{if(!recOn){msg('Start recording first, then RX sweep.');return}if(confirm('Run the receiver sweep? 8 steps, about 3 minutes. Keep the transducer still, bottom in view.'))msg(await cmd('SWEEP RX'))};$('sw').onclick=async()=>{if(!recOn){msg('Start recording first, then Sweep.');return}if(confirm('Run the preset sweep? ~15 steps, about 3 minutes. Keep the transducer still.'))await cmd('SWEEP')};
+$('bo').onclick=async()=>{msg(await cmd('BOOST OFF 6'))};$('tn').onclick=async()=>{if(confirm('Tune the burst frequency and band-pass? About 1 minute. Keep the transducer still with the bottom in view.')){const r=await cmd('TUNE');msg(r)}};$('swn').onclick=async()=>{if(!recOn){msg('Start recording first, then Noise scan.');return}if(confirm('Run the noise scan? 31 steps, 1 to 3 minutes. No pings are sent during most of it. Keep everything still.'))msg(await cmd('SWEEP NOISE'))};$('swr').onclick=async()=>{if(!recOn){msg('Start recording first, then RX sweep.');return}if(confirm('Run the receiver sweep? 8 steps, about 3 minutes. Keep the transducer still, bottom in view.'))msg(await cmd('SWEEP RX'))};$('sw').onclick=async()=>{if(!recOn){msg('Start recording first, then Sweep.');return}if(confirm('Run the preset sweep? ~15 steps, about 3 minutes. Keep the transducer still.'))await cmd('SWEEP')};
 $('nb').onclick=async()=>{const t=$('note').value.trim();if(!t)return;await cmd('NOTE ['+stamp()+'] '+t);$('note').value=''};
 $('ap').onclick=async()=>{await cmd('RECEVERY '+$('every').value);await cmd('RAWEVERY '+$('rawe').value)};
-async function knobs(){try{const k=await (await fetch('k')).json();$('kn').innerHTML=k.map(o=>'<tr><td>'+o.label+'<div class="k">'+o.key+' · '+o.min+'-'+o.max+' '+o.unit+'</div></td><td><input id="k_'+o.key+'" type="number" value="'+o.val+'"></td><td><button data-k="'+o.key+'">Set</button></td></tr>').join('');
+async function knobs(){try{const k=await (await fetch('k')).json();const kc=k.find(o=>o.key=='cycles');if(kc)KCYC=+kc.val;$('kn').innerHTML=k.map(o=>'<tr><td>'+o.label+'<div class="k">'+o.key+' · '+o.min+'-'+o.max+' '+o.unit+'</div></td><td><input id="k_'+o.key+'" type="number" value="'+o.val+'"></td><td><button data-k="'+o.key+'">Set</button></td></tr>').join('');
  document.querySelectorAll('#kn button').forEach(b=>b.onclick=async()=>{const k=b.dataset.k;await cmd('KNOB '+k+' '+$('k_'+k).value);await knobs();const r=$('k_'+k);if(r){r.style.outline='2px solid var(--ok)';setTimeout(()=>r.style.outline='',2500)}})}catch(e){}}
 window.onbeforeunload=()=>lines.length?'Recording not downloaded':undefined;
 $('ear').onchange=drawE;$('ebg').onchange=drawE;knobs();poll();setInterval(poll,1500);setInterval(pull,400);

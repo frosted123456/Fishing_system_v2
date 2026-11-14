@@ -37,8 +37,14 @@ def chain_pings(since, mx, echo_since):
     out = [[i + 1, i, src(i)["bottom_cm"], src(i)["t"], src(i)["r"], 1, 90, []] for i in range(max(0, k - mx), k) if i + 1 > since]
     r = {"node": state["focus"], "last": out[-1][0] if out else since, "pings": out}
     if echo_since is not None:
-        es = {C * e["index"]: e for e in ch["echo"]}
-        lines = [[i + 1, i, es[i]["nf"], es[i]["c"], es[i].get("k", 0), es[i].get("s", 0), es[i].get("m", 0)] for i in range(max(0, k - 64), k) if i in es and i + 1 > echo_since][-16:]
+        es = {}
+        for e in ch["echo"]: es.setdefault(C * e["index"], []).append(e)   # D144: a marks line and an HD line can share a ping
+        lines = []
+        for i in range(max(0, k - 64), k):
+            for j, e in enumerate(sorted(es.get(i, []), key=lambda x: x.get("h", 0))):
+                seq = 2 * i + 1 + j
+                if seq > echo_since: lines.append([seq, i, e["nf"], e["c"], e.get("k", 0), e.get("s", 0), e.get("m", 0), e.get("f", 0), e.get("h", 0)])
+        lines = lines[-16:]
         r["elast"] = lines[-1][0] if lines else echo_since; r["echo"] = lines
     return r
 state = {"focus": frames[0]["list"]["focus"], "sim": True, "silenced": False, "sil_until": 0,
@@ -54,12 +60,19 @@ KNOBS = [("snr", "Detection threshold", 4, 30, 10, "dB"), ("prom", "Peak contras
          ("gate", "Max target move", 5, 100, 32, "cm/ping"), ("dead", "Dead zone", 0, 50, 5, "x0.1 m"),
          ("bsmooth", "Bottom smoothing", 5, 100, 25, "%"), ("learn", "Static scene learning", 1, 100, 12, "x0.001"),
          ("range", "Colour range", 20, 80, 46, "dB"), ("tvg", "Range compensation", 0, 1, 1, ""),
-         ("cycles", "Burst cycles, base", 1, 32, 32, "cycles"), ("gain", "Receiver gain", 0, 3, 2, "10/12.5/15/20 V/V"),
-         ("pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"), ("fcycles", "Burst cycles, focus", 1, 32, 32, "cycles"),
-         ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 2, "per ping (D134: in focus too)"),
+         ("cycles", "Burst cycles, base", 1, 32, 8, "cycles"), ("gain", "Receiver gain", 0, 3, 0, "10/12.5/15/20 V/V"),
+         ("pinghz", "Ping rate, active", 1, 16, 16, "x0.25/s"), ("fcycles", "Burst cycles, focus", 1, 32, 8, "cycles"),
+         ("idlehz", "Ping rate, idle", 1, 16, 4, "x0.25/s"), ("avg", "Bursts averaged", 1, 4, 4, "per ping (D134: in focus too)"),
          ("freq", "Frequency mode", 0, 2, 2, "0 3/ping 1 rot 2 200k"), ("sound", "Sound speed", 0, 255, 53, "+1350 m/s"),
          ("bpf", "Band-pass code (200k)", 1, 62, 29, "0x1D=196.8kHz"), ("thresh", "Edge threshold", 0, 15, 7, "reg 0x17"),
-         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"), ("vmode", "VDRV mode", 0, 2, 0, "0 on (proven) 1 quiet 2 external VDRV (D108)"), ("bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"), ("ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"), ("drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"), ("sharp", "Sharpened echogram", 0, 2, 2, "0 raw (legacy) 1 sharpened 2 + doublet split"), ("det", "Fish detector", 0, 1, 0, "0 classic 1 adaptive + matched filter (experimental: a still target fades)"), ("echo", "Echogram sent as", 0, 1, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th")]
+         ("bmin", "Bottom search from", 1, 50, 6, "x0.1 m"), ("vdrv", "Drive voltage", 5, 20, 20, "V (MT3608 at 22 V)"), ("vmode", "VDRV mode", 0, 2, 2, "0 on (proven) 1 quiet 2 external VDRV (D108)"), ("bmax", "Bottom search to", 0, 120, 0, "x0.1 m (0 = all)"), ("ftrim", "Burst frequency", 0, 40, 19, "180 + kHz (20 = 200 kHz)"), ("drive", "Drive stage", 0, 1, 0, "0 direct 1 transformer (pod v0.8 option)"), ("sharp", "Sharpened echogram", 0, 2, 2, "0 raw (legacy) 1 sharpened 2 + doublet split"), ("det", "Fish detector", 0, 1, 0, "0 classic 1 adaptive + matched filter (experimental: a still target fades)"), ("echo", "Echogram sent as", 0, 1, 1, "0 raw cells (legacy) 1 echo marks + raw every 10th")]
+def _knobs_from_firmware():   # D181: the firmware's own table wins, so this tool cannot drift from it (the list above = fallback)
+    import re
+    try: h = open(os.path.join(ROOT, "lib", "IceMesh", "src", "sonar_params.h"), encoding="utf-8").read()
+    except OSError: return None
+    t = re.findall(r'\{\s*"(\w+)",\s*"([^"]*)",\s*(\d+),\s*(\d+),\s*(\d+),\s*"([^"]*)"\s*\}', h)
+    return [(k, n, int(lo), int(hi), int(d), u) for k, n, lo, hi, d, u in t] if len(t) >= 20 else None
+KNOBS = _knobs_from_firmware() or KNOBS
 state["knobs"] = {k[0]: k[4] for k in KNOBS}
 if CHAIN and "knobs" in CHAIN: state["knobs"].update({k: v for k, v in CHAIN["knobs"].items() if k in state["knobs"]})   # the recording's knobs
 def knobs_json():

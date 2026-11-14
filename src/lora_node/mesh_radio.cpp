@@ -100,6 +100,10 @@ struct ChaletSink : public sonar::SonarStore<16, SONAR_RING, SONAR_HIST> {
     p->node = node; memcpy(p->r, r12, 12); p->at_ms = millis() ? millis() : 1;
   }
 };
+// D152: the chalet's work copies for its JSON replies, allocated with g_sonar (chalet only). As function statics they
+// sat in the RAM of every hub too: 21 kB that the hub's heap was missing (heap_min 1.0 kB, watchdog reset on 14 Nov).
+static sonar::NodeSonar* g_cpNodes = nullptr; static sonar::StoredEcho* g_cpEcho = nullptr; static sonar::StoredPing* g_cpPings = nullptr;
+static sonar::BaseRec* g_cpRecs = nullptr; static sonar::BaseRec* g_cpHist = nullptr;
 static ChaletSink* g_sonar = nullptr;   // chalet only (~35 KB: ping ring 96 x 112 B, 16 holes x 564 B, history 16 x 60 x 16 B; D84c shrank it from 46 KB for heap room with the demo)
 static uint8_t g_cmd_seq = 0;
 static uint32_t g_silence_until_ms = 0;
@@ -876,6 +880,8 @@ bool meshBegin(uint8_t self_id, bool chalet, uint8_t network_id) {
   if (chalet) {
     g_ch = new ChaletRole<10, 48>();
     g_sonar = new ChaletSink();
+    g_cpNodes = new sonar::NodeSonar[16]; g_cpEcho = new sonar::StoredEcho[16]; g_cpPings = new sonar::StoredPing[64];   // D152
+    g_cpRecs = new sonar::BaseRec[SONAR_HIST]; g_cpHist = new sonar::BaseRec[90];
     g_ch->sonar_sink = g_sonar;
     g_ch->range_ring = &g_range_ring;   // D80
     PlannerConfig& c = g_ch->planner.cfg;
@@ -1565,7 +1571,7 @@ String meshSonarListJson() {
     s += ",\"pin_s\":"; s += g_follow.pinLeftMs(now) / 1000; s += ",\"trip_s\":"; s += g_follow.tripLeftMs(now) / 1000; }
   s += ",\"nodes\":[";
   if (g_sonar != nullptr) {
-    static sonar::NodeSonar copy[16];
+    sonar::NodeSonar* const copy = g_cpNodes;   // D152
     uint8_t n = 0;
     uint32_t ok = 0, bad = 0;
     {
@@ -1597,9 +1603,13 @@ String meshSonarListJson() {
 // {"node":N,"last":seq,"pings":[[seq,index,bottom,[[track,depth,strength,width],..],[[bin,level],..],hard,nf_neg,
 //                                 [[track,flick_q,spread_q,elen,mature],..]],..]}   (see sonar_codec.h for units)
 // D93: the echogram lines of `node` newer than `since` as [seq, index, nf_neg, "122 hex nibbles"] (newest `max` of them)
+// D144: HD lines ride in the same list, in sequence order: [seq, index, nf_neg, "hex of the block after its 5-byte header",
+// 2, 0, 0, 1, 1] (9th field 1 = HD: the page decodes the cells, sonar_codec.h hdParse). At most 8 per call (the newest).
 static void appendEchoJson(String& s, uint8_t node, uint32_t since, uint8_t max) {
-  static sonar::StoredEcho copy[16];
-  uint16_t n = 0; uint32_t last = 0;
+  sonar::StoredEcho* const copy = g_cpEcho;   // D152
+  static const uint8_t HD_MAX = 8;
+  sonar::StoredHd* hcopy = new (std::nothrow) sonar::StoredHd[HD_MAX];   // ~1 kB while the reply is built (no static: the hub builds carry this code too)
+  uint16_t n = 0, nh = 0; uint32_t last = 0;
   if (max > 16) max = 16;
   {
     Lock l;
@@ -1608,26 +1618,49 @@ static void appendEchoJson(String& s, uint8_t node, uint32_t since, uint8_t max)
     const uint16_t skip = n > max ? static_cast<uint16_t>(n - max) : 0;
     for (uint16_t i = skip; i < n; i++) copy[i - skip] = *ptr[i];
     n = static_cast<uint16_t>(n - skip);
+    if (hcopy) {
+      const sonar::StoredHd* hp[16];
+      nh = g_sonar->hdSince(node, since, hp, 16);
+      const uint16_t hs = nh > HD_MAX ? static_cast<uint16_t>(nh - HD_MAX) : 0;
+      for (uint16_t i = hs; i < nh; i++) hcopy[i - hs] = *hp[i];
+      nh = static_cast<uint16_t>(nh - hs);
+    }
     last = g_sonar->lastEchoSeq();
   }
   s += ",\"elast\":"; s += last; s += ",\"echo\":[";
   static const char H[] = "0123456789ABCDEF";
-  for (uint16_t i = 0; i < n; i++) {
-    char b[40]; snprintf(b, sizeof(b), "%s[%lu,%u,%u,\"", i ? "," : "", static_cast<unsigned long>(copy[i].seq), copy[i].e.index, copy[i].e.nf_neg);
-    s += b;
-    char cells[sonar::ECHO_CELLS + 1];
-    for (uint8_t c = 0; c < sonar::ECHO_CELLS; c++) cells[c] = H[sonar::echoCell(copy[i].e, c)];
-    cells[sonar::ECHO_CELLS] = 0;
-    s += cells; s += "\","; s += copy[i].e.scale; s += ","; s += copy[i].e.sharp; s += ","; s += copy[i].e.marks; s += ","; s += copy[i].e.fine; s += "]";   // D112 / D126 / D133: [seq, index, nf, cells, scale, sharpened, marks] (marks: cells = the payload, 2 nibbles per byte, low first)
+  uint16_t i = 0, j = 0; bool first = true;
+  while (i < n || j < nh) {
+    const bool hd = j < nh && (i >= n || hcopy[j].seq < copy[i].seq);
+    if (hd) {
+      const sonar::StoredHd& h = hcopy[j++];
+      if (h.len <= sonar::HD_HDR || h.len > sonar::MAX_BLOCK) continue;
+      char b[40]; snprintf(b, sizeof(b), "%s[%lu,%u,%u,\"", first ? "" : ",", static_cast<unsigned long>(h.seq), h.index, static_cast<unsigned>(h.data[4] & 0x7F));
+      s += b;
+      char hex[2 * sonar::MAX_BLOCK + 1]; uint16_t k = 0;
+      for (uint8_t q = sonar::HD_HDR; q < h.len; q++) { hex[k++] = H[h.data[q] >> 4]; hex[k++] = H[h.data[q] & 15]; }
+      hex[k] = 0;
+      s += hex; s += "\",2,0,0,1,1]";
+    } else {
+      const sonar::StoredEcho& c = copy[i++];
+      char b[40]; snprintf(b, sizeof(b), "%s[%lu,%u,%u,\"", first ? "" : ",", static_cast<unsigned long>(c.seq), c.e.index, c.e.nf_neg);
+      s += b;
+      char cells[sonar::ECHO_CELLS + 1];
+      for (uint8_t q = 0; q < sonar::ECHO_CELLS; q++) cells[q] = H[sonar::echoCell(c.e, q)];
+      cells[sonar::ECHO_CELLS] = 0;
+      s += cells; s += "\","; s += c.e.scale; s += ","; s += c.e.sharp; s += ","; s += c.e.marks; s += ","; s += c.e.fine; s += "]";   // D112 / D126 / D133: [seq, index, nf, cells, scale, sharpened, marks] (marks: cells = the payload, 2 nibbles per byte, low first)
+    }
+    first = false;
   }
   s += "]";
+  delete[] hcopy;
 }
 
 String meshSonarPingsJson(uint8_t node, uint32_t since, uint8_t max_pings, bool lite, bool with_echo, uint32_t echo_since) {
   String s;
   if (g_sonar == nullptr) return F("{\"pings\":[]}");
   if (max_pings > 64) max_pings = 64;
-  static sonar::StoredPing copy[64];
+  sonar::StoredPing* const copy = g_cpPings;   // D152
   uint16_t n = 0;
   uint32_t last;
   {
@@ -1694,7 +1727,7 @@ String meshSonarBgJson(uint8_t node) {
 //   "recs":[[frame,bottom_cm,t,..],..]}]} with t = depth_cm | level << 11 | bait << 13 (sonar_link.h).
 String meshSonarGlanceJson(uint16_t since) {
   if (g_sonar == nullptr) return F("{\"frame\":0,\"nodes\":[]}");
-  static sonar::BaseRec recs[SONAR_HIST];
+  sonar::BaseRec* const recs = g_cpRecs;   // D152
   uint8_t ids[16], hubs[16], hards[16], acts[16]; uint8_t nn = 0;
   {
     Lock l;
@@ -1734,7 +1767,7 @@ String meshSonarGlanceJson(uint16_t since) {
 
 uint8_t meshSonarHistory(uint8_t node, MeshBaseRec* out, uint8_t max) {
   if (g_sonar == nullptr) return 0;
-  static sonar::BaseRec r[90];
+  sonar::BaseRec* const r = g_cpHist;   // D152
   if (max > 90) max = 90;
   uint8_t n;
   { Lock l; n = g_sonar->history(node, r, max); }
