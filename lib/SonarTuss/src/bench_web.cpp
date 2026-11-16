@@ -24,7 +24,16 @@ static bool g_on = false;
 // allocation aborted the hub on OOM during a sweep). Records: [seq 4 B][len 2 B][text], oldest overwritten; a record
 // never straddles the end (a record that does not fit at the end starts at 0 and the tail is left unused).
 static const size_t RING_BYTES = BENCH_RING_BYTES;
+#if CONFIG_IDF_TARGET_ESP32
+// D184: classic ESP32 (WROOM tip-up): static data (.bss) is capped at ~124 kB of DRAM, and the WROOM sonar bench build
+// overflowed it by 34 kB. The heap also has the 0x3FFE0000 bank that .bss can never use, so the ring is taken from the
+// heap ONCE in begin() / attach() (no fragmentation: never freed). Hubs (ESP32-S3) keep the static ring.
+static uint8_t* g_ringBuf = nullptr;
+static bool ringAlloc() { if (!g_ringBuf) g_ringBuf = (uint8_t*)malloc(RING_BYTES); return g_ringBuf != nullptr; }
+#else
 static uint8_t g_ringBuf[RING_BYTES];
+static bool ringAlloc() { return true; }
+#endif
 static size_t g_head = 0, g_tail = 0, g_wrapAt = RING_BYTES;   // tail = oldest record, head = write position, wrapAt = end of valid data before the wrap
 static uint32_t g_ringCount = 0;
 static bool g_wrapped = false;                                  // head is below tail: valid data is tail..wrapAt then 0..head
@@ -252,6 +261,7 @@ static void routes(const String& p) {   // the page fetches "s", "cmd", "log", "
 
 bool begin(uint8_t node_id, const char* password, uint8_t channel, CommandFn fn) {
   if (g_on) return true;
+  if (!ringAlloc()) return false;   // D184
   g_cmd = fn; g_node = node_id;
   WiFi.mode(WIFI_AP_STA);   // STA stays for ESP-NOW (same channel as the AP)
   char ssid[32]; snprintf(ssid, sizeof(ssid), "IceFish-bench-%u", node_id);
@@ -271,6 +281,7 @@ bool begin(uint8_t node_id, const char* password, uint8_t channel, CommandFn fn)
 // keeps calling its own handleClient(); nothing else to serve. "/bench" -> http://<ip>/bench/
 bool attach(WebServer& srv, const char* prefix, uint8_t node_id, CommandFn fn) {
   if (g_on) return true;
+  if (!ringAlloc()) return false;   // D184
   g_cmd = fn; g_node = node_id; g_srv = &srv; g_own = false;
   String p = prefix ? prefix : ""; while (p.endsWith("/")) p.remove(p.length() - 1);
   routes(p);
@@ -287,7 +298,7 @@ uint32_t lastSeq() { return g_seq; }
 // terminator); nullptr when it can never fit (the page counts the gap). A RAW line is formatted straight into the
 // ring this way: no 5 kB buffer on the heap at all.
 char* pushReserve(size_t len) {
-  if (!g_on) return nullptr;
+  if (!g_on || !g_ringBuf) return nullptr;
   if (len > 0xFFFF) len = 0xFFFF;
   const size_t need = REC_HDR + len;
   if (need > RING_BYTES) { ++g_seq; return nullptr; }     // never fits (the page counts the gap)

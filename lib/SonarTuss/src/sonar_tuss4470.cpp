@@ -399,18 +399,21 @@ static bool capture(uint32_t hz, uint8_t cycles, float sound, float acc[BINS], P
   }
   size_t got = 0, rd = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(g_raw);
-  // rate check (D58): time from the end of the first full DMA buffer to the end of the last read, for the samples in
-  // between (the first read's start latency is left out; the old version timed only up to a partial read and came
-  // out ~10 % low). Task wake-up jitter is some tens of us on ~18 ms: the 0.5 % tolerance is well under the 0.78 %
-  // loss of the limited mode, and one short capture is not enough to give nolimit up (3 in a row are; a stall is).
-  uint32_t tA = 0, tB = 0; size_t gotA = 0; bool timeout = false;
+  // rate check (D58): time from the end of the first full DMA buffer to the end of the last FULL one, for the samples
+  // in between (the first read's start latency is left out). D193: full buffers only at both ends: the last read of a
+  // capture is partial, and it returns only once its whole DMA buffer is in, so timing up to it counted ~a buffer of
+  // time for a fraction of its samples (15 Nov WROOM: 141 kHz read for 156.25 kHz, clk_ok 0 on every capture, so the
+  // driver fell back to the limited mode for nothing). Task wake-up jitter is some tens of us on ~16 ms: the 0.5 %
+  // tolerance is well under the 0.78 % loss of the limited mode, and one short capture is not enough to give nolimit
+  // up (3 in a row are; a stall is).
+  uint32_t tA = 0, tB = 0; size_t gotA = 0, gotB = 0; bool timeout = false;
   while (got < want * 2) {
     const size_t chunk = (want * 2 - got) < 1024 ? (want * 2 - got) : 1024;   // one DMA buffer (512 x 16 bit) per read
     if (i2s_read(I2S_NUM_0, dst + got, chunk, &rd, pdMS_TO_TICKS(40)) != ESP_OK || rd == 0) { timeout = true; break; }
     got += rd;
-    if (!tA) { if (rd == 1024) { tA = micros(); gotA = got; } } else tB = micros();
+    if (rd == 1024) { if (!tA) { tA = micros(); gotA = got; } else { tB = micros(); gotB = got; } }
   }
-  info.adc_hz = (tB > tA && got > gotA) ? (uint32_t)((uint64_t)(got - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
+  info.adc_hz = (tB > tA && gotB > gotA) ? (uint32_t)((uint64_t)(gotB - gotA) / 2 * 1000000ULL / (tB - tA)) : 0;
   info.clk_ok = (g_clock_hz && info.adc_hz && (uint32_t)labs((long)info.adc_hz - (long)g_clock_hz) * 1000 <= g_clock_hz * 5) ? 1 : 0;
   if (g_nolimit) {
     if (timeout) { g_nolimit = false; g_short_n = 0; g_limited_n = 0; }

@@ -50,6 +50,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 #include <esp_sleep.h>
+#include <esp_system.h>   // D199: esp_reset_reason()
 
 // Cross-compatible deep sleep GPIO wakeup support
 #ifdef BOARD_ESP32C3
@@ -78,6 +79,9 @@
 #include <eb_link.h>        // v2: ESP-NOW backbone relay (lib/IceMesh)
 #include <rx_ring.h>
 #include <Preferences.h>
+#if SONAR_BENCH && SONAR_REAL
+#include <ESPmDNS.h>   // D185: http://icefish-hole<N>.local on the house network
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // v2 BACKBONE RELAY (docs/protocol_v2.md §6c)
@@ -282,7 +286,27 @@ uint32_t estimateActualSleepDuration(esp_sleep_wakeup_cause_t wakeReason);
 // SETUP
 // ═══════════════════════════════════════════════════════════════════════════
 
+// D199: why did this tip-up boot, and how often since power-on (as the hub, D65 / D96). RTC_NOINIT survives every reset
+// but power-off; on the INFO line of every recording, so a crash between two recordings shows up in the next one.
+RTC_NOINIT_ATTR static uint32_t g_rstMagic, g_rstBoots;
+static esp_reset_reason_t g_rstWhy = ESP_RST_UNKNOWN;
+static const char* resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "CRASH";
+    case ESP_RST_INT_WDT: case ESP_RST_TASK_WDT: case ESP_RST_WDT: return "WATCHDOG";
+    case ESP_RST_BROWNOUT: return "BROWNOUT";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_EXT: return "ext-reset";
+    default: return "unknown";
+  }
+}
+
 void setup() {
+  g_rstWhy = esp_reset_reason();
+  if (g_rstMagic != 0xB007C0DEUL || g_rstWhy == ESP_RST_POWERON) { g_rstMagic = 0xB007C0DEUL; g_rstBoots = 0; }
+  if (g_rstWhy != ESP_RST_DEEPSLEEP) g_rstBoots++;   // a tip-up wakes from deep sleep all day: count real restarts only
   #if !DEBUG_SERIAL && SONAR_REAL
   Serial.begin(DEBUG_BAUD);   // D56: sonar builds always open the port (BENCH lines, REC/STAT/KNOB/NOTE/RAW commands)
   #endif
@@ -292,6 +316,9 @@ void setup() {
   #endif
   #if DEBUG_SERIAL || SONAR_REAL
   Serial.setTimeout(20);      // readStringUntil() must not stall the loop for the default 1 s
+  if (g_rstWhy != ESP_RST_DEEPSLEEP)
+    Serial.printf("RESET reason=%s boot=%lu%s\n", resetReasonName(g_rstWhy), (unsigned long)g_rstBoots,
+                  g_rstWhy == ESP_RST_BROWNOUT ? "  <- supply sagged: pack, USB + pack together, or a load spike" : "");   // D199
   #endif
   #if DEBUG_SERIAL
   Serial.println();
@@ -1640,11 +1667,12 @@ static void recInfo() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[512];
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u heap=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), batteryMv, (unsigned long)ESP.getFreeHeap());
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), batteryMv, (unsigned long)ESP.getFreeHeap(),
+                   (unsigned long)ESP.getMinFreeHeap(), resetReasonName(g_rstWhy), (unsigned long)g_rstBoots);   // D199
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf);
 }
@@ -1740,6 +1768,94 @@ static void sonarBenchLine(const tuss::PingInfo& pi, const icemesh::sonar::Sonar
 //   NOTE <text> | RAW | INFO | STAT | KNOB <name> <value> | KNOBS? (JSON for the page) | REG <hex addr> [<hex value>]
 //   CAL [17 numbers]
 static icemesh::sonar::Params* sonarKnobsPtr = nullptr;   // the live knob set (sonarLoop), for KNOBS? / INFO
+#if SONAR_BENCH && SONAR_REAL
+// D185: the bench page on the house network too, like the hub (D87e): the station interface joins the saved network
+// (serial WIFI:ssid:pass, else secrets.h STA_SSID) and the page is at http://icefish-hole<N>.local/ (or the IP printed).
+// The own hotspot stays. ESP-NOW keeps working when the router is on channel 1 (ESPNOW_CHANNEL); on another channel the
+// radio follows the router and the hub link drops while connected. 3 tries a minute apart, then hotspot only (D99).
+static char g_benchSsid[33] = {0}, g_benchPass[65] = {0};
+static uint8_t g_benchJoinTries = 0;
+static volatile bool g_benchQuickRetry = false;
+// D185e: the sonar holds its pings for up to 8 s after each join attempt: on the WROOM a ping every ~120 ms kept the
+// CPU and the radio busy through the WPA2 handshake (reason 2 / 202 although the hub joins the same router)
+static unsigned long g_benchJoinMs = 0;
+// D185f: the WROOM DevKit at full transmit power (84 = 21 dBm, set for ESP-NOW range in setupEspNow) fails the WPA2
+// handshake with reason 2 / 202 while the hub joins the same router: a known ESP32 dev-board issue (arduino-esp32
+// #6767 / #2501: lowering TX power fixes it). Bench build only: join at 11 dBm, then 8.5 dBm on the later retries;
+// the power stays there while on the bench (ESP-NOW to a hub in the same house does not need 21 dBm).
+static void benchStaBegin(uint8_t attempt) {
+  const wifi_power_t pw = attempt < 2 ? WIFI_POWER_11dBm : WIFI_POWER_8_5dBm;
+  WiFi.disconnect(false); delay(100);   // clean station state (keeps the hotspot)
+  WiFi.setTxPower(pw);
+  g_benchJoinMs = millis();
+  WiFi.begin(g_benchSsid, g_benchPass, ESPNOW_CHANNEL);
+  Serial.printf("Bench: join try %u at %s dBm\n", (unsigned)attempt + 1, attempt < 2 ? "11" : "8.5");
+}
+static bool benchJoinBusy() { return g_benchSsid[0] && g_benchJoinMs && WiFi.status() != WL_CONNECTED && millis() - g_benchJoinMs < 8000UL; }   // D185c: auth timed out (reason 2): try again in 5 s, not a minute
+static void benchStaLoad() {
+  Preferences p; p.begin("wifi", true);
+  String sid = p.getString("ssid", ""), pw = p.getString("pass", ""); p.end();
+  if (!sid.length() && STA_SSID[0]) { sid = STA_SSID; pw = STA_PASSWORD; }
+  strlcpy(g_benchSsid, sid.c_str(), sizeof(g_benchSsid)); strlcpy(g_benchPass, pw.c_str(), sizeof(g_benchPass));
+}
+static void benchStaJoin() {
+  g_benchJoinTries = 0;
+  if (!g_benchSsid[0]) { Serial.println(F("Bench: no house network (secrets.h STA_SSID or serial WIFI:ssid:pass): the page is on the hotspot only")); return; }
+  WiFi.setAutoReconnect(false); WiFi.setSleep(false);
+  benchStaBegin(0);
+  Serial.printf("Bench: joining %s for the page (WIFI:ssid:pass to change)\n", g_benchSsid);
+}
+static void benchStaStart() {
+  benchStaLoad();
+  // D185b: say WHY the join fails (wrong password, network not found...) and the IP the moment it comes, not a minute later
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
+    static uint8_t lastReason = 0;
+    const uint8_t rs = info.wifi_sta_disconnected.reason;
+    if (rs == 2) g_benchQuickRetry = true;
+    if (rs == lastReason) return;
+    lastReason = rs;
+    const char* why = rs == 201 ? "network not found (wrong name, 5 GHz only, or out of range)" : rs == 15 || rs == 204 ? "wrong password (4-way handshake failed)" : rs == 202 ? "authentication refused (password or WPA3-only)" : rs == 2 ? "authentication timed out (often transient: retrying)" : rs == 205 ? "connection failed" : "see reason code";
+    Serial.printf("Bench: %s not joined, reason %u: %s\n", g_benchSsid, (unsigned)rs, why);
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t) {
+    Serial.printf("Bench page on the network: http://%s/ (http://icefish-hole%u.local/)\n", WiFi.localIP().toString().c_str(), (unsigned)NODE_ID);
+  }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
+  if (g_benchSsid[0]) {   // D185d: one scan first, to see the router as this board sees it (channel, signal, security)
+    const int n = WiFi.scanNetworks(false, false, false, 150);
+    bool seen = false;
+    for (int i = 0; i < n; i++) if (WiFi.SSID(i) == g_benchSsid) {
+      seen = true;
+      Serial.printf("Bench: %s seen on channel %d, signal %d dBm, security %d%s\n", g_benchSsid, (int)WiFi.channel(i), (int)WiFi.RSSI(i), (int)WiFi.encryptionType(i),
+                    WiFi.RSSI(i) < -80 ? " (weak: move closer)" : "");
+    }
+    if (!seen) Serial.printf("Bench: %s not seen in the scan (%d networks): out of range or 5 GHz only\n", g_benchSsid, n);
+    WiFi.scanDelete();
+  }
+  char host[24]; snprintf(host, sizeof(host), "icefish-hole%u", (unsigned)NODE_ID);
+  if (MDNS.begin(host)) { MDNS.addService("http", "tcp", 80); Serial.printf("mDNS: http://%s.local\n", host); }
+  benchStaJoin();
+}
+static void benchStaLoop() {
+  static unsigned long lastSta = 0, last = 0; static bool wasUp = false;
+  if (!g_benchSsid[0]) return;
+  if (millis() - lastSta >= 5000UL) {   // say it once when the network comes up
+    lastSta = millis();
+    const bool up = WiFi.status() == WL_CONNECTED;
+    if (up && !wasUp) Serial.printf("Bench page on the network: http://%s/ (http://icefish-hole%u.local/)\n", WiFi.localIP().toString().c_str(), (unsigned)NODE_ID);
+    wasUp = up;
+  }
+  static unsigned long quickAt = 0; static uint8_t quickN = 0;
+  if (g_benchQuickRetry && WiFi.status() != WL_CONNECTED && quickN < 5 && millis() - quickAt >= 5000UL) {
+    g_benchQuickRetry = false; quickAt = millis(); quickN++;
+    Serial.printf("Bench: quick retry %u of 5\n", (unsigned)quickN); benchStaBegin(quickN);
+  }
+  if (millis() - last < 60000UL) return;
+  last = millis();
+  if (WiFi.status() == WL_CONNECTED) Serial.printf("Bench page on the network: http://%s/ (http://icefish-hole%u.local/)\n", WiFi.localIP().toString().c_str(), (unsigned)NODE_ID);
+  else if (g_benchJoinTries < 3) { g_benchJoinTries++; Serial.printf("Bench: %s not joined yet, retry %u of 3\n", g_benchSsid, (unsigned)g_benchJoinTries); benchStaBegin(2); }
+  else if (g_benchJoinTries == 3) { g_benchJoinTries++; Serial.printf("Bench: %s not reachable, the page stays on the hotspot (WIFI:ssid:pass or a reboot to try again)\n", g_benchSsid); }
+}
+#endif
 String sonarCommand(const String& in, bool fromWeb) {
   String l = in; l.trim();
   const int sp0 = l.indexOf(' ');
@@ -1747,6 +1863,18 @@ String sonarCommand(const String& in, bool fromWeb) {
   String rest = sp0 > 0 ? l.substring(sp0 + 1) : String(""); rest.trim();
   String U = l; U.toUpperCase();
   String r;
+  #if SONAR_BENCH && SONAR_REAL
+  if (l.startsWith("WIFI:") || l.startsWith("wifi:")) {   // D185: WIFI:ssid:pass saves the house network and joins it; WIFI: forgets it
+    const String a = l.substring(5); const int c = a.indexOf(':');
+    const String sid = c >= 0 ? a.substring(0, c) : a, pw = c >= 0 ? a.substring(c + 1) : String("");
+    Preferences p; p.begin("wifi", false); p.putString("ssid", sid); p.putString("pass", pw); p.end();
+    strlcpy(g_benchSsid, sid.c_str(), sizeof(g_benchSsid)); strlcpy(g_benchPass, pw.c_str(), sizeof(g_benchPass));
+    if (sid.length()) { benchStaJoin(); r = "Wi-Fi saved: joining " + sid; }
+    else { WiFi.disconnect(false); r = "Wi-Fi forgotten: the page is on the hotspot only"; }
+    if (r.length()) Serial.println(r);
+    return r;
+  }
+  #endif
   if (U == "SELFTEST") {   // D70
     selfTestRun(true);
     r = "SELFTEST done (printed above)";
@@ -1910,8 +2038,10 @@ void sonarLoop() {
     benchWebTried = true;
     const bool ok = bench::begin(NODE_ID, WIFI_PASSWORD, ESPNOW_CHANNEL, sonarWebCommand);
     Serial.printf("Bench page: %s (Wi-Fi \"IceFish-bench-%d\", http://192.168.4.1)\n", ok ? "on" : "FAILED", NODE_ID);
+    if (ok) benchStaStart();   // D185: and on the house network
   }
   bench::loop();
+  benchStaLoop();
   #endif
   if (!knobsLoaded) {   // the last set received, kept across deep sleep / reboot
     knobsLoaded = true;
@@ -2012,7 +2142,12 @@ void sonarLoop() {
       static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
       const uint8_t tpp = g_nodeTuner.active() ? 1 : src.ticksPerPing(focus == NODE_ID);   // D141: a tune pings 4 times a second
       n = 0;
-      if (++tick_n >= tpp) {
+      #if SONAR_BENCH && SONAR_REAL
+      const bool joinHold = benchJoinBusy();   // D185e
+      #else
+      const bool joinHold = false;
+      #endif
+      if (!joinHold && ++tick_n >= tpp) {
         tick_n = 0;
         tuss::PingInfo pi;
         radioQuietForPing();

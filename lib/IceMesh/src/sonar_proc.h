@@ -12,6 +12,15 @@
 #include <string.h>
 #include "sonar_scene.h"
 #include "sonar_params.h"
+#include <stdlib.h>   // D184: calloc / abort (classic ESP32 scratch on the heap)
+#if defined(ESP_PLATFORM)
+#include <sdkconfig.h>
+#endif
+#if defined(ESP_PLATFORM) && defined(CONFIG_IDF_TARGET_ESP32) && CONFIG_IDF_TARGET_ESP32
+#define ICEMESH_SCRATCH_ON_HEAP 1
+#else
+#define ICEMESH_SCRATCH_ON_HEAP 0
+#endif
 #ifdef SONAR_DEBUG_BOTTOM
 #include <cstdio>   // host replay only (tools/sonar_chain.cpp): the bottom decision per ping on stderr
 #endif
@@ -573,8 +582,16 @@ class SonarProc {
   static Scratch& scratch() {
     static Scratch* s = nullptr;   // D99: points at a static block (no heap); the TVG table is filled on first use
     if (s == nullptr) {
+#if ICEMESH_SCRATCH_ON_HEAP
+      // D184: classic ESP32 (WROOM tip-up): .bss is capped at ~124 kB and the sonar bench build overflowed it by 34 kB.
+      // Taken from the heap once (the 0x3FFE0000 bank .bss cannot use), never freed: no fragmentation. A WROOM has
+      // well over 100 kB of heap at the first ping (est.). Hubs (ESP32-S3) and the host tools keep the static block.
+      s = static_cast<Scratch*>(calloc(1, sizeof(Scratch)));
+      if (s == nullptr) abort();
+#else
       static Scratch fixed;   // D99: 36 kB in .bss instead of a `new` at the first ping (which aborted a hub with ~35 kB of heap left; no fragmentation either)
       s = &fixed;
+#endif
       for (int i = 0; i < BINS; i++) {
         const sreal r = std::max(static_cast<sreal>(i) * sp::BIN_M(), R(0.3));
         s->tvg[i] = static_cast<float>(R(40) * std::log10(r) + R(2) * sp::ALPHA() * r);

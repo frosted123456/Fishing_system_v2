@@ -202,4 +202,16 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #define BATTERY_LOW_MV      3600    // ~20% remaining
 #define BATTERY_CRITICAL_MV 3200    // Shutdown imminent
 
+// D185: the bench build also joins the house network, as the hub's bench page does: STA_SSID / STA_PASSWORD from the
+// hub's secrets.h (gitignored, same house network), or a network saved with the serial command WIFI:ssid:pass
+#if __has_include("../lora_node/secrets.h")
+#include "../lora_node/secrets.h"
+#endif
+#ifndef STA_SSID
+#define STA_SSID ""
+#endif
+#ifndef STA_PASSWORD
+#define STA_PASSWORD ""
+#endif
+
 #endif // CONFIG_H

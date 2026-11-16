@@ -339,8 +339,9 @@ feedback) has no enable pad: chip pin 2 (EN) is tied to VIN on the board.
 2. Cut pin 2 free of its pad (or unsolder and lift it). It must no longer beep to pin 4.
 3. Solder a thin wire (30 AWG) from the lifted pin to **GPIO40** (Heltec) or **D13** (WROOM). No resistor (a large
    series resistor may not pull the pin low enough against its internal pull-up).
-4. Flash with `--gate`. EN floating or HIGH = converter on, so the converter still runs while the board boots or is being
-   flashed. LOW = off.
+4. Flash with `--gate`: the firmware then drives the pin HIGH while the sonar runs and LOW in sleep. **Do not leave the
+   wire on a board flashed without `--gate`:** the pin then floats, and on Hole 2's module a floating enable left the
+   converter off (output at the pack voltage, wiring check "VDRV NOT READY"), although the datasheet says floating = on.
 5. Web page → Settings → Advanced → Wiring check: **Converter enable wire OK, noise floor N dB lower with the converter
    switched off** (hub 1: 14 dB or more). `NO EFFECT` = the pin is still tied to VIN, or the wire is on another GPIO.
 6. Bench build: the **Converter off 6 s** button holds the converter off: the transmit fades within 1-2 s and comes back
