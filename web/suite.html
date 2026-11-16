@@ -543,6 +543,10 @@ body:has(#alert:not([hidden])) .panel{padding-bottom:96px}   /* the FISH ON bar 
       <p class="sm" style="margin:0 0 6px">Each hole finds the burst frequency its own transducer answers best at (they differ by a few kHz, and cold water moves them). Run it once per outing, when every transducer has been in the water about 10 minutes and sees the bottom. About 35 s per hole (a sleeping tip-up starts at its next heartbeat); the hole pings faster and may show false marks meanwhile. The result is kept in the hole until the next tune.</p>
       <div class="acts" style="margin:0 0 6px"><button class="btn small primary" type="button" id="tnAll">Tune all holes</button> <button class="btn small" type="button" id="tnRead">Read results</button> <button class="btn small" type="button" id="tnClear">Forget all tunes</button> <span class="msg" id="tnMsg"></span></div>
       <div id="tnOut"></div>
+      <h3>Battery packs</h3>
+      <p class="sm" style="margin:0 0 6px">Hours each hub and tip-up has run on its pack. The L91 voltage stays flat until the last 10-15 %, so the hours are the gauge (estimate per 3 × L91: 15-24 h at 20 °C, 11-21 h in the cold, about 10 h with the bench page streaming). After a swap tap <b>New pack</b> on that hole, or hold its arming button while switching the pack on until the LED blinks 3 times.</p>
+      <div class="acts" style="margin:0 0 6px"><button class="btn small primary" type="button" id="pkRead">Read all holes</button> <span class="sm" id="pkMsg"></span></div>
+      <div id="pkOut"></div>
       <h3>Firmware update</h3>
       <p class="sm" style="margin:0 0 6px">Without the cable. The hub restarts into an update mode for 10 minutes: its sonar and its alerts stop, and it opens its own hotspot <b>IceFish-Hub<i>N</i>-UPDATE</b> (same password as this one). Join it with the phone, open <b>192.168.4.1</b> and send the file built for that hub on the PC (<code>tools/flash.html</code>). A file built for another board is refused; a new firmware that does not stay up goes back to the old one by itself.</p>
       <div class="acts" style="margin:0 0 6px"><select id="fwHub" aria-label="Hub to update"></select> <button class="btn small" type="button" id="fwGo">Put this hub in update mode</button></div>
@@ -2481,6 +2485,51 @@ function tnGo(mode) {   // 'run' | 'read' | 'clear'
 $('tnAll').addEventListener('click', () => tnGo('run'));
 $('tnRead').addEventListener('click', () => tnGo('read'));
 $('tnClear').addEventListener('click', () => { if (confirm('Forget the tune of every hole? They go back to the shared frequency.')) tnGo('clear'); });
+/* ---------- D205b battery pack hours (per hole, through the wiring-check path) ---------- */
+const PK_WARN_H = 12;   // one session per pack (D205): flag a pack past it
+let pkRun = 0; const pkState = {};   // hole id -> { name, t0, d, msg }
+function pkHoles() { const a = tnHoles(); return st.role === 'Chalet' ? a : a.filter(h => h.id === st.node_id); }   // a hub's own page answers only its own hole
+function pkRender() {
+  const ids = Object.keys(pkState).map(Number).sort((a, b) => a - b);
+  if (!ids.length) { $('pkOut').innerHTML = ''; return; }
+  let h = '<table class="tbl"><tr><th>Hole</th><th>On this pack</th><th></th></tr>';
+  for (const id of ids) {
+    const s = pkState[id], d = s.d, hrs = d ? d.seconds / 3600 : 0;
+    const val = d ? `<span class="badge ${hrs >= PK_WARN_H ? 'warn' : 'on'}">${hrs.toFixed(1)} h</span>${d.renewed ? ' <small>new pack, counting from 0</small>' : ''} <small>${d.age_s} s ago</small>` : esc(s.msg || '–');
+    h += `<tr><td>${esc(s.name)} (#${id})</td><td>${val}</td><td><button class="btn small" type="button" data-pk="${id}">New pack</button></td></tr>`;
+  }
+  $('pkOut').innerHTML = h + '</table>';
+}
+function pkPoll(id, run) {
+  api('/api/pack?id=' + id).then(d => {
+    if (run !== pkRun || !pkState[id]) return;
+    const s = pkState[id];
+    if (d.have) { s.d = d; s.msg = ''; pkRender(); return; }
+    const sec = Math.round((Date.now() - s.t0) / 1000);
+    if (sec > 90) { s.msg = 'no answer in 90 s: asleep, out of reach, or older firmware'; pkRender(); return; }
+    s.msg = `waiting for the hole… ${sec} s`; pkRender();
+    setTimeout(() => pkPoll(id, run), 2000);
+  }).catch(() => { if (run === pkRun) setTimeout(() => pkPoll(id, run), 3000); });
+}
+function pkAsk(hl, renew, run) {
+  pkState[hl.id] = { name: hl.name, t0: Date.now(), d: null, msg: 'sent, waiting for the hole…' }; pkRender();
+  api('/api/node/pack', renew ? { nodeId: hl.id, new: true } : { nodeId: hl.id }).then(() => pkPoll(hl.id, run))
+    .catch(() => { if (run === pkRun) { pkState[hl.id].msg = 'chalet not reachable'; pkRender(); } });
+}
+$('pkRead').addEventListener('click', () => {
+  const holes = pkHoles(), run = ++pkRun;
+  for (const k of Object.keys(pkState)) delete pkState[k];
+  if (!holes.length) { $('pkMsg').textContent = 'No hole heard yet.'; pkRender(); return; }
+  $('pkMsg').textContent = '';
+  holes.forEach((hl, i) => { pkState[hl.id] = { name: hl.name, t0: Date.now(), d: null, msg: 'queued' }; setTimeout(() => { if (run === pkRun) pkAsk(hl, false, run); }, i * 1500); });   // the chalet beacons one command at a time
+  pkRender();
+});
+$('pkOut').addEventListener('click', e => {
+  const b = e.target.closest('button[data-pk]'); if (!b) return;
+  const id = +b.dataset.pk, s = pkState[id]; if (!s) return;
+  if (!confirm(`New pack in ${s.name}? Its hours go back to 0.`)) return;
+  pkAsk({ id, name: s.name }, true, pkRun);
+});
 /* ---------- Test & simulation ---------- */
 let sim = null;
 function loadSim() { return api('/api/sim').then(d => { sim = d; renderSim(); }).catch(() => {}); }

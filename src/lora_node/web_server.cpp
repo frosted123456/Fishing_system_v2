@@ -2,6 +2,7 @@
 #include <sonar_tune.h>
 #include "ota_update.h"   // D148
 #include "chalet.h"
+#include "pack_hours_nvs.h"   // D205b: /api/pack, /api/node/pack
 #include <ESPmDNS.h>
 static String statusJson();
 void handleWebApiWifi(); void handleWebApiWifiPost();
@@ -41,6 +42,8 @@ void setupWebServer() {
   POST_PIN("/api/node/update", handleWebApiNodeUpdate);       // D148: ask a hub to restart into its firmware update mode ({"nodeId":n})
   POST_PIN("/api/node/tune", handleWebApiNodeTune);           // D141: ask a hole to tune its transducer ({"nodeId":n,"clear":true} forgets it)
   server.on("/api/tune", HTTP_GET, handleWebApiTune);                       // D141: last tune result of ?id=
+  POST_PIN("/api/node/pack", handleWebApiNodePack);           // D205b: {"nodeId":n} reads a hole's pack hours, "new":true resets them
+  server.on("/api/pack", HTTP_GET, handleWebApiPack);                       // D205b: last pack-hours answer of ?id=
   POST_PIN("/api/node/pos", handleWebApiNodePos);      // v2 (D51): position on the pocket map
   server.on("/api/trips", HTTP_GET, handleWebApiTrips);            // v2 (D43): sonar of the minute before each trip
   server.on("/settings", HTTP_GET, handleWebRoot);            // v2: one suite page, the path picks the tab
@@ -390,6 +393,32 @@ void handleWebApiNodeTune() {
   else if (id == NODE_ID) nodeTuneCmd(v);
   else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, v);
   server.send(200, "application/json", "{\"ok\":true}");
+}
+// D205b POST {"nodeId":n[,"new":true]}: the chalet beacons CMD_SELFTEST value 4 (read) / 5 (new pack); the hub answers
+// for its own hole or hands DEVCMD_SELFTEST to the tip-up; the answer comes back in SEC_SELFTEST as a PackResult (ver 3).
+// On a hub's own hotspot page the own hole is answered here at once.
+void handleWebApiNodePack() {
+  StaticJsonDocument<96> doc;
+  if (!server.hasArg("plain") || deserializeJson(doc, server.arg("plain"))) { server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}"); return; }
+  const int id = doc["nodeId"] | 0;
+  const bool renew = doc["new"] | false;
+  if (id <= 0 || id >= 255) { server.send(400, "application/json", "{\"error\":\"bad hole\"}"); return; }
+  const uint8_t v = renew ? icemesh::PACK_CMD_NEW : icemesh::PACK_CMD_READ;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) meshSetPack((uint8_t)id, v);
+  else if (id == NODE_ID) { if (renew) packnvs::renew("hub page"); }
+  else devCmdQueue((uint8_t)id, DEVCMD_SELFTEST, v);
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+void handleWebApiPack() {
+  const int id = server.hasArg("id") ? server.arg("id").toInt() : 0;
+  uint8_t b[12]; uint32_t age = 0; bool have = false;
+  if (currentRole == ROLE_GATEWAY_OFFSHORE) have = id > 0 && id < 255 && meshPackResult((uint8_t)id, b, age);
+  else if (id == NODE_ID) { const icemesh::PackResult r = icemesh::PackResult::make(packnvs::clk().seconds(), false); memcpy(b, &r, 12); have = true; }
+  if (!have || !icemesh::PackResult::is(b)) { server.send(200, "application/json", "{\"have\":false}"); return; }
+  const uint32_t s = icemesh::PackResult::seconds(b);
+  char out[128];
+  snprintf(out, sizeof(out), "{\"have\":true,\"id\":%d,\"age_s\":%lu,\"seconds\":%lu,\"renewed\":%s}", id, (unsigned long)(age / 1000), (unsigned long)s, (b[1] & icemesh::PACK_FL_RENEWED) ? "true" : "false");
+  server.send(200, "application/json", out);
 }
 void handleWebApiTune() {
   const int id = server.hasArg("id") ? server.arg("id").toInt() : 0;

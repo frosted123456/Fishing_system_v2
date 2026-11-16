@@ -66,6 +66,7 @@
 #include "messages.h"
 #include <hall_latch.h>         // v2 (D46): spool-shaft Hall latch
 #include <arm_button.h>         // v2 (D61): arming button + armed / disarmed state
+#include "pack_hours_nvs.h"     // D205: hours run on the current battery pack (NVS), INFO line, PACK command
 #include <driver/rtc_io.h>
 #include <sys/time.h>
 #include "sonar_tuss4470.h"    // v2 (D43): real sonar (TUSS4470), only with SONAR_REAL=1
@@ -115,6 +116,7 @@ volatile int16_t devCmdBait = -1;            // v2 (D43): bait depth from the ch
 RTC_DATA_ATTR icemesh::ArmState armState;    // plain struct, zero = armed (like HallLatch)
 volatile int8_t devCmdArm = -1;              // -1 none, 0 disarm, 1 arm
 volatile bool devCmdSelfTest = false;        // D70: the chalet asked for the wiring check
+volatile uint8_t devCmdPack = 0;             // D205b: the chalet asked for the pack hours (4 read, 5 new pack)
 volatile uint8_t devCmdTune = 0;             // D141: the chalet asked for the transducer tune (1 run, 2 clear), taken by sonarLoop()
 RTC_DATA_ATTR uint16_t btnPresses = 0;       // D70: button events since power-on
 void selfTestRun(bool toSerial);             // D70: run + send MSG_SELFTEST to the hub (and print)
@@ -389,6 +391,14 @@ void setup() {
 
   // Setup hardware
   setupPins();
+  packnvs::begin();   // D205
+  #if BTN_PIN >= 0
+  #ifdef LED_PIN
+  packnvs::bootGesture(BTN_PIN, LED_PIN, nullptr);   // button held at power-on = new pack
+  #else
+  packnvs::bootGesture(BTN_PIN, -1, nullptr);
+  #endif
+  #endif
   
   // Read sensors
   readBattery();
@@ -546,6 +556,7 @@ void setup() {
 
 void loop() {
   static unsigned long lastUptimeUpdate = 0;
+  packnvs::tick();   // D205
   #if SONAR_SIM_ALLOWED
   sonarLoop();
   #endif
@@ -1117,7 +1128,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
     if (c->target == NODE_ID && c->cmd == DEVCMD_SIM) devCmdSim = c->value;
     if (c->target == NODE_ID && c->cmd == DEVCMD_BAIT) devCmdBait = c->value;
     if (c->target == NODE_ID && c->cmd == DEVCMD_ARM) devCmdArm = c->value ? 1 : 0;   // D61
-    if (c->target == NODE_ID && c->cmd == DEVCMD_SELFTEST) { if (c->value == 0) devCmdSelfTest = true; else devCmdTune = c->value; }   // D70; D141: value 1 / 2 = transducer tune / clear
+    if (c->target == NODE_ID && c->cmd == DEVCMD_SELFTEST) { if (c->value == 0) devCmdSelfTest = true; else if (c->value == icemesh::PACK_CMD_READ || c->value == icemesh::PACK_CMD_NEW) devCmdPack = c->value; else devCmdTune = c->value; }   // D70; D141: value 1 / 2 = transducer tune / clear
     return;
   }
 
@@ -1230,6 +1241,7 @@ void enterDeepSleep() {
 
   armBtnWake();   // D61: the button wakes us too (ext1, beside the Hall ext0)
   if (SONAR_REAL) tuss::sleep();   // shield stays powered: low-power mode over SPI; with the enable wire (SONAR_EN_WIRE) the converter is held off too
+  packnvs::flush();   // D205: this wake's run time to flash
   esp_deep_sleep_start();
 }
 
@@ -1263,6 +1275,7 @@ void enterDeepSleepFast() {
 
   armBtnWake();   // D61
   if (SONAR_REAL) tuss::sleep();   // shield stays powered: low-power mode over SPI; with the enable wire (SONAR_EN_WIRE) the converter is held off too
+  packnvs::flush();   // D205: this wake's run time to flash
   esp_deep_sleep_start();
 }
 
@@ -1527,6 +1540,14 @@ static void armAct(icemesh::ArmAction a) {
 
 void armApplyCmd() {
   if (devCmdSelfTest) { devCmdSelfTest = false; selfTestRun(true); }   // D70: answered right away, the hub is listening
+  if (devCmdPack) {   // D205b: pack hours to the chalet (PackResult in the SelfTestResult slot)
+    const bool renew = devCmdPack == icemesh::PACK_CMD_NEW; devCmdPack = 0;
+    if (renew) packnvs::renew("chalet page");
+    SelfTestMessage m; m.network_id = NETWORK_ID; m.node_id = NODE_ID; m.msg_type = MSG_SELFTEST;
+    const icemesh::PackResult r = icemesh::PackResult::make(packnvs::clk().seconds(), renew); memcpy(&m.r, &r, sizeof(m.r));
+    Serial.printf("PACK to the hub: %s%s\n", packnvs::text(), renew ? " (new pack)" : "");
+    if (espNowReady) espNowSendReliable((uint8_t*)&m, sizeof(m), 3);
+  }
   const int8_t c = devCmdArm;
   if (c < 0) return;
   devCmdArm = -1;
@@ -1667,11 +1688,11 @@ static void recInfo() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[512];
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u pack_s=%lu heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), batteryMv, (unsigned long)ESP.getFreeHeap(),
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), batteryMv, (unsigned long)packnvs::clk().seconds(), (unsigned long)ESP.getFreeHeap(),
                    (unsigned long)ESP.getMinFreeHeap(), resetReasonName(g_rstWhy), (unsigned long)g_rstBoots);   // D199
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf);
@@ -1875,7 +1896,8 @@ String sonarCommand(const String& in, bool fromWeb) {
     return r;
   }
   #endif
-  if (U == "SELFTEST") {   // D70
+  if (packnvs::command(l, r)) {   // D205: PACK / PACK NEW
+  } else if (U == "SELFTEST") {   // D70
     selfTestRun(true);
     r = "SELFTEST done (printed above)";
   } else if (U == "NODETUNE" || U == "NODETUNE CLEAR") {   // D141: this hole's transducer tune, as the chalet asks it

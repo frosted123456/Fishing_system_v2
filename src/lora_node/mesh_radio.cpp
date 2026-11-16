@@ -91,9 +91,11 @@ struct ChaletSink : public sonar::SonarStore<16, SONAR_RING, SONAR_HIST> {
   struct R { uint8_t node; uint8_t r[12]; uint32_t at_ms; };
   R st[16]; uint8_t st_n = 0;
   R tn[16]; uint8_t tn_n = 0;   // D141: last transducer-tune result of each hole (same section, 12 B with version 2)
+  R pk[16]; uint8_t pk_n = 0;   // D205b: last pack-hours answer of each hole (same section, version 3)
   void onSelfTest(uint8_t, uint8_t node, const uint8_t* r12, uint16_t) override {
     const bool tune = r12[0] == 2;   // icemesh::sonar::TUNE_RESULT_VER
-    R* a = tune ? tn : st; uint8_t& n = tune ? tn_n : st_n;
+    const bool pack = r12[0] == 3;   // icemesh::PACK_RESULT_VER
+    R* a = pack ? pk : tune ? tn : st; uint8_t& n = pack ? pk_n : tune ? tn_n : st_n;
     R* p = nullptr;
     for (uint8_t i = 0; i < n && p == nullptr; i++) if (a[i].node == node) p = &a[i];
     if (p == nullptr) { if (n < 16) p = &a[n++]; else p = &a[0]; }
@@ -1172,6 +1174,20 @@ void meshSetTune(uint8_t hole, uint8_t value) {
   if (g_sonar != nullptr)   // the old result goes: the page shows "waiting" until the fresh one lands
     for (uint8_t i = 0; i < g_sonar->tn_n; i++) if (g_sonar->tn[i].node == hole) { g_sonar->tn[i] = g_sonar->tn[--g_sonar->tn_n]; break; }
   cmdQueue(CMD_SELFTEST, hole, value);
+}
+// D205b: pack hours of one hole (value 4 = read, 5 = new pack). Same beacon command; the answer is version 3
+void meshSetPack(uint8_t hole, uint8_t value) {
+  if (!g_chalet || g_ch == nullptr || hole == 0 || value == 0) return;
+  Lock l;
+  if (g_sonar != nullptr)   // the old answer goes: the page shows "waiting" until the fresh one lands
+    for (uint8_t i = 0; i < g_sonar->pk_n; i++) if (g_sonar->pk[i].node == hole) { g_sonar->pk[i] = g_sonar->pk[--g_sonar->pk_n]; break; }
+  cmdQueue(CMD_SELFTEST, hole, value);
+}
+bool meshPackResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms) {   // chalet: last pack-hours answer of a hole
+  if (g_sonar == nullptr) return false;
+  Lock l;
+  for (uint8_t i = 0; i < g_sonar->pk_n; i++) if (g_sonar->pk[i].node == node) { memcpy(out12, g_sonar->pk[i].r, 12); age_ms = millis() - g_sonar->pk[i].at_ms; return true; }
+  return false;
 }
 bool meshTuneResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms) {   // chalet: last tune result of a hole
   if (g_sonar == nullptr) return false;

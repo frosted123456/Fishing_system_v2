@@ -18,6 +18,8 @@
 #include <bench_web.h>   // D87: phone bench page on the hub hotspot (SONAR_BENCH builds)
 #endif
 #include <arm_button.h>   // v2 (D61): arming button + armed / disarmed state (lib/IceMesh, host-tested)
+#include "pack_hours_nvs.h"   // D205: hours run on the current battery pack (NVS), OLED header + INFO line
+void packOwnAnswer(bool renew);   // D205b: the chalet page read / reset the own hole's pack hours
 #include <hall_latch.h>    // v2 (D64): own hole on a spool-shaft Hall latch (lib/IceMesh, host-tested)
 #include "ota_update.h"   // D148
 #include <esp_system.h>   // D65: esp_reset_reason()
@@ -307,6 +309,10 @@ void setup() {
   // Setup user button for silencing (GPIO0 on Heltec V3)
   pinMode(USER_BUTTON, INPUT_PULLUP);
   DEBUG_PRINTLN(F("User button (GPIO0) enabled for silencing"));
+  packnvs::begin();   // D205
+  #if BTN_PIN >= 0
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) packnvs::bootGesture(BTN_PIN, LED_PIN, [] { esp_task_wdt_reset(); });   // held at power-on = new pack
+  #endif
   if (currentRole != ROLE_GATEWAY_OFFSHORE) setupArmButton();   // v2 (D61): arming button of the hub's own hole
   gpsSetup();   // D73: chalet GPS (UART1)
   mapPackSetup();   // D74: offline map pack storage (chalet, LittleFS)
@@ -360,6 +366,7 @@ void loop() {
   PerfScope perfLoop(PF_LOOP);
   // BUG FIX #8: Feed hardware watchdog to prevent reset
   esp_task_wdt_reset();
+  packnvs::tick();   // D205
   otaLoop();   // D148: a new firmware is confirmed after 90 s of running
   if (g_crashRun && millis() > 120000UL) g_crashRun = 0;   // D126c: 2 min without a crash: not a crash loop
 
@@ -668,6 +675,10 @@ void drawLiveStatus() {
              network.node_count, MAX_NODES);
   }
   display.drawStr(0, UI_HEADER_Y, header);
+  if (currentRole != ROLE_GATEWAY_OFFSHORE) {   // D205: hours on this pack, right end of the header
+    char pk[14]; snprintf(pk, sizeof(pk), "Pk%s", packnvs::text());
+    display.drawStr(UI_SCREEN_WIDTH - (int)strlen(pk) * FONT_MEDIUM_WIDTH, UI_HEADER_Y, pk);
+  }
   display.drawLine(0, UI_SEPARATOR_Y, UI_SCREEN_WIDTH, UI_SEPARATOR_Y);
 
   bool blinkOn = ((millis() / 500) % 2) == 0;
@@ -1849,6 +1860,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
       if (len < (int)sizeof(SelfTestMessage)) break;
       const SelfTestMessage* m = (const SelfTestMessage*)data;
       meshHubSelfTestReport(m->node_id, (const uint8_t*)&m->r);
+      if (icemesh::PackResult::is((const uint8_t*)&m->r)) { Serial.printf("PACK from hole %u: %lu s%s\n", m->node_id, (unsigned long)icemesh::PackResult::seconds((const uint8_t*)&m->r), (((const uint8_t*)&m->r)[1] & icemesh::PACK_FL_RENEWED) ? " (new pack)" : ""); break; }   // D205b
       Serial.printf("SELFTEST from hole %u: sensor=0x%02X button=0x%02X batt=%u shield=0x%02X ring=%u\n", m->node_id, m->r.sensor, m->r.button, m->r.battery_mv, m->r.shield, m->r.ring_bins);
       break;
     }
@@ -2691,7 +2703,10 @@ void meshLoop() {
       } else if (cmd == MESH_CMD_SET_ARM) {
         armApply(dev, val != 0);    // D61: own hole here, tip-ups after their next message
       } else if (cmd == MESH_CMD_SELFTEST) {   // D70
-        if (val != 0) {   // D141: 1 = tune this hole's transducer, 2 = forget its tune
+        if (val == icemesh::PACK_CMD_READ || val == icemesh::PACK_CMD_NEW) {   // D205b: pack hours, read / new pack
+          if (dev == NODE_ID) packOwnAnswer(val == icemesh::PACK_CMD_NEW);
+          else if (!isMyVirtualHole(dev)) devCmdQueue(dev, DEVCMD_SELFTEST, val);
+        } else if (val != 0) {   // D141: 1 = tune this hole's transducer, 2 = forget its tune
           if (val == icemesh::sonar::TUNE_CMD_OTA) { if (dev == NODE_ID) otaRequest(); }   // D148: the chalet asks this hub to restart into the update mode (never passed on to a tip-up)
           else if (dev == NODE_ID) nodeTuneCmd(val);
           else if (!isMyVirtualHole(dev)) devCmdQueue(dev, DEVCMD_SELFTEST, val);
@@ -2978,6 +2993,14 @@ int8_t armPendingFor(uint8_t hole) {   // D68: -1 none, else the value (1 armed 
   return -1;
 }
 
+// D205b: own hole's pack hours to the chalet (SEC_SELFTEST, PackResult), after a reset when asked
+void packOwnAnswer(bool renew) {
+  if (renew) packnvs::renew("chalet page");
+  const icemesh::PackResult r = icemesh::PackResult::make(packnvs::clk().seconds(), renew);
+  meshHubSelfTestReport(NODE_ID, (const uint8_t*)&r);
+  Serial.printf("PACK own hole: %s\n", packnvs::text());
+}
+
 void setupArmButton() {
   { Preferences p; p.begin("node", true); armState.set(p.getBool("armed", true)); p.end(); }
   if (!armState.armed()) SET_FLAG(network.nodes[0].flags, FLAG_DISARMED);
@@ -3220,11 +3243,11 @@ static void sonarInfoLines() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[640];   // D96: longer INFO line
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u heap=%lu heap_min=%lu reset=%s boot=%lu psram=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u pack_s=%lu heap=%lu heap_min=%lu reset=%s boot=%lu psram=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), localBatteryMv, (unsigned long)ESP.getFreeHeap(),
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), localBatteryMv, (unsigned long)packnvs::clk().seconds(), (unsigned long)ESP.getFreeHeap(),
                    (unsigned long)ESP.getMinFreeHeap(), resetReasonName(esp_reset_reason()), (unsigned long)g_bootCount, (unsigned long)ESP.getPsramSize());   // D152: psram = bytes of external RAM the core found (0 = none)   // D96: brown-outs and heap floor on record
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf, !sonarRecAny());
@@ -3561,6 +3584,7 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
       else r = "CAL needs 17 numbers 0..4095 (raw 0, 256 ... 4096 -> corrected); stored curve unchanged\n";
     }
     r += "ADC calibration:"; for (int k = 0; k < 17; k++) { r += " "; r += String(pts[k]); }
+  } else if (packnvs::command(l, r)) {   // D205: PACK / PACK NEW (page and serial)
   } else { handled = false; return String(); }
   return r;
 }

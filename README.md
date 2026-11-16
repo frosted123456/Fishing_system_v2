@@ -409,6 +409,15 @@ The XL6009 must still make ≥ 29 V on a half-used pack; if not, keep the MT3608
    - Without GPS: on the page, tap the hole → **Tap the map**.
 6. Set the bait depth of each sonar hole: tap the hole → bait.
 7. Check bait: disarm the hole first (short press), re-arm after.
+8. Fresh battery pack in a hub or tip-up: hold its arming button while switching the pack on, until the LED blinks 3
+   times (~3 s), or on the chalet page: Test tab → **Battery packs** → **New pack** on that hole. That sets its pack
+   hours back to 0. **Read all holes** there shows every hub and tip-up (flagged past 12 h); the hub OLED shows its own
+   at the top right (`Pk7.3h`); `PACK` on serial or the bench page too. Released sooner = ordinary start.
+
+**Battery (3 × L91 per module, est. from datasheets, D205):** about 15-24 h per pack at 20 °C, 11-21 h at -15/-20 °C,
+about 10 h with the bench page streaming. Plan one fresh pack per module per session plus one spare. The L91 voltage
+stays flat until the last 10-15 %, so the pack hours, not a voltage, are the gauge; a meter on the 10 A range in
+series with the pack gives the real figure (hours = ~13 Wh / pack watts).
 
 The first time, the map origin is set by itself once the chalet GPS is steady for 30 s. It is kept after that.
 To move it: OLED GPS page → Chalet here, or tap the chalet on the map → **Chalet here**. Pinning a hole needs a GPS
@@ -423,6 +432,7 @@ fix and an origin.
 | Short press | Arm / disarm | Armed: 2 short. Disarmed: 1 long |
 | Short press while tripped | Clear the trip | 1 short |
 | Hold 3 s | Send a status report now | 3 short |
+| Held while switching the pack on, ~3 s | New pack: pack hours back to 0 (D205) | 3 blinks |
 | Spool turns a quarter turn | FISH ON | |
 | Spool still for 30 s | Line back to normal on the tip-up | |
 
@@ -691,6 +701,7 @@ Nothing is lost, updates are slower.
 | `HOLE` / `HOLE ARM\|DISARM\|CLEAR\|TEST` | Hub or LoRa tip-up: own hole state, arm, disarm, clear, wiring check |
 | `HOTSPOT ON\|OFF` | Hub: hotspot |
 | `SWEEP` / `SWEEP RX` / `SWEEP NOISE` / `SWEEP STOP` | Hub bench build: automated runs while recording (settings, receiver, noise scan with the converter running and gated) |
+| `PACK` / `PACK NEW` | Hub and tip-ups: hours run on the current battery pack / set it back to 0 after a swap (also the bench page's **New pack** button) |
 | `BOOST OFF [s]` / `BOOST ON` | Hub bench build with the enable wire: hold the converter off for a few seconds (default 6) |
 | `MAP` / `MAP CLEAR` | Depth pack size / remove it (saved tiles stay) |
 

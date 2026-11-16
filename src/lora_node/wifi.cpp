@@ -1,6 +1,7 @@
 // Chalet / hub Wi-Fi: hotspot, cabin network, credentials, retry (split out of main.cpp, D49). Shared declarations: chalet.h
 #include "ota_update.h"   // D148
 #include "chalet.h"
+#include "pack_hours_nvs.h"   // D205: PACK / PACK NEW on serial
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WIFI SETUP (AP, STA, or AP+STA mode)
@@ -116,6 +117,7 @@ void checkSerialWifiConfig() {
   line.trim();
   if (!line.length()) return;
   if (line[0] == '$') { gpsFeedSerialLine(line.c_str()); return; }   // D73: GPS module wired to the RX header pin (UART0)
+  { String r; if (packnvs::command(line, r)) { Serial.println(r); return; } }   // D205: PACK / PACK NEW, every hub build
   if (sonarSerialCommand(line)) return;   // D62: STAT / REG / CAL / INFO / REC ... of the real sonar (SONAR_REAL builds)
   handleSerialCommandLine(line);
 }

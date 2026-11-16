@@ -128,6 +128,8 @@ void meshSetArm(uint8_t hole, bool armed);           // chalet: arm / disarm one
 bool meshCmdPending(uint8_t cmd, uint8_t target, uint8_t& value);   // D68: queued or being beaconed (page feedback)
 void meshSetSelfTest(uint8_t hole);                                   // D70: chalet asks a hole for its wiring check
 void meshHubSelfTestReport(uint8_t node, const uint8_t* r12);         // D70: hub: a hole's result, to the chalet
+void meshSetPack(uint8_t hole, uint8_t value);                       // D205b: chalet: pack hours of a hole (4 read, 5 new pack)
+bool meshPackResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms);   // D205b: chalet: last pack answer
 bool meshSelfTestResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms);   // D70: chalet: last result
 void meshSetTune(uint8_t hole, uint8_t value);                                 // D141: chalet asks a hole to tune its transducer (1) / forget it (2)
 bool meshTuneResult(uint8_t node, uint8_t out12[12], uint32_t& age_ms);        // D141: chalet: last tune result (icemesh::sonar::TuneResult)
