@@ -487,7 +487,10 @@ void loop() {
     meshPrintStatus(Serial);
   }
 
-  yield();
+  // D206: 1 ms sleep per pass instead of yield(). yield() never lets the idle task run, so the loop task kept one core at
+  // 100 % all day (ESP32-S3 datasheet, 240 MHz: one core busy ~66 mA against ~33 mA with both waiting). Nothing in loop()
+  // needs better than 1 ms: the LoRa timing lives in the radio task (priority 5), ESP-NOW in the Wi-Fi task.
+  delay(1);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1622,7 +1625,7 @@ void devCmdOnNodeHeard(uint8_t node) {
     DevCmdMessage m;
     m.network_id = NETWORK_ID; m.sender_id = NODE_ID; m.msg_type = MSG_DEV_CMD;
     m.target = node; m.cmd = d.cmd; m.value = d.value;
-    nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
+    nowSendTipup((uint8_t*)&m, sizeof(m));   // D208
     if (++d.sends >= 3) d.node = 0;
   }
 }
@@ -1736,7 +1739,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
   if (msgType == MSG_STATUS || msgType == MSG_ALERT || msgType == MSG_HEARTBEAT) devCmdOnNodeHeard(nodeId);
 
   // v2 sonar: a node just transmitted, so it listens for a moment: answer with the sonar control
-  if (msgType != MSG_SONAR && msgType != MSG_SONAR_CTRL) sonarCtrlKick = true;
+  if (msgType == MSG_STATUS || msgType == MSG_ALERT || msgType == MSG_HEARTBEAT || msgType == MSG_SELFTEST) sonarCtrlKick = true;   // D209: a TIP-UP just sent (was: anything but sonar frames, so another hub's ACK / command copies (D208: 5 each) kicked a control burst here too)
 
   switch (msgType) {
     case MSG_SONAR: {
@@ -1846,7 +1849,7 @@ void processEspNowMessage(const uint8_t* data, int len, int rssi) {
           ack.ack_node_id = msg->node_id;
           ack.ack_msg_type = MSG_ALERT;
           ack.reserved = 0;
-          nowSend(ESPNOW_BROADCAST, (uint8_t*)&ack, sizeof(ack));
+          nowSendTipup((uint8_t*)&ack, sizeof(ack));   // D208
           DEBUG_PRINTF("Sent ACK to node %d for ALERT\n", msg->node_id);
         }
       }
@@ -2538,7 +2541,7 @@ void sendResetAllCommand() {
 
   // Send via ESP-NOW to reach sensor nodes
   if (espNowReady) {
-    nowSend(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
+    nowSendTipup((uint8_t*)&msg, sizeof(msg));   // D208
     DEBUG_PRINTLN("ESP-NOW: Reset command sent");
     delay(100);  // Give it time to transmit
   }
@@ -2647,7 +2650,7 @@ static void networkResetFromChalet() {
     msg.msg_type = MSG_RESET_CMD;
     msg.reset_delay_sec = 0;
     msg.timestamp = millis() / 1000;
-    nowSend(ESPNOW_BROADCAST, (uint8_t*)&msg, sizeof(msg));
+    nowSendTipup((uint8_t*)&msg, sizeof(msg));   // D208
   }
   showOverlayMessage("Network reset", 1500);
   delay(100 * (NODE_ID % 10));   // stagger hub reboots
@@ -2832,7 +2835,8 @@ static void sendSonarCtrl(bool sim, uint8_t focus) {
     for (uint8_t i = 0; i < n && k < 2; i++) if (f[i] != focus) m.focus_extra[k++] = f[i]; }
   m.n_params = icemesh::sonar::P_COUNT;   // v2 (D42): the sonar knobs ride along
   memcpy(m.params, sonarPrm.v, icemesh::sonar::P_COUNT);
-  nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
+  m.echo_every = meshEchoEvery();   // D209: the tip-ups follow the hub's link (they stayed at 1 line/s whatever the link)
+  nowSendTipup((uint8_t*)&m, sizeof(m));   // D208
 }
 
 // =============================================================================================
@@ -2978,7 +2982,7 @@ void armAllOnNodeHeard(uint8_t node) {   // from devCmdOnNodeHeard: the tip-up l
   DevCmdMessage m;
   m.network_id = NETWORK_ID; m.sender_id = NODE_ID; m.msg_type = MSG_DEV_CMD;
   m.target = node; m.cmd = DEVCMD_ARM; m.value = (uint8_t)armAllPending;
-  nowSend(ESPNOW_BROADCAST, (uint8_t*)&m, sizeof(m));
+  nowSendTipup((uint8_t*)&m, sizeof(m));   // D208
 }
 
 // chalet: arm / disarm a hole from the page (the hole reports what it runs with: LF_DISARMED -> FLAG_DISARMED)
@@ -3243,11 +3247,11 @@ static void sonarInfoLines() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[640];   // D96: longer INFO line
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u pack_s=%lu heap=%lu heap_min=%lu reset=%s boot=%lu psram=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d idle_rest=%d vbat_mv=%u pack_s=%lu heap=%lu heap_min=%lu reset=%s boot=%lu psram=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), localBatteryMv, (unsigned long)packnvs::clk().seconds(), (unsigned long)ESP.getFreeHeap(),
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), (int)tuss::idleRestState(), localBatteryMv, (unsigned long)packnvs::clk().seconds(), (unsigned long)ESP.getFreeHeap(),
                    (unsigned long)ESP.getMinFreeHeap(), resetReasonName(esp_reset_reason()), (unsigned long)g_bootCount, (unsigned long)ESP.getPsramSize());   // D152: psram = bytes of external RAM the core found (0 = none)   // D96: brown-outs and heap floor on record
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf, !sonarRecAny());
@@ -3273,9 +3277,9 @@ static void sonarRecordLine(const uint8_t codes[icemesh::sonar::sp::NFREQ][iceme
 static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   if (!sonarRecAny()) return;
   char buf[640];
-  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u bst=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
+  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u bst=%u rest=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
                    "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u heap=%u heap_min=%u",
-                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, pi.burst_state, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
+                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, pi.burst_state, pi.rested, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
                    (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                    o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());   // D110: heap on every ping (find the slope)
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
@@ -3542,6 +3546,14 @@ static String sonarCommandReply(const String& in, bool fromWeb, bool& handled) {
     #else
     r = "no sonar in this build";
     #endif
+  } else if (w == "REST") {   // D206: idle rest on / off (RAM only), for a bench comparison
+    #if SONAR_REAL
+    String a = rest; a.toUpperCase();
+    if (a == "ON" || a == "OFF") { tuss::setIdleRest(a == "ON"); char t[64]; snprintf(t, sizeof(t), "NOTE %lu idle rest %s", millis(), a == "ON" ? "ON" : "off"); recLine(t, true); }
+    r = String("Idle rest ") + (tuss::idleRest() ? "ON: chip in standby and converter off between idle pings" : (tuss::idleRestState() == 2 ? "OFF, switched off by a guard (brown-out or no transmit after a rest)" : "off")) + " (REST ON | OFF)";
+    #else
+    r = "no sonar in this build";
+    #endif
   } else if (w == "BOOST") {   // D172
     #if SONAR_REAL
     r = boostCommand(rest);
@@ -3660,20 +3672,27 @@ static void sonarRealBait() {
 }
 
 // one 250 ms tick of the real own-hole sonar: ping when due (radio quiet), process, push the blocks
-static void sonarRealTick(bool focus) {
+static bool g_pingDeferred = false;   // D209: a ping is waiting for the radio to go quiet (re-tried every loop pass)
+static void sonarRealTick(bool focus, bool retry = false) {
   #if SONAR_REAL
   static uint8_t tick_n = 0;
-  static bool deferred = false;
+  bool& deferred = g_pingDeferred;
   static uint32_t deferredAtUs = 0;
   static uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::BINS];
   static uint32_t usMax = 0, usSum = 0, cnt = 0; static unsigned long lastReport = 0, lastBench = 0;
   const uint8_t tpp = g_nodeTuner.active() ? 1 : sonarReal->ticksPerPing(focus);   // D141: a tune pings 4 times a second
-  if (++tick_n < tpp) return;
+  if (retry) { if (!deferred) return; }
+  else if (++tick_n < tpp) return;
+  if (!deferred) tuss::restWake();   // D209: the idle-rest restart (100 ms) happens BEFORE the radio-quiet check, not inside the ping after it
   // radio quiet: nothing in flight on ESP-NOW (2 ms guard after the last send callback) and no LoRa transmit on
   // the air or planned inside the ping. Not quiet: wait one tick, once.
   const bool nowInFlight = (g_nowQueued != g_nowDone) || (millis() - g_nowDoneMs) < SONAR_RF_GUARD_US / 1000UL;
   const bool quiet = !nowInFlight && meshLoraQuiet(focus ? SONAR_PING_FOCUS_EST_US : SONAR_PING_EST_US, SONAR_RF_GUARD_US);   // review: a focus ping (avg 1) is shorter
   if (!quiet && !deferred) { deferred = true; deferredAtUs = micros(); g_rfWaitN++; return; }
+  // D209: a deferred ping goes as soon as the radio is quiet (checked every loop pass), not a whole tick later: with a
+  // 231 ms packet in a 500 ms frame (SF9) one tick in two fell in the busy window, so the hub's own hole pinged about
+  // twice a second instead of four, and sometimes during the transmit. After 250 ms it goes anyway, as before.
+  if (!quiet && (uint32_t)(micros() - deferredAtUs) < 250000UL) return;
   if (deferred) { const uint32_t us = micros() - deferredAtUs; if (us > g_rfWaitUsMax) g_rfWaitUsMax = us; }
   if (!quiet) g_rfBusyAtPing++;
   const uint8_t ticks = tick_n;   // deferral included: the processing gets the real time since the last ping
@@ -3682,7 +3701,7 @@ static void sonarRealTick(bool focus) {
   tuss::PingInfo pi;
   if (tuss::ping(sonarPrm, focus, codes, pi)) {
     icemesh::sonar::Block out[5];   // D93: DATA + BG + BASE + ECHO can coincide on one ping
-    sonarReal->echo_every = meshFastEcho() ? 1 : icemesh::sonar::SonarSource::ECHO_EVERY;   // D107: every ping on ESP-NOW, 1/s on LoRa
+    sonarReal->echo_every = meshEchoEvery();   // D107: every ping on ESP-NOW; D209: 2 lines/s on LoRa when the turn has the room, else 1/s
     sonarReal->echo_on = meshFocusNode() == NODE_ID;   // D93: raw lines for THE focus hole only, not the 'live too' extras (66 B/s each)
     const uint8_t n = sonarReal->process(codes, pi.nfreq, pi.rot_f, 0.25f * ticks, focus, out, 5);
     for (uint8_t i = 0; i < n; i++) meshHubPushSonar(out[i].data, out[i].len);
@@ -3706,6 +3725,7 @@ static void sonarRealTick(bool focus) {
       sonarStatAsk = false; lastBench = millis();
       Serial.println(sonarBenchBuf);
     }
+    if (tpp >= 3 && g_sweepStep < 0 && !g_nodeTuner.active() && !sonarRawAsk) tuss::rest(tpp * 250UL <= SONAR_REST_MAX_GAP_MS);   // D206 / D207: next ping >= 750 ms away (idle rate): chip standby; converter off too when the gap is short enough
   }
   const uint32_t dt = micros() - t0;
   if (dt > usMax) usMax = dt;
@@ -3773,6 +3793,7 @@ void sonarHubLoop() {
     }
     if (millis() - realTick > 1000UL) realTick = millis() - 250UL;   // loop() was busy: don't burst
     uint8_t budget = 2;                                               // review: never more than two pings per loop() pass
+    if (g_pingDeferred) sonarRealTick(ownFocus, true);   // D209
     while (budget-- && millis() - realTick >= 250UL) {
       realTick += 250UL;
       sonarRealTick(ownFocus);

@@ -702,6 +702,7 @@ Nothing is lost, updates are slower.
 | `HOTSPOT ON\|OFF` | Hub: hotspot |
 | `SWEEP` / `SWEEP RX` / `SWEEP NOISE` / `SWEEP STOP` | Hub bench build: automated runs while recording (settings, receiver, noise scan with the converter running and gated) |
 | `PACK` / `PACK NEW` | Hub and tip-ups: hours run on the current battery pack / set it back to 0 after a swap (also the bench page's **New pack** button) |
+| `REST ON\|OFF` | Hub and tip-ups (sonar builds): idle rest, on by default (D207). Between idle pings (1 per second) the TUSS4470 goes to standby and, with the enable wire, the converter is switched off; both come back before the next ping (the converter by pulsing its enable pin for 60 ms, a software soft start, then 40 ms of settling). It switches itself off, and stays off, after a brown-out reset or 3 pings without transmit after a rest: `REST ON` re-arms it. `REST OFF` lasts until the next boot; `-D SONAR_IDLE_REST=0` removes it. Recordings mark the pings concerned with `rest=1` |
 | `BOOST OFF [s]` / `BOOST ON` | Hub bench build with the enable wire: hold the converter off for a few seconds (default 6) |
 | `MAP` / `MAP CLEAR` | Depth pack size / remove it (saved tiles stay) |
 

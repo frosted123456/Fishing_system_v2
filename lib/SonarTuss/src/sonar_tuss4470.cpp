@@ -10,6 +10,7 @@
 #include <soc/mcpwm_periph.h>
 #include <soc/io_mux_reg.h>
 #include <driver/gpio.h>
+#include <esp_system.h>
 #include <math.h>
 #if CONFIG_IDF_TARGET_ESP32S3
 #define SONAR_ADC_DIGI 1            // S3: digital ADC controller + GDMA (IDF 4.4 adc_digi_* API), see the header
@@ -124,6 +125,10 @@ static volatile uint32_t g_cap_burst = 0, g_cap_edge = 0;
 static volatile bool g_edge_seen = false;
 static volatile uint32_t g_blind_ticks = 0;
 static bool g_asleep = false, g_spi_up = false;
+static bool g_idleRest = SONAR_IDLE_REST != 0, g_resting = false;   // D206 idle rest, see the header
+static bool restExit();
+static uint8_t g_restTrip = 0, g_restMiss = 0;   // D207 guards
+static bool g_restConvOff = false;               // this rest switched the converter off (so its exit must wait for it)
 static bool g_swapped = false;   // D70: MISO / MOSI found swapped at begin() and the bus re-opened that way
 static uint8_t g_stat = 0;   // status bits of the last SPI reply (high byte bits 5:0)
 // TOF_CONFIG (reg 0x1B, datasheet): bit 7 SLEEP_MODE_EN, bit 6 STDBY_MODE_EN, bit 1 VDRV_TRIGGER, bit 0 CMD_TRIGGER
@@ -162,7 +167,7 @@ static void wake() {
   gpio_hold_dis((gpio_num_t)SONAR_PIN_CS);
   digitalWrite(SONAR_PIN_CS, HIGH);
   writeReg(0x1B, 0x00);
-  g_asleep = false;
+  g_asleep = false; g_resting = false; g_restConvOff = false;   // D206: a wake leaves the converter on and the chip listening
 }
 
 // ---- comparator edge: MCPWM capture (CAP0 = burst start on IO2, CAP1 = OUT_4), 80 MHz ticks ----
@@ -215,6 +220,7 @@ static bool g_boostHold = false;                     // converter held off acros
 void setBoostHold(bool on) {
   if (on == g_boostHold) return;
   g_boostHold = on;
+  restExit();   // D206: the button / scan decides alone from here 
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, on ? LOW : HIGH); }
 }
 // D170 / D173: converter off while this object lives, on again when it goes. One per burst (D173; D170 held it for the
@@ -226,6 +232,46 @@ struct BoostGate {
   ~BoostGate() { if (held) digitalWrite(SONAR_PIN_BOOST, HIGH); }
 };
 uint32_t lastBurstHz() { return g_lastHz; }
+// D206 idle rest, see the header
+static const uint8_t TOF_STANDBY = 0x40;
+bool idleRest() { return g_idleRest; }
+uint8_t idleRestState() { return g_idleRest ? 1 : (g_restTrip ? 2 : 0); }
+static bool restExit() {
+  if (!g_resting) return false;
+  g_resting = false;
+  const bool conv = g_restConvOff && SONAR_PIN_BOOST >= 0 && !g_boostHold;
+  g_restConvOff = false;
+  writeReg(0x1B, 0x00);   // chip out of standby first: it settles while the rail comes back
+  if (conv) {             // D208: soft start by pulsing the enable pin, see the header
+    for (uint16_t i = 0; i < SONAR_REST_SOFT_PULSES; i++) {
+      digitalWrite(SONAR_PIN_BOOST, HIGH); delayMicroseconds(SONAR_REST_SOFT_ON_US);
+      digitalWrite(SONAR_PIN_BOOST, LOW); delayMicroseconds(SONAR_REST_SOFT_OFF_US);
+      if ((i & 15) == 15) yield();
+    }
+    digitalWrite(SONAR_PIN_BOOST, HIGH);
+  }
+  delay(conv ? SONAR_REST_SETTLE_MS : SONAR_REST_EXIT_MS);
+  return true;
+}
+static void restTrip(const char* why) {   // D207: a guard switches the rest off until REST ON / a new firmware
+  g_idleRest = false; g_restTrip = 1; g_restMiss = 0;
+  Preferences p; if (p.begin("sonartune", false)) { p.putUChar("rb", 1); p.end(); }
+  Serial.printf("SONAR: idle rest switched OFF (%s). REST ON to try it again\n", why);
+}
+static bool g_restedPending = false;   // D209: a rest ended by restWake(): the next ping is still "rested" for the guards
+void restWake() { if (g_ok && !g_asleep && restExit()) g_restedPending = true; }
+void setIdleRest(bool on) {
+  g_idleRest = on; g_restMiss = 0;
+  if (on && g_restTrip) { g_restTrip = 0; Preferences p; if (p.begin("sonartune", false)) { p.remove("rb"); p.end(); } }
+  if (!on && g_ok && !g_asleep) restExit();
+}
+void rest(bool converterToo) {
+  if (!g_idleRest || !g_ok || g_asleep || g_resting || g_listenOnly) return;
+  writeReg(0x1B, TOF_STANDBY);
+  g_restConvOff = converterToo && SONAR_PIN_BOOST >= 0 && !g_boostHold;
+  if (g_restConvOff) digitalWrite(SONAR_PIN_BOOST, LOW);
+  g_resting = true;
+}
 
 static void loadCal() {
   Preferences p; p.begin("sonarcal", true);
@@ -246,6 +292,12 @@ static inline uint16_t cal(uint16_t raw) {   // piecewise linear, 16 segments
 bool begin() {
   loadCal();
   loadNodeTune();
+  {   // D207 guard (a): a brown-out with the idle rest on switches it off, and that is remembered
+    Preferences p; uint8_t rb = 0;
+    if (p.begin("sonartune", true)) { rb = p.getUChar("rb", 0); p.end(); }
+    if (rb) { g_idleRest = false; g_restTrip = 1; Serial.println(F("SONAR: idle rest is OFF (switched off by a guard earlier; REST ON to try it again)")); }
+    else if (g_idleRest && esp_reset_reason() == ESP_RST_BROWNOUT) restTrip("brown-out reset");
+  }
   pinMode(SONAR_PIN_IO1, OUTPUT); digitalWrite(SONAR_PIN_IO1, HIGH);   // as the shield reference firmware: IO1 high, burst on IO2
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
   spiUp();
@@ -348,7 +400,7 @@ uint8_t lastStatus() { return g_stat; }
 void sleep() {
   spiUp();
   writeReg(0x1B, TOF_SLEEP);
-  g_asleep = true;
+  g_asleep = true; g_resting = false; g_restConvOff = false;
   // NCS held HIGH through deep sleep: a floating CS + SCLK could clock in a frame and wake the chip.
   // (A 10 k pull-up on NCS at the shield does the same in hardware.)
   digitalWrite(SONAR_PIN_CS, HIGH);
@@ -509,6 +561,8 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   if (!g_ok) return false;
   const uint32_t t_start = micros();
   if (g_asleep) { wake(); delay(SONAR_WAKE_MS); }
+  const bool rested = restExit() || g_restedPending; g_restedPending = false;   // D206; D209: or ended just before by restWake()
+  info.rested = rested ? 1 : 0;
   const float sound = 1350.0f + p[P_SOUND];
   const uint8_t cycles = focus ? p[P_CYCLES_FOCUS] : p[P_PULSE_CYCLES];
   // D134: the bursts of one ping are averaged (power) in focus too (was: focus = 1 burst). Averaging does not raise the echo
@@ -590,7 +644,11 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
     }
   }
   info.nfreq = nf;
-  if (p[P_VMODE] == 2 && !g_extFallback && !g_listenOnly && !g_boostHold) {   // D163 (a listen-only capture has no transmit to see)
+  if (rested && !g_listenOnly) {   // D207 guard (b): no transmit seen after a rest = it did not come back in time
+    if (info.t0_ok) g_restMiss = 0;
+    else if (++g_restMiss >= 3) restTrip("no transmit seen on 3 pings after a rest");
+  }
+  if (p[P_VMODE] == 2 && !g_extFallback && !g_listenOnly && !g_boostHold && !(rested && !info.t0_ok)) {   // D163 (a listen-only capture has no transmit to see; D207: nor a miss right after a rest)
     if (info.t0_ok) g_extMiss = 0;
     else if (++g_extMiss >= 8) { g_extFallback = true; Serial.println(F("SONAR: no transmit seen in external-VDRV mode (vmode 2): using the internal regulator on this board")); }
   }
@@ -685,6 +743,11 @@ void setBoostGate(bool) {}
 void setBoostWholePing(bool) {}
 void setBoostLeadUs(uint16_t) {}
 void setBoostHold(bool) {}
+void setIdleRest(bool) {}
+bool idleRest() { return false; }
+uint8_t idleRestState() { return 0; }
+void rest(bool) {}
+void restWake() {}
 uint32_t lastBurstHz() { return 0; }
 void getCalibration(uint16_t pts[17]) { for (int i = 0; i < 17; i++) pts[i] = (uint16_t)(i * 256); }
 }

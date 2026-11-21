@@ -208,6 +208,7 @@ volatile bool sonarCtrlEver = false;               // any sonar control message 
 static bool g_sonarHwTried = false, g_sonarHwOk = false;
 static bool sonarHwBegin();                        // tuss::begin() once; true = TUSS4470 answers
 volatile bool sonarCtrlSim = false;
+volatile uint8_t sonarCtrlEchoEvery = 4;   // D209: pings per echogram line, as the hub says (its link to the chalet decides)
 volatile uint8_t sonarCtrlFocus = 0;
 volatile bool sonarCtrlPrimary = false;   // D93: this hole is THE focus (not a 'live too' extra): raw echogram lines go out
 // v2 (D42): sonar knobs from the hub's sonar control (the chalet's set), applied by sonarLoop and saved
@@ -258,6 +259,61 @@ static inline esp_err_t nowSend(const uint8_t* mac, const uint8_t* data, size_t 
   return r;
 }
 volatile bool sendSuccess = false;
+// D208 ESP-NOW receive windows (lib/IceMesh/src/rx_window.h). Field sonar builds only: needs the build flags
+// -D ESPNOW_RX_WINDOWS=1 and -D CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=1 (the second makes Arduino's own Wi-Fi start
+// pass sta_disconnected_pm = true; the core 2.0.17 is built without it). Never on a bench build (it runs a hotspot) or
+// a backbone relay. Any doubt = receiver always on, as before.
+#ifndef ESPNOW_RX_WINDOWS
+#define ESPNOW_RX_WINDOWS 0
+#endif
+#if ESPNOW_RX_WINDOWS && defined(CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE) && SONAR_REAL && !SONAR_BENCH
+#include <rx_window.h>
+#define RXWIN_BUILT 1
+static icemesh::rxwin::Guard g_rxGuard;
+static bool g_rxReady = false, g_rxOpen = true;        // open = receiver always on
+static volatile unsigned long g_rxHubHeardMs = 0; static volatile bool g_rxHubHeard = false;
+static unsigned long g_rxHoldUntil = 0;
+static void rxWinSet(bool open) {
+  if (!g_rxReady || open == g_rxOpen) return;
+  g_rxOpen = open;
+  esp_now_set_wake_window(open ? icemesh::rxwin::INTERVAL_MS : icemesh::rxwin::WINDOW_MS);   // window >= interval = always on
+}
+static void rxWinBegin() {   // after esp_now_init()
+  const esp_err_t a = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  const esp_err_t b = esp_wifi_set_connectionless_wake_interval(icemesh::rxwin::INTERVAL_MS);
+  const esp_err_t c = esp_now_set_wake_window(icemesh::rxwin::INTERVAL_MS);   // starts always-on; the loop narrows it once the sonar streams
+  g_rxReady = a == ESP_OK && b == ESP_OK && c == ESP_OK; g_rxOpen = true;
+  if (esp_reset_reason() != ESP_RST_DEEPSLEEP) Serial.printf("ESP-NOW receive windows: %s (%u of every %u ms while the sonar streams)\n", g_rxReady ? "ready" : "NOT available, receiver always on",
+                                                    (unsigned)icemesh::rxwin::WINDOW_MS, (unsigned)icemesh::rxwin::INTERVAL_MS);
+}
+static void rxWinHold(uint32_t ms) {   // receiver fully on from now for ms (an answer is expected, or a ping runs)
+  const unsigned long until = millis() + ms;
+  if ((long)(until - g_rxHoldUntil) > 0 || !g_rxHoldUntil) g_rxHoldUntil = until ? until : 1;
+  rxWinSet(true);
+}
+static void rxWinHeard() { g_rxHubHeardMs = millis(); g_rxHubHeard = true; }   // from the receive callback (Wi-Fi task): flags only
+static void rxWinLoop() {
+  if (!g_rxReady) return;
+  if (g_rxHubHeard) { g_rxHubHeard = false; g_rxGuard.heard(g_rxHubHeardMs); }
+  const bool was = g_rxGuard.open;
+  const bool guardOpen = g_rxGuard.update(millis(), sonarSimOn && !ebRelayOn);
+  if (g_rxGuard.open && !was) Serial.printf("ESP-NOW receive windows: hub not heard for %lu s, receiver always on%s\n", (unsigned long)(icemesh::rxwin::Guard::HEARD_TIMEOUT_MS / 1000UL), g_rxGuard.latched() ? " until the next boot" : "");
+  const bool hold = g_rxHoldUntil && (long)(millis() - g_rxHoldUntil) < 0;
+  if (!hold) g_rxHoldUntil = 0;
+  rxWinSet(guardOpen || hold);
+}
+static uint8_t rxWinState() { return !g_rxReady ? 0 : (g_rxGuard.latched() ? 3 : (g_rxOpen ? 2 : 1)); }   // 0 not available, 1 windows, 2 open now, 3 latched open
+#else
+#define RXWIN_BUILT 0
+#if ESPNOW_RX_WINDOWS && SONAR_REAL && !SONAR_BENCH
+#warning "ESPNOW_RX_WINDOWS needs -D CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=1 in the same env: receive windows left out"
+#endif
+static void rxWinBegin() {}
+static void rxWinHold(uint32_t) {}
+static void rxWinHeard() {}
+static void rxWinLoop() {}
+static uint8_t rxWinState() { return 0; }
+#endif
 volatile uint8_t g_ucFails = 0;   // D79 (E7): unicast failures in a row (sonar frames to a hub that went away)
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -557,6 +613,7 @@ void setup() {
 void loop() {
   static unsigned long lastUptimeUpdate = 0;
   packnvs::tick();   // D205
+  rxWinLoop();       // D208
   #if SONAR_SIM_ALLOWED
   sonarLoop();
   #endif
@@ -564,11 +621,10 @@ void loop() {
   simApplyCmd();
   armApplyCmd();
 
-  // Update uptime every second
-  if (millis() - lastUptimeUpdate >= 1000) {
-    totalUptimeSec++;
-    lastUptimeUpdate = millis();
-  }
+  // D206: no per-second count here. totalUptimeSec holds the earlier wakes and every message adds millis() / 1000 for
+  // this one (sendStatus / sendAlert, sim trips): counting the seconds here as well made an awake tip-up (sonar hole,
+  // relay) report its uptime running at about twice real time.
+  (void)lastUptimeUpdate;
 
   // Check reed switch
   bool currentReed = readReedSwitch();
@@ -739,6 +795,7 @@ void setupEspNow() {
 
   esp_now_register_send_cb(onEspNowSent);
   esp_now_register_recv_cb(onEspNowRecv);
+  rxWinBegin();   // D208
 
   esp_now_peer_info_t peerInfo = {};
   memcpy(peerInfo.peer_addr, ESPNOW_BROADCAST, 6);
@@ -965,6 +1022,7 @@ void sendStatus(uint8_t msgType) {
     DEBUG_PRINTLN(F("ESP-NOW not ready"));
     return;
   }
+  rxWinHold(600);   // D208: the hub answers a status at once (commands, sonar control): hear it
   
   // Increment sequence for every message
   messageSeq++;
@@ -1001,6 +1059,7 @@ void sendAlert() {
     DEBUG_PRINTLN(F("ESP-NOW not ready"));
     return;
   }
+  rxWinHold(1200);   // D208: the ACK
 
   // BUG FIX #6: When silenced, send STATUS instead of ALERT
   // This ensures gateway knows about FISH_ON flag (for fish_on_time tracking)
@@ -1058,6 +1117,7 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   uint8_t msgType = data[2];
 
   if (netId != NETWORK_ID) return;
+  if (msgType == MSG_ACK || msgType == MSG_SONAR_CTRL || msgType == MSG_DEV_CMD) rxWinHeard();   // D208: the hub is there
 
   // BUG FIX #4: Handle ACK messages from gateway
   // This allows the sensor to exit the 30-second wait loop early and save battery
@@ -1124,6 +1184,10 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   // v2 device command for this node (backbone relay on/off)
   if (msgType == MSG_DEV_CMD && len >= (int)sizeof(DevCmdMessage)) {
     const DevCmdMessage* c = (const DevCmdMessage*)data;
+    {   // D208: the hub sends each command as a burst of copies (80 ms): act on the first one only
+      static uint8_t lc = 0, lv = 0; static unsigned long lt = 0;
+      if (c->target == NODE_ID) { const unsigned long now = millis(); if (lt && c->cmd == lc && c->value == lv && now - lt < 600UL) return; lc = c->cmd; lv = c->value; lt = now ? now : 1; }
+    }
     if (c->target == NODE_ID && c->cmd == DEVCMD_RELAY) devCmdRelay = c->value ? 1 : 0;
     if (c->target == NODE_ID && c->cmd == DEVCMD_SIM) devCmdSim = c->value;
     if (c->target == NODE_ID && c->cmd == DEVCMD_BAIT) devCmdBait = c->value;
@@ -1135,7 +1199,8 @@ void onEspNowRecv(const uint8_t* mac, const uint8_t* data, int len) {
   // v2 sonar control from the hub (test mode switch + FOCUS node)
   if (msgType == MSG_SONAR_CTRL && len >= (int)offsetof(SonarCtrlMessage, focus_extra)) {   // D81: the extras are optional (a hub on older firmware sends 2 B less)
     const SonarCtrlMessage* c = (const SonarCtrlMessage*)data;
-    const bool extras = len >= (int)sizeof(SonarCtrlMessage);
+    const bool extras = len >= (int)offsetof(SonarCtrlMessage, echo_every);   // D209: not sizeof: the message grew by one optional byte
+    { const uint8_t ev = len >= (int)sizeof(SonarCtrlMessage) ? c->echo_every : 0; sonarCtrlEchoEvery = (ev == 1 || ev == 2) ? ev : 4; }   // D209
     // D81 (5.4): up to three holes stream at once; this node only needs to know whether it is one of them
     sonarCtrlFocus = (c->focus_node == NODE_ID || (extras && (c->focus_extra[0] == NODE_ID || c->focus_extra[1] == NODE_ID))) ? NODE_ID : c->focus_node;
     sonarCtrlPrimary = c->focus_node == NODE_ID;
@@ -1688,11 +1753,11 @@ static void recInfo() {
   for (char* c = name; *c; c++) if (*c == ' ' || *c == '=') *c = '_';   // key=value parsing: no spaces
   char buf[512];
   int k = snprintf(buf, sizeof(buf), "INFO %lu build=%s_%s node=%d name=%s adc_hz=%lu adc_clk_hz=%lu adc_meas_hz=%lu bin_m=0.025 bins=%d freqs=%lu,%lu,%lu "
-                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d vbat_mv=%u pack_s=%lu heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
+                   "mv_per_db=%.1f adc_fs_mv=%.0f pins=sck%d,miso%d,mosi%d,cs%d,io1_%d,io2_%d,vout%d,o4_%d boost_pin=%d boost_gate=%d idle_rest=%d rx_win=%u vbat_mv=%u pack_s=%lu heap=%lu heap_min=%lu reset=%s boot=%lu cal=",
                    millis(), __DATE__, __TIME__, NODE_ID, name, (unsigned long)(tuss::clockHz() ? tuss::clockHz() : SONAR_ADC_HZ), (unsigned long)tuss::clockHz(), (unsigned long)tuss::measuredHz(), icemesh::sonar::BINS,
                    (unsigned long)SONAR_FREQ_HZ_0, (unsigned long)SONAR_FREQ_HZ_1, (unsigned long)SONAR_FREQ_HZ_2,
                    (double)SONAR_MV_PER_DB, (double)SONAR_ADC_FS_MV, SONAR_PIN_SCK, SONAR_PIN_MISO, SONAR_PIN_MOSI, SONAR_PIN_CS,
-                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), batteryMv, (unsigned long)packnvs::clk().seconds(), (unsigned long)ESP.getFreeHeap(),
+                   SONAR_PIN_IO1, SONAR_PIN_IO2, SONAR_PIN_VOUT, SONAR_PIN_O4, SONAR_PIN_BOOST, (int)(SONAR_BOOST_GATE != 0), (int)tuss::idleRestState(), (unsigned)rxWinState(), batteryMv, (unsigned long)packnvs::clk().seconds(), (unsigned long)ESP.getFreeHeap(),
                    (unsigned long)ESP.getMinFreeHeap(), resetReasonName(g_rstWhy), (unsigned long)g_rstBoots);   // D199
   for (int i = 0; i < 17 && k > 0 && k < (int)sizeof(buf) - 8; i++) k += snprintf(buf + k, sizeof(buf) - k, i ? ",%u" : "%u", cal[i]);
   recLine(buf);
@@ -1718,9 +1783,9 @@ void sonarRecord(const uint8_t codes[icemesh::sonar::sp::NFREQ][icemesh::sonar::
 static void recPingX(const tuss::PingInfo& pi, const icemesh::sonar::SonarProc::Out& o) {
   if (!sonarRecAny()) return;
   char buf[640];
-  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u bst=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
+  int k = snprintf(buf, sizeof(buf), "PINGX %lu adc_hz=%lu clk_ok=%u nolimit=%u t0_ok=%u fault=%u vdrv_ok=%u bst=%u rest=%u us=%lu rf_wait_n=%lu rf_busy=%lu bottom=%.3f bot_snr=%.1f nf=%.1f "
                    "ring=%.3f ring_alarm=%u hard=%u tracks=%u spikes=%u long=%u",
-                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, pi.burst_state, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
+                   millis(), (unsigned long)pi.adc_hz, pi.clk_ok, pi.nolimit, pi.t0_ok, pi.fault, pi.vdrv_ready, pi.burst_state, pi.rested, (unsigned long)pi.us, (unsigned long)g_rfWaitN,
                    (unsigned long)g_rfBusyAtPing, (double)o.bottom, (double)o.bottom_snr, (double)o.nf, (double)o.ring_m,
                    o.ring_alarm ? 1 : 0, o.hard, o.n, o.spikes, o.long_echoes);
   for (uint8_t i = 0; i < o.n && k > 0 && k < (int)sizeof(buf) - 40; i++)
@@ -1936,6 +2001,10 @@ String sonarCommand(const String& in, bool fromWeb) {
     return "Noted";
   } else if (w == "RAW") {
     sonarRawAsk = true; r = "RAW capture after the next ping";
+  } else if (w == "REST") {   // D206: idle rest on / off (RAM only), for a bench comparison
+    String a = rest; a.toUpperCase();
+    if (a == "ON" || a == "OFF") { tuss::setIdleRest(a == "ON"); String t = "NOTE " + String(millis()) + " idle rest " + (a == "ON" ? "ON" : "off"); recLine(t.c_str(), true); }
+    r = String("Idle rest ") + (tuss::idleRest() ? "ON: chip in standby and converter off between idle pings" : (tuss::idleRestState() == 2 ? "OFF, switched off by a guard (brown-out or no transmit after a rest)" : "off")) + " (REST ON | OFF)";
   } else if (w == "INFO") {
     recInfo(); if (sonarKnobsPtr) recKnobs(*sonarKnobsPtr); r = "INFO sent";
   } else if (w == "KNOBS?") {
@@ -2172,10 +2241,12 @@ void sonarLoop() {
       if (!joinHold && ++tick_n >= tpp) {
         tick_n = 0;
         tuss::PingInfo pi;
+        rxWinHold(260);   // D208: no receiver on / off switching inside the capture (a ping is ~130 ms, + the idle-rest restart)
         radioQuietForPing();
         while (bench::active() && millis() - bench::lastServedMs() < 15) yield();   // let the page's reply leave the radio first
         if (tuss::ping(knobs, focus == NODE_ID, codes, pi)) {
           src.echo_on = sonarCtrlPrimary;   // D93
+          src.echo_every = sonarCtrlEchoEvery;   // D209: was always 4 on a tip-up, even with ESP-NOW all the way to the chalet
           n = src.process(codes, pi.nfreq, pi.rot_f, 0.25f * tpp, focus == NODE_ID, out, 5);
           bottommem::tick(src.proc.hasBottom(), (float)src.proc.lockedBottom());   // D116
           nodeTuneOnPing(src.lastProc());   // D141
@@ -2195,6 +2266,7 @@ void sonarLoop() {
             sonarStatAsk = false; lastBench = millis();
             sonarBenchLine(pi, src.lastProc());
           }
+          if (tpp >= 3 && !g_nodeTuner.active() && !sonarRawAsk) tuss::rest(tpp * 250UL <= SONAR_REST_MAX_GAP_MS);   // D206 / D207: idle rate: chip standby; converter off too when the gap is short enough
         }
       }
     }

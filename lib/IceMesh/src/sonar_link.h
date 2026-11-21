@@ -16,7 +16,8 @@ namespace sonar {
 
 class SonarOutbox {
  public:
-  enum { CAP = 12, MAX_AGE_FRAMES = 4 };   // a block older than ~4 s is stale for the display (est.)
+  enum { CAP = 20, MAX_AGE_FRAMES = 4 };   // D209: 12 -> 20 (3 streamed holes at 1 s frames evicted the repeats: no loss protection where frames are long)
+  // MAX_AGE: a block older than ~4 s is stale for the display (est.)
   uint16_t max_age_frames = MAX_AGE_FRAMES;   // D81 (5.1): set by the hub from the frame length (4 s)
   // D48: no ACK on sonar blocks, so a DATA or BASE block goes out a second time in the NEXT frame when the
   // slot has room left after everything new (the chalet drops duplicate pings). Through a relay at 20 %
@@ -79,15 +80,23 @@ class SonarOutbox {
   // (DATA, BASE) when repeats is on, else freed at its first send.
   uint16_t fillPass(tdma::PacketWriter& w, uint8_t type, bool with_repeats, uint16_t frame, uint8_t p) {
     uint16_t added = 0;
+    // D209: DATA blocks of one hole leave in order. Before, a block too big for the room left was skipped and a newer,
+    // smaller one of the same hole went first: the store then threw the older block away as late (a second of
+    // waterfall lost although it was sent twice). Now the hole waits for the next packet; other types still skip.
+    uint8_t held[CAP]; uint8_t n_held = 0;
     for (;;) {
       int best = -1;
       for (uint8_t i = 0; i < CAP; i++) {
         const Item& it = items_[i];
-        if (!it.used || it.type != type || it.len > w.freeForValue()) continue;
+        if (!it.used || it.type != type) continue;
+        if (type != BT_DATA && it.len > w.freeForValue()) continue;
         if (it.sends[p] > 0 && (!with_repeats || it.last[p] == frame)) continue;
+        bool blocked = false; for (uint8_t k = 0; k < n_held; k++) if (held[k] == it.node) blocked = true;
+        if (blocked) continue;
         if (best < 0 || it.order < items_[best].order) best = i;
       }
       if (best < 0) break;
+      if (type == BT_DATA && items_[best].len > w.freeForValue()) { if (n_held < CAP) held[n_held++] = items_[best].node; continue; }
       Item& it = items_[best];
       if (!w.add(tdma::SEC_SONAR, it.data, it.len)) break;
       added = static_cast<uint16_t>(added + it.len + 2);
@@ -143,7 +152,8 @@ struct NodeSonar {
   uint8_t bg_mask;          // segments received for bg_ver
   uint8_t nf_neg;            // noise floor -dB, from the last DATA block
   uint16_t act_bits;         // fish present in the last 16 DATA pings (activity when streaming)
-  uint8_t old_run;           // consecutive 'old' pings/summaries: a run means the node restarted
+  uint8_t old_run;           // consecutive 'old' pings: a run means the node restarted
+  uint8_t old_base;          // D209: the same for summaries (BASE), counted apart
   uint8_t bg[BINS];
 };
 
@@ -193,8 +203,8 @@ class SonarStore : public SonarSink {
         Summary s;
         if (!decodeSummary(blk, len, s)) { blocks_bad++; return; }
         if (ns->has_sum && s.ping == ns->sum.ping) { ns->hub = hub; ns->frame = frame; old_pings++; return; }   // the same BASE again (repeat / relay): heard, not new
-        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && ++ns->old_run < 2) { old_pings++; return; }
-        ns->old_run = 0;
+        if (ns->has_sum && isOld(s.ping, ns->sum.ping) && ++ns->old_base < 2) { old_pings++; return; }   // D209: its own counter (it shared old_run with DATA: a stale BASE repeat right after a DATA repeat replaced the newer summary)
+        ns->old_base = 0;
         ns->sum = s; ns->has_sum = true;
         record(ns, frame, true);
         break;
@@ -206,7 +216,7 @@ class SonarStore : public SonarSink {
         for (uint8_t i = 0; i < d.n; i++) {
           const Ping& p = d.pings[i];
           if (ns->has_ping && isOld(p.index, ns->last_ping) && ++ns->old_run < RESTART_RUN) { old_pings++; continue; }   // duplicate (relay) or late
-          ns->old_run = 0;
+          ns->old_run = 0; ns->old_base = 0;   // D209: fresh pings between two stale summaries: those are repeats, not a restart
           ns->last_ping = p.index; ns->has_ping = true;
           StoredPing& sp = ring_[head_];
           sp.seq = ++seq_; sp.node = node; sp.p = p; sp.nf_neg = d.nf_neg; sp.hard = d.hard; sp.n_info = 0;
@@ -297,7 +307,7 @@ class SonarStore : public SonarSink {
     const int16_t d = seqDiff(idx, last);
     return d <= 0 && d > -static_cast<int16_t>(RESTART_GAP);
   }
-  enum { RESTART_GAP = 256, RESTART_RUN = 8 };   // a duplicate block is 1-15 pings; 8+ old pings in a row = restart
+  enum { RESTART_GAP = 256, RESTART_RUN = 48 };   // D209: 8 -> 48. Two repeated 4-ping blocks in a row (frames of 1.5 s or more, or a relay copy) are 8 old pings: the 8th was stored again as a 'restart'. 3 full blocks + 1 now
 
   void record(NodeSonar* ns, uint16_t frame, bool always) {
     const uint8_t i = static_cast<uint8_t>(ns - nodes_);

@@ -120,6 +120,21 @@
                                        // fractional dither), ~5.6 samples per 2.5 cm bin. The depth maths uses the rate
                                        // read back from the clock registers (clockHz()), not this constant (D58)
 #endif
+#ifndef SONAR_IDLE_REST
+#define SONAR_IDLE_REST 1          // D207: on by default (D206: 0). -D SONAR_IDLE_REST=0 or REST OFF = never rest
+#endif
+#define SONAR_REST_MAX_GAP_MS 1500 // D207: converter off only when the next ping is at most this far (rail ~9 V at 1.5 s, est.; VPWR min 5 V)
+// D208 restart after a rest. The XL6009 has no soft start: switched straight on it refills the 100 uF at its 4 A limit and
+// pulls the pack down hard (simulated: a cold, part-used pack of 0.9 ohm dips to ~1.4 V at the converter for some ms). So
+// the enable pin is first pulsed, ON_US of every ON_US + OFF_US, for SOFT_PULSES periods (60 ms): simulated dip 3.0 V
+// instead of 1.4 V, rail back within the 60 ms. Then enable stays high and SONAR_REST_SETTLE_MS pass before the burst:
+// if the chip ignores such short enables, that wait alone covers a plain restart (simulated 5-21 ms, worst pack).
+// tools/sim_boost_restart.py. Simulation, not a measurement.
+#define SONAR_REST_SOFT_PULSES 120
+#define SONAR_REST_SOFT_ON_US 100
+#define SONAR_REST_SOFT_OFF_US 400
+#define SONAR_REST_SETTLE_MS 40
+#define SONAR_REST_EXIT_MS 5       // D206: standby -> listening before the first burst (datasheet: "very quickly", no figure; est.)
 #define SONAR_CHARGE_MS       1        // settle before each burst; the real VDRV refill is the VDRV_READY wait in capture()
 // Drive voltage: knob "vdrv" (volts). VDRV_CTRL (reg 0x16) bits 3:0 = VDRV - 5 V, 5-20 V (datasheet), charged
 // from VPWR (MT3608): keep VPWR > VDRV + 0.3 V (datasheet). Default 20 V (chip max, the reference tests ran
@@ -148,6 +163,7 @@ struct PingInfo {
   uint16_t raw_max;       // largest raw ADC value of the capture (clipping check, 4095 = clipped)
   uint32_t us;            // time the ping took
   uint8_t fault;          // DEV_STAT bits after the burst: 0x04 wrong pulse count, 0x02 driver stuck (clock lost)
+  uint8_t rested;         // D207: 1 = this ping followed an idle rest (chip out of standby, converter restarted)
   uint8_t t0_ok;          // 1 = time zero from the leakage, 0 = SONAR_T0_FALLBACK used (no leakage seen)
   uint32_t adc_hz;        // D58: delivered sample rate of the last capture, measured between full DMA buffers
                           // (~0.1 %). Below clockHz() by more than 0.3 % = the ADC lost samples (conversion-limit
@@ -215,6 +231,20 @@ void setBoostGate(bool on);
 void setBoostWholePing(bool on);
 void setBoostLeadUs(uint16_t us);
 void setBoostHold(bool on);
+// D206 idle rest (battery): between two pings that are far apart (idle rate, 1 ping/s) the chip goes to STANDBY (IVDD 1.5 mA
+// against 11.5 mA listening, datasheet 6.5) and, with the enable wire, the converter is switched off (its feedback divider
+// burns ~0.15 W while it runs). ping() undoes both and waits SONAR_BOOST_SETTLE_MS (converter) or SONAR_REST_EXIT_MS (chip
+// alone) before the first burst. rest() does nothing unless setIdleRest(true) (default: build flag SONAR_IDLE_REST, 0).
+// D207: on by default, with three guards. (a) A brown-out reset switches it off and remembers it (NVS "sonartune" / "rb")
+// until REST ON: the converter has no soft start, so each restart pulls a current-limited gulp from the
+// pack. (b) Three rested pings in a row without transmit leakage (t0_ok 0) switch it off the same way, and such pings
+// do not count towards the D163 fallback. (c) rest(false) = chip standby only: the caller passes true only when the
+// next ping is at most SONAR_REST_MAX_GAP_MS away. PingInfo.rested marks the pings that followed a rest (PINGX rest=).
+void setIdleRest(bool on);   // REST ON also forgets a trip
+bool idleRest();
+uint8_t idleRestState();     // 0 off, 1 on, 2 switched off by a guard (brown-out / no transmit after a rest)
+void rest(bool converterToo = true);
+void restWake();             // D209: end a rest now (up to 100 ms), so the caller can time the ping itself against its radio
 uint32_t lastBurstHz();                                   // burst frequency of the last ping's 200 kHz row (what was really sent)
 // Calibration: 17-point ADC curve (raw 0, 256, ... 4096 -> corrected), kept in NVS "sonarcal".
 void setCalibration(const uint16_t pts[17]);

@@ -47,6 +47,7 @@
 
 #include "config.h"
 #include "messages.h"
+#include <rx_window.h>   // D208
 #include <rx_ring.h>
 #include "mesh_radio.h"
 #include "screens.h"
@@ -531,6 +532,12 @@ inline esp_err_t nowSend(const uint8_t* mac, const uint8_t* data, size_t len) {
   const esp_err_t r = esp_now_send(mac, data, len);
   if (r == ESP_OK) g_nowQueued++;
   return r;
+}
+// D208: a frame meant for the tip-ups goes out COPIES times, SPACING_MS apart (80 ms in all, from loop() only): a sonar
+// tip-up with receive windows hears 35 ms of every 100, and one copy always lands inside (lib/IceMesh/src/rx_window.h,
+// host-tested). The tip-ups act on the first copy and ignore the rest. Tip-ups without windows hear the first one.
+inline void nowSendTipup(const uint8_t* data, size_t len) {
+  for (uint8_t k = 0; k < icemesh::rxwin::COPIES; k++) { if (k) delay(icemesh::rxwin::SPACING_MS); nowSend(ESPNOW_BROADCAST, data, len); }
 }
 uint8_t hubHoleSim(uint8_t node);
 bool hubSimTripped(uint8_t node);

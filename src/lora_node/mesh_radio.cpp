@@ -1094,6 +1094,20 @@ void meshSetTransport(uint8_t tr) {
   g_cfg_transport = tr;
 }
 
+// D209: pings per echogram line of the focus hole. ESP-NOW backbone: every ping (D107). LoRa: the outbox keeps one
+// pending line per hole, so one line per frame is the most it can carry: 2 lines/s when the frame is 500 ms and this
+// hub's turn carries 340 B/s or more (one hub at SF9 has 360; measured need at 2 lines/s on lake-like recordings: about
+// 160 B/s + repeats), else 1 line/s as before. A line then holds 2 pings instead of 4 (less averaging per line).
+uint8_t meshEchoEvery() {
+  if (g_chalet || g_hub == nullptr) return 4;
+  Lock l;
+  if (g_pol.ebPreferred()) return 1;
+  const int idx = g_hub->ownSlotIndex();
+  if (!g_hub->have_plan || idx < 0) return 4;
+  const uint32_t frame_ms = (uint32_t)g_hub->plan.frame_10ms * 10UL;
+  if (frame_ms == 0 || frame_ms > 500UL) return 4;
+  return (uint32_t)g_hub->plan.slots[idx].allowance * 1000UL / frame_ms >= 340UL ? 2 : 4;
+}
 bool meshFastEcho() {   // D107: the hub sends a raw echogram line every ping while it is on the ESP-NOW backbone
   if (g_chalet || g_hub == nullptr) return false;
   Lock l;
@@ -1288,7 +1302,9 @@ void meshEbTick() {
     const bool stream = g_pol.ebPreferred() && g_hub->sonar.count() > 0;
     if (gap < 1000UL && !((g_eb_kick || stream) && gap >= 250UL)) return;
     g_eb_kick = false;
-    g_eb_last_ms = now;
+    // D209: the 250 ms stream cadence keeps its phase (was: restarted at "now", so every late loop pass added up: 3.98
+    // packets for 4 lines a second, a line replaced in the outbox now and then). Resynchronised after a real gap.
+    g_eb_last_ms = (stream && gap >= 250UL && gap < 400UL) ? g_eb_last_ms + 250UL : now;
     uint8_t flags = static_cast<uint8_t>((g_eb_relay ? HF_EB_RELAY : 0) | HF_EB_PATH);
     if (g_silence_req_frames > 0) { flags |= g_silence_req; g_silence_req_frames = g_silence_req_frames - 1; }
     n = g_hub->buildHubFree(pl, sizeof(pl), flags, g_battery_mv, static_cast<uint16_t>(now / 60000UL), g_hub->frameNow());

@@ -212,7 +212,8 @@ static const uint8_t ESPNOW_BROADCAST[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 #ifndef SONAR_BENCH
 #define SONAR_BENCH         0           // 1 = bucket test: a BENCH line on Serial every 2 s (env hub_sonar_bench)
 #endif
-#define SONAR_PING_FOCUS_EST_US 90000UL   // est.: focus ping = avg 1, 3 captures
+#define SONAR_PING_FOCUS_EST_US 130000UL  // D209: 90 -> 130 ms. A focus ping has averaged 4 bursts since D134 and takes 113 ms (PINGX us= on the
+                                          // 14 Nov logs): the hub's own LoRa transmit could start inside its last burst
 #define SONAR_PING_EST_US   160000UL    // est.: one ping = up to 6 captures x ~21 ms + settle + jitter (3 freqs, avg 2); the capture is pushed
                                         // to the next tick when a LoRa transmit is planned inside this window
 #define SONAR_RF_GUARD_US   2000UL      // quiet time after the last transmit before a capture (as the WROOM, D54)

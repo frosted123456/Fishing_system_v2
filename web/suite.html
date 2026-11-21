@@ -934,7 +934,7 @@ function lpPlay() {
   Object.keys(LP.nodes).forEach(k => {
     const st = LP.nodes[k], q = st.queue || []; if (!q.length) return;
     if (q.length > 40) q.splice(0, q.length - 12);
-    let n = 1 + Math.floor(q.length / 8);
+    let n = 1 + Math.floor(q.length / 4);   // D209, as the Sonar tab
     while (n-- && q.length) { const p = q.shift(); const b = p[2] < 2047 ? p[2] / 100 : null; st.recs.push({ b, hard: p[5], t: p[3].map(y => ({ slot: y[0], d: y[1] / 100, s: y[2] / 31 })) }); }
     if (st.recs.length > 240) st.recs.splice(0, st.recs.length - 240);
     moved = true;
@@ -1471,11 +1471,11 @@ const visible = () => window.suiteTab === 'sonar';
 setInterval(() => {
   if (!focus || !playing || !queue.length || !visible()) return;
   if (queue.length > 40) queue.splice(0, queue.length - 12);
-  let n = 1 + Math.floor(queue.length / 8);
+  let n = 1 + Math.floor(queue.length / 4);   // D209: was / 8: 4-7 pings stayed queued for good (1.2-1.5 s behind the chalet; about 0.75 s now)
   while (n-- && queue.length) addPing(queue.shift());
   render();
 }, 250);
-setInterval(() => { if (visible() && !document.hidden) loadPings(); }, 700);
+setInterval(() => { if (visible() && !document.hidden) loadPings(); }, 350);   // D209: 700 -> 350 ms (a request is skipped while one is open)
 setInterval(() => { if (visible() && !document.hidden) loadList(); }, 2000);   // v2: only while the Sonar tab is shown
 let rz = null;
 new ResizeObserver(() => { cancelAnimationFrame(rz); rz = requestAnimationFrame(() => { if (recs.length && visible()) render(); }); }).observe(document.body);

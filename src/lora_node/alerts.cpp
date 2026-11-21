@@ -99,7 +99,7 @@ void sendSilenceSyncEspNow() {
   espMsg.silence_state = alertsSilenced ? 1 : 0;
   espMsg.timestamp = millis() / 1000;
   espMsg.expire_time = alertsSilenced ? (silenceExpireTime / 1000) : 0;
-  nowSend(ESPNOW_BROADCAST, (uint8_t*)&espMsg, sizeof(espMsg));
+  nowSendTipup((uint8_t*)&espMsg, sizeof(espMsg));   // D208
   DEBUG_PRINTLN("ESP-NOW: Silence sync sent");
 }
 
