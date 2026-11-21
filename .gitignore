@@ -30,11 +30,12 @@ tools/sonar_log.py
 tools/proto_reference.js
 # 3D model (STEP, build123d): kept on the PC, not on GitHub
 Model/
-# board designs: only the latest one is on GitHub (Frank, 2026-11-21); older versions stay on the PC
-hardware/*
-!hardware/sonar_pod_v0.9/
-hardware/sonar_pod_v0.9/_to_delete/
-hardware/sonar_pod_v0.9/*.kicad_prl
-hardware/sonar_pod_v0.9/.history/
-!hardware/sonar_pod_v0.9/*.md
+# board designs: every version on GitHub (Frank, 2026-11-21); leftovers, KiCad local settings and local history stay on the PC
+hardware/_to_delete*
+hardware/*/_to_delete/
+hardware/*/.history/
+hardware/**/*.kicad_prl
+hardware/**/*-backups/
+hardware/**/*.bak
+!hardware/**/*.md
 _to_delete/

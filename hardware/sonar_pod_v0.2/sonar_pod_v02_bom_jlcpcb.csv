@@ -1,0 +1,37 @@
+Comment,Designator,Footprint,LCSC Part #,MFR part,Note
+BAT 3xL91,J1,JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical,C158012,B2B-XH-A,"JST XH 2p, battery holder"
+AO3401A,Q1,SOT-23,C15127,,P-FET reverse-battery (G=1 S=2 D=3)
+100k,"R1,R6,R12,R13",R_0402_1005Metric,verify-0402,,Q1 gate
+10uF 10V,"C1,C3,C4,C10",C_0805_2012Metric,C15850,,input bulk
+TPS63020DSJR,U2,Texas_DSJ0014A,C15483,,"buck-boost 3.3 V 3 A; EN=VIN, PS/SYNC=GND (power save)"
+1.5uH XFL4020,L2,L_Coilcraft_XxL4020,C150393,XFL4020-152MEB,Coilcraft XFL4020-152ME or equivalent 4x4 1.5uH >4 A
+1M,R2,R_0402_1005Metric,verify-0402,,FB top (0.5 V ref -> 3.28 V)
+180k,R3,R_0402_1005Metric,verify-0402,,FB bottom
+100nF,"C2,C22,C23,C20",C_0402_1005Metric,verify-0402,,VINA bypass (max 0.22 uF)
+10R,R17,R_0402_1005Metric,verify-0402,,VINA RC from VB
+22uF 6.3V,"C5,C6,C7",C_0805_2012Metric,C45783,,VOUT
+MT3608,U3,SOT-23-6,C84817,,"boost 22 V, EN pulled up, head can switch it"
+22uH 4020,L1,L_Sunlord_SWPA4020S,verify,SWPA4020S220MT,"4x4 22 uH, Isat >= 1.0 A (Sunlord SWPA4020S220MT or Coilcraft XFL4020-223)"
+PMEG6010ELR,D1,Nexperia_CFP3_SOD-123W,C179432,,60 V 1 A Schottky (shield_003 part); K=1 A=2
+10uF 50V,"C8,C9",C_1206_3216Metric,C13585,,boost out
+360k,R4,R_0402_1005Metric,verify-0402,,FB top: 0.6*(1+360/10) = 22.2 V
+10k,"R5,R15,R10,R16",R_0402_1005Metric,verify-0402,,FB bottom
+SMF24A,D2,D_SMF,verify,SMF24A,TVS 24 V standoff VBOOST (K=1) to GND (A=2)
+TUSS4470TRTJR,U1,QFN-20-1EP_4x4mm_P0.5mm_EP2.5x2.5mm_ThermalVias,C1855776,,ultrasonic driver + log-amp receiver
+10R,R7,R_0805_2012Metric,verify,,"RPWR (datasheet 8-1), 0805"
+100nF 50V,C11,C_0603_1608Metric,C14663,,CPWR1 at pin 20
+2.2uF 50V,C12,C_0805_2012Metric,verify,,CPWR2 VDRV storage 0805 X7R (shield: 2 uF 40 V 1206)
+10nF,C13,C_0402_1005Metric,verify-0402,,CVDD at pin 10
+1uF,C14,C_0402_1005Metric,verify-0402,,VDD bulk
+200R 1206,R8,R_1206_3216Metric,C25361,,RINP (1/4 W)
+330pF 50V,C15,C_0402_1005Metric,verify-0402,,CINP
+22nF,C16,C_0402_1005Metric,verify-0402,,CINN 200 kHz (1/(2*pi*150*f/4))
+3.3nF,C17,C_0402_1005Metric,verify-0402,,CFLT 200 kHz (25/(2*pi*6250*f))
+600R@100MHz,FB1,L_0603_1608Metric,C1017,BLM18PG601SN1D,SGND-GND ferrite (datasheet layout 10.1)
+SMF24CA,D3,D_SMF,verify,SMF24CA,bidirectional TVS across the transducer
+100R,R11,R_0402_1005Metric,verify-0402,,VOUT series for the cable
+1nF,"C21,C24",C_0402_1005Metric,verify-0402,,VOUT cable filter
+75k,R14,R_0402_1005Metric,verify-0402,,VPWR x10/85 (shield_003)
+XDCR,J2,JST_XH_B5B-XH-A_1x05_P2.50mm_Vertical,C144401,B5B-XH-A,"transducer A, B, shield; NTC, NTC gnd"
+HALL,J3,JST_XH_B3B-XH-A_1x03_P2.50mm_Vertical,C144394,B3B-XH-A,US1881 on the arm
+HEAD,J4,JST_PHD_B16B-PHDSS_2x08_P2.00mm_Vertical,verify,B16B-PHDSS,"to the ESP32 in the head, 16 wires, 2 x 8 at 2.0 mm (PHD)"
