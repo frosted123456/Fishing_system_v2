@@ -1,0 +1,6 @@
+(version 1)
+# R50 (DNP 0805 damping resistor) sits across XA: its own pads may be closer than the 1.0 mm HV margin.
+# 0.6 mm = IPC-2221 B2 external uncoated for 101-150 V; the 0805 is rated 150 V working (peak here ~110 V).
+(rule "R50 across XA"
+  (constraint clearance (min 0.6mm))
+  (condition "A.NetClass == 'HV' && B.Type == 'Pad' && B.intersectsCourtyard('R50')"))
