@@ -99,6 +99,25 @@
                                 // the sonar runs, LOW in sleep() -> no boost quiescent in sleep; not gated during a ping
                                 // there (SONAR_BOOST_GATE stays 0: VPWR feeds the TUSS4470 regulator, D53 vmode 0)
 #endif
+// D210, pod board v1.0 (hardware/sonar_pod_v1.0). Both default to -1 = not on this board: nothing changes.
+// SONAR_PIN_VDRV_EXT (IO10 there): HIGH = the board's switch (Q3) feeds the VDRV pin from the 33.9 V rail = the 33 V drive.
+//   The driver raises it while the knob vmode is 2 (external VDRV) and lowers it otherwise, in a rest and in sleep. Before
+//   it goes high the chip's own regulator charges VDRV to 20 V (SONAR_VDRV_EXT_PRE_MS), so the switch only tops up 13 V.
+// SONAR_PIN_XFMR_ID (IO11 there): strap R59 to GND = transformer board. Read once in begin(). The board type then sets
+//   the drive mode whatever the knob says (the knob is shared by every hole): strap = drive 1 and never the 30 V feed
+//   (it would sit on the FET gates; the board also blocks it: R56 not fitted there); no strap = drive 0.
+#ifndef SONAR_PIN_VDRV_EXT
+#define SONAR_PIN_VDRV_EXT -1
+#endif
+#ifndef SONAR_PIN_XFMR_ID
+#define SONAR_PIN_XFMR_ID -1
+#endif
+#ifndef SONAR_VDRV_EXT_PRE_MS
+#define SONAR_VDRV_EXT_PRE_MS 8       // 2.2 uF to 20 V at the regulator's 20 mA setting = 2.2 ms (est.), margin x3
+#endif
+#ifndef SONAR_VDRV_EXT_SETTLE_MS
+#define SONAR_VDRV_EXT_SETTLE_MS 3    // 20 -> 33 V through Q3 + D10 (est. < 0.5 ms) and the rail's recovery
+#endif
 // D170: converter gated off while a ping listens (its switching noise is what the receiver hears at -79 dB, D168).
 // Needs SONAR_PIN_BOOST wired to the converter's enable pin (XL6009: pin 2, LOW = off, floating / HIGH = on). 0 = never
 // gated (default); 1 = gated on every ping (set by SONAR_EN_WIRE). The noise scan gates it for its gated steps whatever
@@ -191,6 +210,7 @@ struct ShieldTest {
 void shieldTest(ShieldTest& t);
 bool pinsSwapped();
 
+bool xfmrBoard();                                         // D210: pod v1.0 strap read in begin() (false without the pin)
 bool begin();                                             // false = TUSS4470 not answering (SPI). D70: a crossed
                                                           // MISO / MOSI is detected and worked around (pinsSwapped())
 uint32_t clockHz();                                       // D58: ADC sample rate from the I2S clock registers (ESP32) or the

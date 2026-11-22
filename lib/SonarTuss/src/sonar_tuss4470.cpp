@@ -233,6 +233,18 @@ struct BoostGate {
 };
 uint32_t lastBurstHz() { return g_lastHz; }
 // D206 idle rest, see the header
+// D210: pod board v1.0. The 30 V feed to VDRV (Q3) and the board-type strap, see the header. No pins = no effect.
+static bool g_xfmrBoard = false, g_extOn = false;
+bool xfmrBoard() { return g_xfmrBoard; }
+static void extVdrv(bool on) {
+  if (SONAR_PIN_VDRV_EXT < 0 || on == g_extOn) return;
+  if (on) {
+    writeReg(0x16, 0x1F); delay(SONAR_VDRV_EXT_PRE_MS);   // own regulator, 20 V, 20 mA charge: VDRV to 20 V first
+    writeReg(0x16, 0x20);                                 // regulator Hi-Z (external VDRV), THEN the switch
+    digitalWrite(SONAR_PIN_VDRV_EXT, HIGH); delay(SONAR_VDRV_EXT_SETTLE_MS);
+  } else digitalWrite(SONAR_PIN_VDRV_EXT, LOW);           // the caller re-enables the regulator (ping) or sleeps
+  g_extOn = on;
+}
 static const uint8_t TOF_STANDBY = 0x40;
 bool idleRest() { return g_idleRest; }
 uint8_t idleRestState() { return g_idleRest ? 1 : (g_restTrip ? 2 : 0); }
@@ -269,7 +281,7 @@ void rest(bool converterToo) {
   if (!g_idleRest || !g_ok || g_asleep || g_resting || g_listenOnly) return;
   writeReg(0x1B, TOF_STANDBY);
   g_restConvOff = converterToo && SONAR_PIN_BOOST >= 0 && !g_boostHold;
-  if (g_restConvOff) digitalWrite(SONAR_PIN_BOOST, LOW);
+  if (g_restConvOff) { extVdrv(false); digitalWrite(SONAR_PIN_BOOST, LOW); }   // D210: the 30 V switch opens before the rail goes
   g_resting = true;
 }
 
@@ -300,6 +312,13 @@ bool begin() {
   }
   pinMode(SONAR_PIN_IO1, OUTPUT); digitalWrite(SONAR_PIN_IO1, HIGH);   // as the shield reference firmware: IO1 high, burst on IO2
   if (SONAR_PIN_BOOST >= 0) { pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, HIGH); }
+  if (SONAR_PIN_VDRV_EXT >= 0) { pinMode(SONAR_PIN_VDRV_EXT, OUTPUT); digitalWrite(SONAR_PIN_VDRV_EXT, LOW); g_extOn = false; }   // D210: boots in the 20 V state
+  if (SONAR_PIN_XFMR_ID >= 0) {   // D210: strap R59 to GND = transformer board; read once, then no pull-up current
+    pinMode(SONAR_PIN_XFMR_ID, INPUT_PULLUP); delay(2);
+    g_xfmrBoard = digitalRead(SONAR_PIN_XFMR_ID) == LOW;
+    pinMode(SONAR_PIN_XFMR_ID, INPUT);
+    Serial.println(g_xfmrBoard ? F("SONAR: transformer board (strap on): drive 1, 30 V feed locked off") : F("SONAR: direct-drive board (no strap): drive 0"));
+  }
   spiUp();
   wake();                                                              // out of sleep (if a deep sleep left it there)
   // presence check: DEVICE_ID (0x1D) reads 0xB9 (datasheet 7.6.1.12); a floating or stuck MISO gives 0x00 / 0xFF
@@ -405,6 +424,7 @@ void sleep() {
   // (A 10 k pull-up on NCS at the shield does the same in hardware.)
   digitalWrite(SONAR_PIN_CS, HIGH);
   gpio_hold_en((gpio_num_t)SONAR_PIN_CS);
+  extVdrv(false);               // D210: 30 V switch open through deep sleep (R57 keeps it open with the pin floating)
   if (SONAR_PIN_BOOST >= 0) {   // pod board v0.3: boost off through deep sleep (EN held low)
     pinMode(SONAR_PIN_BOOST, OUTPUT); digitalWrite(SONAR_PIN_BOOST, LOW);
     gpio_hold_en((gpio_num_t)SONAR_PIN_BOOST);
@@ -581,13 +601,18 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   // supply) and then runs on the internal regulator (as vmode 0) until the knob leaves 2 or the next boot.
   if (p[P_VMODE] != 2) { g_extMiss = 0; g_extFallback = false; }
   else if (g_extFallback) g_vmode = 0;
+  // D210: a board that knows its type (pod v1.0 strap) sets the drive mode itself; a transformer board never takes the
+  // 30 V feed (VDRV is the FET gate voltage there). Boards without the strap pin follow the knob as before.
+  const uint8_t drv = SONAR_PIN_XFMR_ID >= 0 ? (g_xfmrBoard ? 1 : 0) : p[P_DRIVE];
+  if (g_xfmrBoard && g_vmode == 2) g_vmode = 0;
   // D108: vmode 2 = EXTERNAL VDRV (bit 5 VDRV_HI_Z: the internal 5-20 V regulator off, the H-bridge runs from whatever
   // is wired to the VDRV pin, 5-36 V, datasheet 6.3 / 7.3.1 / 9.2). Only with the external supply fitted: VDRV <= VPWR + 0.3 V
   // at all times (abs. max), VPWR > VDRV + 0.3 V recommended, caps on both rails rated for it. Without it VDRV just sags.
   // D118: transformer mode (knob drive 1): OUTA / OUTB only drive the gates of the two external FETs, so the regulated
   // VDRV is the GATE voltage: capped at 10 V whatever vdrv says (logic-level FETs, VGS max typically 20 V; datasheet 6.3:
   // pre-driver VDRV 5-15 V). vmode 2 (external VDRV, pod v0.8 R49 + 12 V zener D8) is the datasheet's documented way.
-  const uint8_t vlev = (uint8_t)(p[P_DRIVE] == 1 && p[P_VDRV] > 10 ? 10 : p[P_VDRV]);   // D119: 10 V gate drive (VBOOST 13 V in the transformer build)
+  const uint8_t vlev = (uint8_t)(drv == 1 && p[P_VDRV] > 10 ? 10 : p[P_VDRV]);   // D119: 10 V gate drive (VBOOST 13 V in the transformer build)
+  extVdrv(g_vmode == 2);   // D210: no-op without the pin
   writeReg(0x16, (uint8_t)(g_vmode == 2 ? 0x20 : ((g_vmode == 1 ? 0x50 : 0x00) | ((vlev - 5) & 0x0F))));
   // DEV_CTRL_2 (0x13): bits 1:0 LNA_GAIN codes are NOT in order (0 = 15, 1 = 10, 2 = 20, 3 = 12.5 V/V,
   // datasheet): knob 0..3 = 10, 12.5, 15, 20 V/V. Bit 2 VOUT_SCALE_SEL = 0 (3.3 V map), both log-amp stages on.
@@ -601,7 +626,7 @@ bool ping(const Params& p, bool focus, uint8_t codes[sp::NFREQ][BINS], PingInfo&
   // cycles from an idle-low line = `cycles` falling edges = cycles - 1 falling-to-falling pulses (datasheet fig. 7-1); Open
   // Echo writes 15 for its 16 cycles. If PINGX shows bst=1, build with -D SONAR_BURST_COUNT_ADJ=1 and compare echo and nf.
   const uint8_t bcount = (uint8_t)(cycles > SONAR_BURST_COUNT_ADJ ? cycles - SONAR_BURST_COUNT_ADJ : 1);
-  writeReg(0x1A, (uint8_t)((bcount & 0x3F) | (p[P_DRIVE] == 1 ? 0x40 : 0x00)));   // D118: bit 6 PRE_DRIVER_MODE
+  writeReg(0x1A, (uint8_t)((bcount & 0x3F) | (drv == 1 ? 0x40 : 0x00)));   // D118: bit 6 PRE_DRIVER_MODE
   g_blind_ticks = (uint32_t)(2.0f * p[P_DEADZONE_DM] * 0.1f / sound * 80e6f);
   static uint8_t rot = 0;
   const uint8_t mode = p[P_FREQ_MODE];
@@ -671,6 +696,7 @@ void shieldTest(ShieldTest& t) {
   if (!g_ok) return;                             // the ping needs the drivers begin() installs
   const bool was_asleep = g_asleep;              // an idle shield goes back to sleep after the test
   wake();
+  extVdrv(false);         // D210: the wiring check runs on the chip's own regulator
   writeReg(0x16, 0x0F);   // VDRV 20 V regulator on (vmode 0), as begin()
   delay(30);              // VDRV charges C12 (est.)
   readReg(0x1C);
@@ -720,6 +746,7 @@ void shieldTest(ShieldTest& t) {
 #else   // SONAR_REAL == 0: nothing (the fake sonar runs instead)
 namespace tuss {
 bool begin() { return false; }
+bool xfmrBoard() { return false; }
 uint32_t clockHz() { return 0; }
 uint32_t measuredHz() { return 0; }
 void sleep() {}
