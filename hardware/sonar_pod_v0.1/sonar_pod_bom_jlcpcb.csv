@@ -1,0 +1,37 @@
+Comment,Designator,Footprint,LCSC Part #,MFR part,Note
+BAT 3xL91,J1,JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical,C158012,B2B-XH-A,"JST XH 2p, battery holder"
+AO3401A,Q1,SOT-23,C15127,,P-FET reverse-battery (G=1 S=2 D=3)
+100k,"R1,R6,R12,R13",R_0603_1608Metric,C25803,,Q1 gate
+10uF 10V,"C1,C3,C4,C10",C_0805_2012Metric,C15850,,input bulk
+TPS63020DSJR,U2,Texas_DSJ0014A,C15483,,"buck-boost 3.3 V 3 A; EN=VIN, PS/SYNC=GND (power save)"
+1.5uH XFL4020,L2,L_Coilcraft_XxL4020,C150393,XFL4020-152MEB,Coilcraft XFL4020-152ME or equivalent 4x4 1.5uH >4 A
+1M,R2,R_0603_1608Metric,C22935,,FB top (0.5 V ref -> 3.28 V)
+180k,R3,R_0603_1608Metric,C25270,,FB bottom
+100nF,"C2,C22,C23,C20",C_0603_1608Metric,C14663,,VINA bypass (max 0.22 uF)
+10R,R17,R_0603_1608Metric,C25092,,VINA RC from VB
+22uF 6.3V,"C5,C6,C7",C_0805_2012Metric,C45783,,VOUT
+MT3608,U3,SOT-23-6,C84817,,"boost 22 V, EN pulled up, head can switch it"
+22uH NR6028,L1,L_Taiyo-Yuden_NR-60xx,C16218,NR6028T220M,6x6 22 uH >1.5 A sat (same family as shield_003)
+PMEG6010ELR,D1,Nexperia_CFP3_SOD-123W,C179432,,60 V 1 A Schottky (shield_003 part); K=1 A=2
+10uF 50V,"C8,C9",C_1206_3216Metric,C13585,,boost out
+360k,R4,R_0603_1608Metric,C23245,,FB top: 0.6*(1+360/10) = 22.2 V
+10k,"R5,R15,R10,R16",R_0603_1608Metric,C25804,,FB bottom
+SMAJ24A,D2,D_SMA,C129537,SMAJ24A,TVS 24 V standoff VBOOST (K=1) to GND (A=2)
+TUSS4470TRTJR,U1,QFN-20-1EP_4x4mm_P0.5mm_EP2.5x2.5mm_ThermalVias,C1855776,,ultrasonic driver + log-amp receiver
+10R,R7,R_1206_3216Metric,C17903,,RPWR (datasheet 8-1)
+100nF 50V,C11,C_0603_1608Metric,C14663,,CPWR1 at pin 20
+2.2uF 50V,C12,C_1206_3216Metric,C50254,,CPWR2 VDRV storage (shield: 2 uF 40 V)
+10nF,C13,C_0603_1608Metric,C57112,,CVDD at pin 10
+1uF,C14,C_0603_1608Metric,C15849,,VDD bulk
+200R 1206,R8,R_1206_3216Metric,C25361,,RINP (1/4 W)
+330pF 50V,C15,C_0603_1608Metric,C1664,,CINP
+22nF,C16,C_0603_1608Metric,C21122,,CINN 200 kHz (1/(2*pi*150*f/4))
+3.3nF,C17,C_0603_1608Metric,C1613,,CFLT 200 kHz (25/(2*pi*6250*f))
+600R@100MHz,FB1,L_0603_1608Metric,C1017,BLM18PG601SN1D,SGND-GND ferrite (datasheet layout 10.1)
+SMAJ24CA,D3,D_SMA,C129545,SMAJ24CA,bidirectional TVS across the transducer
+100R,R11,R_0603_1608Metric,C22775,,VOUT series for the cable
+1nF,"C21,C24",C_0603_1608Metric,C1588,,VOUT cable filter
+75k,R14,R_0603_1608Metric,C23242,,VPWR x10/85 (shield_003)
+XDCR,J2,JST_XH_B5B-XH-A_1x05_P2.50mm_Vertical,C144401,B5B-XH-A,"transducer A, B, shield; NTC, NTC gnd"
+HALL,J3,JST_XH_B3B-XH-A_1x03_P2.50mm_Vertical,C144394,B3B-XH-A,US1881 on the arm
+HEAD,J4,JST_PH_B16B-PH-K_1x16_P2.00mm_Vertical,C131338,B16B-PH-K-S,"to the ESP32 in the head, 16 wires"

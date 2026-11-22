@@ -1,0 +1,430 @@
+{
+ "summary": {
+  "lora_ant": {
+   "length": 4.9,
+   "widths": [
+    0.25
+   ],
+   "layers": [
+    "F"
+   ]
+  },
+  "usb": {
+   "dp": 18.7,
+   "dn": 22.8
+  }
+ },
+ "victims": [
+  {
+   "net": "INP",
+   "desc": "TUSS receive input (uV echoes)",
+   "length": 3.8,
+   "vias": 0,
+   "layers": "F",
+   "no_ref_mm": 3.8,
+   "no_ref_pct": 100
+  },
+  {
+   "net": "INN",
+   "desc": "TUSS receive ref",
+   "length": 4.5,
+   "vias": 0,
+   "layers": "F",
+   "no_ref_mm": 4.5,
+   "no_ref_pct": 100
+  },
+  {
+   "net": "RINP",
+   "desc": "receive path R->C",
+   "length": 5.9,
+   "vias": 0,
+   "layers": "F",
+   "no_ref_mm": 4.2,
+   "no_ref_pct": 71
+  },
+  {
+   "net": "FLT",
+   "desc": "TUSS filter cap",
+   "length": 4.0,
+   "vias": 0,
+   "layers": "F",
+   "no_ref_mm": 4.0,
+   "no_ref_pct": 100
+  },
+  {
+   "net": "VOUT_I",
+   "desc": "TUSS analog envelope out (to ADC)",
+   "length": 63.1,
+   "vias": 6,
+   "layers": "B/F",
+   "no_ref_mm": 38.3,
+   "no_ref_pct": 61
+  },
+  {
+   "net": "VOUT",
+   "desc": "envelope after RC, ESP32 ADC GPIO36",
+   "length": 55.4,
+   "vias": 2,
+   "layers": "B/F",
+   "no_ref_mm": 27.3,
+   "no_ref_pct": 49
+  },
+  {
+   "net": "VBAT_ADC",
+   "desc": "battery ADC",
+   "length": 50.2,
+   "vias": 4,
+   "layers": "B/F",
+   "no_ref_mm": 37.7,
+   "no_ref_pct": 75
+  },
+  {
+   "net": "VPWR_ADC",
+   "desc": "boost ADC",
+   "length": 68.9,
+   "vias": 2,
+   "layers": "B/F",
+   "no_ref_mm": 31.1,
+   "no_ref_pct": 45
+  },
+  {
+   "net": "NTC_ADC",
+   "desc": "water temp ADC",
+   "length": 81.5,
+   "vias": 2,
+   "layers": "B/F",
+   "no_ref_mm": 35.1,
+   "no_ref_pct": 43
+  },
+  {
+   "net": "HALL",
+   "desc": "hall sensor (digital)",
+   "length": 97.3,
+   "vias": 2,
+   "layers": "B/F",
+   "no_ref_mm": 65.0,
+   "no_ref_pct": 67
+  },
+  {
+   "net": "FB_B",
+   "desc": "MT3608 feedback (high impedance)",
+   "length": 4.2,
+   "vias": 0,
+   "layers": "F",
+   "no_ref_mm": 4.2,
+   "no_ref_pct": 100
+  },
+  {
+   "net": "FB_T",
+   "desc": "TPS63020 feedback (high impedance)",
+   "length": 16.5,
+   "vias": 2,
+   "layers": "B/F",
+   "no_ref_mm": 16.5,
+   "no_ref_pct": 100
+  },
+  {
+   "net": "VINA",
+   "desc": "TPS63020 analog supply",
+   "length": 7.2,
+   "vias": 0,
+   "layers": "F",
+   "no_ref_mm": 5.5,
+   "no_ref_pct": 77
+  },
+  {
+   "net": "SGND",
+   "desc": "sonar analog ground island",
+   "length": 53.9,
+   "vias": 3,
+   "layers": "B/F",
+   "no_ref_mm": 29.3,
+   "no_ref_pct": 54
+  }
+ ],
+ "pairs": [
+  {
+   "victim": "SGND",
+   "aggressor": "XB",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 21.2,
+   "min_gap_mm": 0.24,
+   "sev": 3
+  },
+  {
+   "victim": "HALL",
+   "aggressor": "SCLK",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 24.5,
+   "min_gap_mm": 0.31,
+   "sev": 2
+  },
+  {
+   "victim": "VPWR_ADC",
+   "aggressor": "XB",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 6.6,
+   "min_gap_mm": 0.7,
+   "sev": 3
+  },
+  {
+   "victim": "HALL",
+   "aggressor": "SDI",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 9.8,
+   "min_gap_mm": 0.2,
+   "sev": 1
+  },
+  {
+   "victim": "SGND",
+   "aggressor": "XA",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 3.2,
+   "min_gap_mm": 0.43,
+   "sev": 3
+  },
+  {
+   "victim": "RINP",
+   "aggressor": "XA",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 2.9,
+   "min_gap_mm": 0.52,
+   "sev": 3
+  },
+  {
+   "victim": "VPWR_ADC",
+   "aggressor": "VBOOST",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 8.3,
+   "min_gap_mm": 0.72,
+   "sev": 1
+  },
+  {
+   "victim": "VBAT_ADC",
+   "aggressor": "SDO",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 6.5,
+   "min_gap_mm": 0.71,
+   "sev": 1
+  },
+  {
+   "victim": "HALL",
+   "aggressor": "SW_B",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 1.5,
+   "min_gap_mm": 0.73,
+   "sev": 3
+  },
+  {
+   "victim": "HALL",
+   "aggressor": "TXD0",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 4.0,
+   "min_gap_mm": 0.83,
+   "sev": 1
+  },
+  {
+   "victim": "VOUT_I",
+   "aggressor": "XA",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 1.3,
+   "min_gap_mm": 0.37,
+   "sev": 3
+  },
+  {
+   "victim": "VBAT_ADC",
+   "aggressor": "RXD0",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 3.5,
+   "min_gap_mm": 0.44,
+   "sev": 1
+  },
+  {
+   "victim": "FB_B",
+   "aggressor": "VBOOST",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 3.1,
+   "min_gap_mm": 0.52,
+   "sev": 1
+  },
+  {
+   "victim": "FLT",
+   "aggressor": "XB",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 0.7,
+   "min_gap_mm": 0.75,
+   "sev": 3
+  },
+  {
+   "victim": "VOUT_I",
+   "aggressor": "VBOOST",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 2.0,
+   "min_gap_mm": 0.55,
+   "sev": 1
+  },
+  {
+   "victim": "VOUT",
+   "aggressor": "VDRV",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 2.0,
+   "min_gap_mm": 0.54,
+   "sev": 1
+  },
+  {
+   "victim": "FLT",
+   "aggressor": "VDRV",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 1.8,
+   "min_gap_mm": 0.25,
+   "sev": 1
+  },
+  {
+   "victim": "VOUT_I",
+   "aggressor": "XB",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 0.5,
+   "min_gap_mm": 0.88,
+   "sev": 3
+  },
+  {
+   "victim": "NTC_ADC",
+   "aggressor": "SW_B",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 0.4,
+   "min_gap_mm": 0.64,
+   "sev": 3
+  },
+  {
+   "victim": "VBAT_ADC",
+   "aggressor": "SDI",
+   "layer": "F",
+   "gap": 1.0,
+   "parallel_mm": 0.4,
+   "min_gap_mm": 0.75,
+   "sev": 1
+  },
+  {
+   "victim": "VPWR_ADC",
+   "aggressor": "RXD0",
+   "layer": "B",
+   "gap": 1.0,
+   "parallel_mm": 0.3,
+   "min_gap_mm": 0.76,
+   "sev": 1
+  }
+ ],
+ "inductor": [
+  {
+   "victim": "FB_B",
+   "part": "U3",
+   "length": 1.2
+  },
+  {
+   "victim": "FB_T",
+   "part": "L2",
+   "length": 2.5
+  },
+  {
+   "victim": "FB_T",
+   "part": "U2",
+   "length": 1.3
+  },
+  {
+   "victim": "VINA",
+   "part": "U2",
+   "length": 1.6
+  }
+ ],
+ "loops": [
+  {
+   "name": "MT3608 hot loop SW->D1->C9->GND->U3",
+   "area_mm2": 11.7,
+   "segs": "U3.SW-D1 7.5, D1-C9 14.6, C9.GND-U3.GND 15.8 mm",
+   "sw_node_copper_mm": 21.8
+  },
+  {
+   "name": "TPS63020 input caps",
+   "nearest": "C3 1.8 mm, C4 4.9 mm, C1 7.5 mm"
+  },
+  {
+   "name": "TPS63020 output caps",
+   "nearest": "C6 2.2 mm, C5 2.6 mm, C7 4.0 mm"
+  },
+  {
+   "name": "TPS63020 switch nodes",
+   "tl1_mm": 7.7,
+   "tl2_mm": 6.4
+  },
+  {
+   "name": "TUSS4470 VPWR decoupling",
+   "nearest": "C11 4.1 mm"
+  },
+  {
+   "name": "TUSS4470 VDRV decoupling",
+   "nearest": "C12 3.4 mm"
+  },
+  {
+   "name": "TUSS4470 3V3 decoupling",
+   "nearest": "C13 2.0 mm, C14 3.8 mm"
+  }
+ ],
+ "gnd": {
+  "gnd_vias": 5,
+  "gnd_tht_pads": 8,
+  "F_fill_pct": 35,
+  "B_fill_pct": 46,
+  "overlap_pts_far_from_stitch_gt8mm_pct": 44,
+  "weak_islands": [
+   {
+    "layer": "F",
+    "area": 18.7,
+    "at": "(59.6, 29.1)",
+    "connections": 1
+   },
+   {
+    "layer": "F",
+    "area": 7.4,
+    "at": "(55.0, 3.9)",
+    "connections": 0
+   },
+   {
+    "layer": "F",
+    "area": 3.2,
+    "at": "(33.2, 8.8)",
+    "connections": 1
+   },
+   {
+    "layer": "F",
+    "area": 1.7,
+    "at": "(35.7, 14.5)",
+    "connections": 0
+   },
+   {
+    "layer": "F",
+    "area": 1.0,
+    "at": "(20.8, 30.2)",
+    "connections": 1
+   }
+  ]
+ }
+}

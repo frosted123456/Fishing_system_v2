@@ -1,0 +1,8 @@
+# D74: chalet (Heltec V3, 8 MB flash). Same as the default 8 MB table minus the second OTA slot (we flash over
+# USB): app 3.3 MB, map pack storage (LittleFS) 4.8 MB. nvs / otadata / app0 keep their offsets: settings survive.
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x330000,
+spiffs,   data, spiffs,  0x340000,0x4B0000,
+coredump, data, coredump,0x7F0000,0x10000,
